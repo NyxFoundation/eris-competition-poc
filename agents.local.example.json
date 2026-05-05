@@ -1,0 +1,22 @@
+{
+  "agents": [
+    {
+      "id": "noop",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/noop.ts"],
+      "wallet": "AGENT0_PRIVATE_KEY"
+    },
+    {
+      "id": "random",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/random.ts"],
+      "wallet": "AGENT1_PRIVATE_KEY"
+    },
+    {
+      "id": "simple",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/simple-rule.ts"],
+      "wallet": "AGENT2_PRIVATE_KEY"
+    }
+  ]
+}

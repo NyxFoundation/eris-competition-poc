@@ -1,0 +1,24 @@
+{
+  "name": "eris-competition",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "anvil": "dotenvx run -f .env.local -- tsx src/cli/anvil.ts",
+    "sim": "dotenvx run -f .env.local -- tsx src/cli/sim.ts",
+    "agent:noop": "tsx examples/agents/noop.ts",
+    "agent:random": "tsx examples/agents/random.ts",
+    "agent:simple": "tsx examples/agents/simple-rule.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@dotenvx/dotenvx": "^1.50.1",
+    "viem": "^2.39.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}
