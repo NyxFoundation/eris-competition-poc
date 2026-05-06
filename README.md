@@ -11,18 +11,25 @@ cp agents.local.example.json agents.local.json
 ```
 
 Fill `MAINNET_RPC_URL` and `FORK_BLOCK_NUMBER` in `.env.local`.
+Load it before running commands, or export the same variables in your shell.
 
 ## Run
 
 In one terminal:
 
 ```bash
+set -a
+source .env.local
+set +a
 npm run anvil
 ```
 
 In another terminal:
 
 ```bash
+set -a
+source .env.local
+set +a
 npm run sim
 ```
 
