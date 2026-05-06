@@ -1,6 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import type { Hex } from "viem";
-import { DEFAULT_ANVIL_PRIVATE_KEYS } from "./constants.js";
+import { DEFAULT_ANVIL_PRIVATE_KEYS, MAX_BUNDLE_ACTIONS } from "./constants.js";
 import type { AgentSpec, AgentsFile } from "./types.js";
 
 const SUPPORTED_AGENT_WALLETS = ["AGENT0_PRIVATE_KEY", "AGENT1_PRIVATE_KEY", "AGENT2_PRIVATE_KEY"] as const;
@@ -20,6 +20,10 @@ export type SimConfig = {
   maxPriorityFeeWei: bigint;
   maxAgentWethInWei: bigint;
   maxAgentUsdcInUnits: bigint;
+  maxBundleActions: number;
+  maxLpWethWei: bigint;
+  maxLpUsdcUnits: bigint;
+  maxOpenPositions: number;
   uninformedFlowMaxWethWei: bigint;
   informedFlowMaxWethWei: bigint;
   privateKeys: {
@@ -49,6 +53,10 @@ export function loadConfig(env = process.env): SimConfig {
     maxPriorityFeeWei: bigintEnv(env.MAX_PRIORITY_FEE_WEI, 5_000_000_000n),
     maxAgentWethInWei: bigintEnv(env.MAX_AGENT_WETH_IN_WEI, 1_000_000_000_000_000_000n),
     maxAgentUsdcInUnits: bigintEnv(env.MAX_AGENT_USDC_IN_UNITS, 5_000_000_000n),
+    maxBundleActions: intEnv(env.MAX_BUNDLE_ACTIONS, MAX_BUNDLE_ACTIONS),
+    maxLpWethWei: bigintEnv(env.MAX_LP_WETH_WEI, 1_000_000_000_000_000_000n),
+    maxLpUsdcUnits: bigintEnv(env.MAX_LP_USDC_UNITS, 5_000_000_000n),
+    maxOpenPositions: intEnv(env.MAX_OPEN_POSITIONS, 10),
     uninformedFlowMaxWethWei: bigintEnv(env.UNINFORMED_FLOW_MAX_WETH_WEI, 1_000_000_000_000_000_000n),
     informedFlowMaxWethWei: bigintEnv(env.INFORMED_FLOW_MAX_WETH_WEI, 2_000_000_000_000_000_000n),
     privateKeys: {

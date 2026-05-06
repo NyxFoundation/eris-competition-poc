@@ -2,15 +2,64 @@ import type { Hex } from "viem";
 
 export type TokenSymbol = "WETH" | "USDC";
 
+export type SwapAction = {
+  type: "swap";
+  tokenIn: TokenSymbol;
+  amountIn: string;
+  maxPriorityFeePerGasWei?: string;
+  slippageBps?: number;
+};
+
+export type MintLiquidityAction = {
+  type: "mintLiquidity";
+  tickLower: number;
+  tickUpper: number;
+  amountWethDesired: string;
+  amountUsdcDesired: string;
+  slippageBps?: number;
+  maxPriorityFeePerGasWei?: string;
+};
+
+export type RemoveLiquidityAction = {
+  type: "removeLiquidity";
+  tokenId: string;
+  liquidity: string;
+  amountWethMin?: string;
+  amountUsdcMin?: string;
+  maxPriorityFeePerGasWei?: string;
+};
+
+export type CollectFeesAction = {
+  type: "collectFees";
+  tokenId: string;
+  maxPriorityFeePerGasWei?: string;
+};
+
+export type BundleActionItem = SwapAction | MintLiquidityAction | RemoveLiquidityAction | CollectFeesAction;
+
 export type AgentAction =
   | { type: "noop"; reason?: string }
+  | SwapAction
+  | MintLiquidityAction
+  | RemoveLiquidityAction
+  | CollectFeesAction
   | {
-      type: "swap";
-      tokenIn: TokenSymbol;
-      amountIn: string;
+      type: "bundle";
+      actions: BundleActionItem[];
       maxPriorityFeePerGasWei?: string;
-      slippageBps?: number;
     };
+
+export type LpPositionObservation = {
+  tokenId: string;
+  tickLower: number;
+  tickUpper: number;
+  liquidity: string;
+  tokensOwedWethWei: string;
+  tokensOwedUsdcUnits: string;
+  amountWethWei: string;
+  amountUsdcUnits: string;
+  valueUsdc: number;
+};
 
 export type AgentObservation = {
   kind: "observation";
@@ -21,7 +70,10 @@ export type AgentObservation = {
     pair: "WETH/USDC";
     fee: 500;
     priceUsdcPerWeth: number;
+    tick: number;
+    tickSpacing: number;
   };
+  positions: LpPositionObservation[];
   fairPriceUsdcPerWeth: number;
   balances: {
     ethWei: string;
@@ -45,6 +97,10 @@ export type AgentObservation = {
     defaultPriorityFeePerGasWei: string;
     maxPriorityFeePerGasWei: string;
     defaultSlippageBps: number;
+    maxBundleActions: number;
+    maxLpWethWei: string;
+    maxLpUsdcUnits: string;
+    maxOpenPositions: number;
   };
 };
 
@@ -71,8 +127,10 @@ export type TxIntent = {
   ownerId: string;
   role: WalletRole;
   privateKey: Hex;
-  action: AgentAction;
+  action: BundleActionItem;
   priorityFeeWei: bigint;
+  bundleId?: string;
+  bundleIndex?: number;
 };
 
 export type BalanceSnapshot = {

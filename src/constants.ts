@@ -3,12 +3,15 @@ export const ADDRESSES = {
   usdc: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
   uniswapV3PoolWethUsdc500: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
   swapRouter: "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+  nonfungiblePositionManager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
   quoterV2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
 } as const;
 
 export const WETH_USDC_FEE = 500;
+export const WETH_USDC_TICK_SPACING = 10;
 export const WETH_DECIMALS = 18;
 export const USDC_DECIMALS = 6;
+export const MAX_BUNDLE_ACTIONS = 5;
 
 export const DEFAULT_ANVIL_PRIVATE_KEYS = [
   "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",

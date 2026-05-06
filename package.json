@@ -9,6 +9,8 @@
     "agent:noop": "tsx examples/agents/noop.ts",
     "agent:random": "tsx examples/agents/random.ts",
     "agent:simple": "tsx examples/agents/simple-rule.ts",
+    "agent:lp-mint": "tsx examples/agents/lp-mint.ts",
+    "agent:lp-provider": "tsx examples/agents/lp-provider.ts",
     "check:ordering": "tsx src/cli/checkOrdering.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test test/*.test.ts"

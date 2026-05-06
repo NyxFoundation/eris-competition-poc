@@ -1,5 +1,5 @@
 import { formatUnits } from "viem";
-import type { BalanceSnapshot } from "./types.js";
+import type { BalanceSnapshot, LpPositionObservation } from "./types.js";
 
 export function valueUsdc(snapshot: BalanceSnapshot, fairPriceUsdcPerWeth: number): number {
   const eth = Number(formatUnits(snapshot.ethWei, 18));
@@ -18,4 +18,12 @@ export function balanceToInventory(snapshot: BalanceSnapshot, fairPriceUsdcPerWe
     usdc,
     eth
   };
+}
+
+export function positionsValueUsdc(positions: LpPositionObservation[]): number {
+  return positions.reduce((sum, position) => sum + position.valueUsdc, 0);
+}
+
+export function valueUsdcWithPositions(snapshot: BalanceSnapshot, positions: LpPositionObservation[], fairPriceUsdcPerWeth: number): number {
+  return valueUsdc(snapshot, fairPriceUsdcPerWeth) + positionsValueUsdc(positions);
 }

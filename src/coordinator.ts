@@ -8,10 +8,10 @@ import { AgentProcess } from "./agentProcess.js";
 import { validateAction } from "./action.js";
 import { accountAddress, getBalances, makeClients, mine, sendAndMine, setupWallet, snapshotForLog } from "./chain.js";
 import { RunLogger, safeStringify } from "./logger.js";
-import { balanceToInventory, valueUsdc } from "./pnl.js";
+import { balanceToInventory, positionsValueUsdc, valueUsdc, valueUsdcWithPositions } from "./pnl.js";
 import { nextFairPrice, Rng } from "./rng.js";
 import type { AgentAction, AgentObservation, BalanceSnapshot, SimWallet, TxIntent, WalletRole } from "./types.js";
-import { buildSwapData, getPoolPriceUsdcPerWeth } from "./uniswap.js";
+import { buildLpActionData, buildSwapData, getLpPositions, getPoolPriceUsdcPerWeth, getPoolState } from "./uniswap.js";
 
 type AgentRuntime = {
   id: string;
@@ -33,6 +33,9 @@ type SubmittedTx = {
   ownerId: string;
   role: WalletRole;
   priorityFeeWei: bigint;
+  actionType: string;
+  bundleId?: string;
+  bundleIndex?: number;
 };
 
 type ReceiptResult = {
@@ -84,7 +87,8 @@ export async function runSimulation(): Promise<void> {
     }
 
     for (let round = 1; round <= config.rounds; round++) {
-      const poolPrice = await getPoolPriceUsdcPerWeth(publicClient);
+      const poolState = await getPoolState(publicClient);
+      const poolPrice = poolState.priceUsdcPerWeth;
       fairPrice = nextFairPrice(fairPrice, rng);
       history.push({ round, poolPriceUsdcPerWeth: poolPrice, fairPriceUsdcPerWeth: fairPrice });
 
@@ -93,7 +97,8 @@ export async function runSimulation(): Promise<void> {
       for (const agent of agentRuntimes) {
         const address = accountAddress(agent.privateKey);
         const balances = await getBalances(publicClient, address);
-        const observation = observationFor(runId, round, block.number, poolPrice, fairPrice, balances, history, config);
+        const positions = await getLpPositions(publicClient, address, fairPrice);
+        const observation = observationFor(runId, round, block.number, poolState, fairPrice, balances, positions, history, config);
         logger.event({ type: "observation", agentId: agent.id, observation });
         const action = await agent.process.requestAction(observation, config.agentTimeoutMs);
         const validated = validateAction(action, observation, balances);
@@ -101,14 +106,16 @@ export async function runSimulation(): Promise<void> {
           logger.event({ type: "action_rejected", agentId: agent.id, action, reason: validated.reason });
           continue;
         }
-        logger.event({ type: "action_accepted", agentId: agent.id, action: validated.action, priorityFeeWei: validated.priorityFeeWei });
-        if (validated.action.type === "swap") {
+        logger.event({ type: "action_accepted", agentId: agent.id, action: validated.action, intents: validated.intents });
+        for (const intent of validated.intents) {
           agentIntents.push({
             ownerId: agent.id,
             role: "agent",
             privateKey: agent.privateKey,
-            action: validated.action,
-            priorityFeeWei: validated.priorityFeeWei
+            action: intent.action,
+            priorityFeeWei: intent.priorityFeeWei,
+            bundleId: intent.bundleId,
+            bundleIndex: intent.bundleIndex
           });
         }
       }
@@ -118,9 +125,27 @@ export async function runSimulation(): Promise<void> {
       for (const intent of [...flowIntents, ...agentIntents]) {
         try {
           const hash = await submitIntent(publicClient, walletClient, chain, intent);
-          submitted.push({ hash, ownerId: intent.ownerId, role: intent.role, priorityFeeWei: intent.priorityFeeWei });
+          submitted.push({
+            hash,
+            ownerId: intent.ownerId,
+            role: intent.role,
+            priorityFeeWei: intent.priorityFeeWei,
+            actionType: intent.action.type,
+            bundleId: intent.bundleId,
+            bundleIndex: intent.bundleIndex
+          });
           if (intent.role === "agent") agentMetrics.get(intent.ownerId)!.submittedTxCount++;
-          logger.event({ type: "tx_submitted", round, hash, ownerId: intent.ownerId, role: intent.role, priorityFeeWei: intent.priorityFeeWei });
+          logger.event({
+            type: "tx_submitted",
+            round,
+            hash,
+            ownerId: intent.ownerId,
+            role: intent.role,
+            priorityFeeWei: intent.priorityFeeWei,
+            actionType: intent.action.type,
+            bundleId: intent.bundleId,
+            bundleIndex: intent.bundleIndex
+          });
         } catch (error) {
           logger.event({
             type: "tx_submit_failed",
@@ -128,6 +153,9 @@ export async function runSimulation(): Promise<void> {
             ownerId: intent.ownerId,
             role: intent.role,
             priorityFeeWei: intent.priorityFeeWei,
+            actionType: intent.action.type,
+            bundleId: intent.bundleId,
+            bundleIndex: intent.bundleIndex,
             error: errorMessage(error)
           });
         }
@@ -148,15 +176,22 @@ export async function runSimulation(): Promise<void> {
     const finalFairPrice = history.at(-1)?.fairPriceUsdcPerWeth ?? fairPrice;
     const agents = [];
     for (const agent of agentRuntimes) {
-      const final = await getBalances(publicClient, accountAddress(agent.privateKey));
+      const address = accountAddress(agent.privateKey);
+      const final = await getBalances(publicClient, address);
+      const positions = await getLpPositions(publicClient, address, finalFairPrice);
+      const initialValue = valueUsdc(agent.initial, finalFairPrice);
+      const finalValue = valueUsdcWithPositions(final, positions, finalFairPrice);
       agents.push({
         id: agent.id,
-        address: accountAddress(agent.privateKey),
+        address,
         initial: snapshotForLog(agent.initial),
         final: snapshotForLog(final),
-        initialValueUsdc: valueUsdc(agent.initial, finalFairPrice),
-        finalValueUsdc: valueUsdc(final, finalFairPrice),
-        netPnlUsdc: valueUsdc(final, finalFairPrice) - valueUsdc(agent.initial, finalFairPrice),
+        positions,
+        openLpPositionCount: positions.length,
+        lpValueUsdc: positionsValueUsdc(positions),
+        initialValueUsdc: initialValue,
+        finalValueUsdc: finalValue,
+        netPnlUsdc: finalValue - initialValue,
         ...agentMetricsForSummary(agentMetrics.get(agent.id)!),
         stderrTail: agent.process.getStderr()
       });
@@ -191,9 +226,10 @@ function observationFor(
   runId: string,
   round: number,
   blockNumber: bigint,
-  poolPrice: number,
+  poolState: { priceUsdcPerWeth: number; tick: number; tickSpacing: number },
   fairPrice: number,
   balances: BalanceSnapshot,
+  positions: AgentObservation["positions"],
   history: AgentObservation["history"],
   config: SimConfig
 ): AgentObservation {
@@ -202,7 +238,8 @@ function observationFor(
     runId,
     round,
     blockNumber: blockNumber.toString(),
-    pool: { pair: "WETH/USDC", fee: WETH_USDC_FEE, priceUsdcPerWeth: poolPrice },
+    pool: { pair: "WETH/USDC", fee: WETH_USDC_FEE, priceUsdcPerWeth: poolState.priceUsdcPerWeth, tick: poolState.tick, tickSpacing: poolState.tickSpacing },
+    positions,
     fairPriceUsdcPerWeth: fairPrice,
     balances: {
       ethWei: balances.ethWei.toString(),
@@ -216,7 +253,11 @@ function observationFor(
       maxUsdcInUnits: config.maxAgentUsdcInUnits.toString(),
       defaultPriorityFeePerGasWei: config.defaultPriorityFeeWei.toString(),
       maxPriorityFeePerGasWei: config.maxPriorityFeeWei.toString(),
-      defaultSlippageBps: 50
+      defaultSlippageBps: 50,
+      maxBundleActions: config.maxBundleActions,
+      maxLpWethWei: config.maxLpWethWei.toString(),
+      maxLpUsdcUnits: config.maxLpUsdcUnits.toString(),
+      maxOpenPositions: config.maxOpenPositions
     }
   };
 }
@@ -273,15 +314,17 @@ async function submitIntent(
   chain: ReturnType<typeof makeClients>["chain"],
   intent: TxIntent
 ): Promise<Hex> {
-  if (intent.action.type !== "swap") throw new Error("Cannot submit noop");
   const account = privateKeyToAccount(intent.privateKey);
   const block = await publicClient.getBlock();
   const baseFee = block.baseFeePerGas ?? 0n;
-  const data = await buildSwapData(publicClient, account.address, intent.action, intent.action.slippageBps ?? 50);
+  const data =
+    intent.action.type === "swap"
+      ? await buildSwapData(publicClient, account.address, intent.action, intent.action.slippageBps ?? 50)
+      : await buildLpActionData(publicClient, account.address, intent.action, intent.action.type === "mintLiquidity" ? intent.action.slippageBps ?? 50 : 0);
   return walletClient.sendTransaction({
     account,
     chain,
-    to: ADDRESSES.swapRouter,
+    to: intent.action.type === "swap" ? ADDRESSES.swapRouter : ADDRESSES.nonfungiblePositionManager,
     data,
     maxFeePerGas: baseFee + intent.priorityFeeWei,
     maxPriorityFeePerGas: intent.priorityFeeWei
@@ -316,7 +359,10 @@ async function logReceiptsAndOrdering(
       status: receipt.status,
       gasUsed: receipt.gasUsed,
       effectiveGasPrice: receipt.effectiveGasPrice,
-      gasCostWei
+      gasCostWei,
+      actionType: tx.actionType,
+      bundleId: tx.bundleId,
+      bundleIndex: tx.bundleIndex
     });
   }
   const blockNumber = receipts[0]?.receipt.blockNumber;
@@ -337,7 +383,10 @@ async function logReceiptsAndOrdering(
       priorityFeeWei: metadata.priorityFeeWei,
       status: receipt?.status ?? "unknown",
       ownerId: metadata.ownerId,
-      role: metadata.role
+      role: metadata.role,
+      actionType: metadata.actionType,
+      bundleId: metadata.bundleId,
+      bundleIndex: metadata.bundleIndex
     });
   }
   return results;

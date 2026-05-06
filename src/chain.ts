@@ -104,8 +104,16 @@ export async function setupWallet(
     data: encodeFunctionData({ abi: wethAbi, functionName: "approve", args: [ADDRESSES.swapRouter, maxUint256] })
   });
   await sendAndMine(publicClient, walletClient, chain, privateKey, {
+    to: ADDRESSES.weth,
+    data: encodeFunctionData({ abi: wethAbi, functionName: "approve", args: [ADDRESSES.nonfungiblePositionManager, maxUint256] })
+  });
+  await sendAndMine(publicClient, walletClient, chain, privateKey, {
     to: ADDRESSES.usdc,
     data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [ADDRESSES.swapRouter, maxUint256] })
+  });
+  await sendAndMine(publicClient, walletClient, chain, privateKey, {
+    to: ADDRESSES.usdc,
+    data: encodeFunctionData({ abi: erc20Abi, functionName: "approve", args: [ADDRESSES.nonfungiblePositionManager, maxUint256] })
   });
 }
 

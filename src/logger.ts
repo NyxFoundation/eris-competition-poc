@@ -8,7 +8,7 @@ export class RunLogger {
     this.runDir = join(root, runId);
     mkdirSync(this.runDir, { recursive: true });
     writeFileSync(join(this.runDir, "events.jsonl"), "");
-    writeFileSync(join(this.runDir, "blocks.csv"), "round,blockNumber,txIndex,hash,from,priorityFeeWei,status,ownerId,role\n");
+    writeFileSync(join(this.runDir, "blocks.csv"), "round,blockNumber,txIndex,hash,from,priorityFeeWei,status,ownerId,role,actionType,bundleId,bundleIndex\n");
   }
 
   event(event: Record<string, unknown>): void {
@@ -25,10 +25,13 @@ export class RunLogger {
     status: string;
     ownerId: string;
     role: string;
+    actionType?: string;
+    bundleId?: string;
+    bundleIndex?: number;
   }): void {
     appendFileSync(
       join(this.runDir, "blocks.csv"),
-      `${row.round},${row.blockNumber.toString()},${row.txIndex},${row.hash},${row.from},${row.priorityFeeWei.toString()},${row.status},${row.ownerId},${row.role}\n`
+      `${row.round},${row.blockNumber.toString()},${row.txIndex},${row.hash},${row.from},${row.priorityFeeWei.toString()},${row.status},${row.ownerId},${row.role},${row.actionType ?? ""},${row.bundleId ?? ""},${row.bundleIndex ?? ""}\n`
     );
   }
 

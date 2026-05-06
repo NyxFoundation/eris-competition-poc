@@ -69,7 +69,7 @@ function checkOrdering(rows: BlockRow[]): string[] {
     for (let i = 1; i < blockRows.length; i++) {
       const previous = blockRows[i - 1];
       const current = blockRows[i];
-      if (previous.priorityFeeWei < current.priorityFeeWei) {
+      if (previous.priorityFeeWei < current.priorityFeeWei && previous.ownerId !== current.ownerId) {
         failures.push(
           `priority fee ordering violation in ${key}: txIndex ${previous.txIndex} ${previous.ownerId} ${previous.priorityFeeWei} < txIndex ${current.txIndex} ${current.ownerId} ${current.priorityFeeWei}`
         );
