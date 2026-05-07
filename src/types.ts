@@ -37,6 +37,24 @@ export type CollectFeesAction = {
 
 export type BundleActionItem = SwapAction | MintLiquidityAction | RemoveLiquidityAction | CollectFeesAction;
 
+export type RawTx = {
+  to: string;
+  data: string;
+  value?: string;
+};
+
+export type RawTxAction = {
+  type: "rawTx";
+  tx: RawTx;
+  maxPriorityFeePerGasWei?: string;
+};
+
+export type RawBundleAction = {
+  type: "rawBundle";
+  txs: RawTx[];
+  maxPriorityFeePerGasWei?: string;
+};
+
 export type AgentAction =
   | { type: "noop"; reason?: string }
   | SwapAction
@@ -47,7 +65,9 @@ export type AgentAction =
       type: "bundle";
       actions: BundleActionItem[];
       maxPriorityFeePerGasWei?: string;
-    };
+    }
+  | RawTxAction
+  | RawBundleAction;
 
 export type LpPositionObservation = {
   tokenId: string;
@@ -66,6 +86,7 @@ export type AgentObservation = {
   runId: string;
   round: number;
   blockNumber: string;
+  agentAddress: string;
   pool: {
     pair: "WETH/USDC";
     fee: 500;
@@ -128,6 +149,16 @@ export type TxIntent = {
   role: WalletRole;
   privateKey: Hex;
   action: BundleActionItem;
+  priorityFeeWei: bigint;
+  bundleId?: string;
+  bundleIndex?: number;
+};
+
+export type RawTxIntent = {
+  ownerId: string;
+  role: WalletRole;
+  privateKey: Hex;
+  rawTx: RawTx;
   priorityFeeWei: bigint;
   bundleId?: string;
   bundleIndex?: number;

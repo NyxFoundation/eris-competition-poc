@@ -8,6 +8,7 @@ const observation: AgentObservation = {
   runId: "test",
   round: 1,
   blockNumber: "1",
+  agentAddress: "0x1234567890abcdef1234567890abcdef12345678",
   pool: { pair: "WETH/USDC", fee: 500, priceUsdcPerWeth: 3000, tick: 0, tickSpacing: 10 },
   positions: [
     {
@@ -120,4 +121,85 @@ test("parseAction rejects nested bundle and validateAction rejects oversized bun
     ),
     { ok: false, reason: "bundle action count exceeds configured max" }
   );
+});
+
+test("parseAction accepts rawTx", () => {
+  assert.deepEqual(parseAction({ type: "rawTx", tx: { to: "0xdead", data: "0x1234" } }), {
+    type: "rawTx",
+    tx: { to: "0xdead", data: "0x1234" }
+  });
+});
+
+test("parseAction accepts rawTx with value and priority fee", () => {
+  assert.deepEqual(
+    parseAction({ type: "rawTx", tx: { to: "0xdead", data: "0x1234", value: "1000" }, maxPriorityFeePerGasWei: "15" }),
+    { type: "rawTx", tx: { to: "0xdead", data: "0x1234", value: "1000" }, maxPriorityFeePerGasWei: "15" }
+  );
+});
+
+test("parseAction rejects rawTx with non-hex to or data", () => {
+  assert.throws(() => parseAction({ type: "rawTx", tx: { to: "not-hex", data: "0x1234" } }), /raw tx to must be a hex string/);
+  assert.throws(() => parseAction({ type: "rawTx", tx: { to: "0xdead", data: "not-hex" } }), /raw tx data must be a hex string/);
+});
+
+test("parseAction rejects rawTx without tx object", () => {
+  assert.throws(() => parseAction({ type: "rawTx" }), /rawTx must have a tx object/);
+});
+
+test("parseAction accepts rawBundle", () => {
+  const parsed = parseAction({
+    type: "rawBundle",
+    txs: [
+      { to: "0xdead", data: "0x1234" },
+      { to: "0xbeef", data: "0x5678", value: "100" }
+    ]
+  });
+  assert.equal(parsed.type, "rawBundle");
+  if (parsed.type !== "rawBundle") return;
+  assert.equal(parsed.txs.length, 2);
+  assert.equal(parsed.txs[1].value, "100");
+});
+
+test("parseAction rejects empty rawBundle", () => {
+  assert.throws(() => parseAction({ type: "rawBundle", txs: [] }), /rawBundle txs must not be empty/);
+});
+
+test("validateAction passes rawTx without balance checks", () => {
+  const action = parseAction({ type: "rawTx", tx: { to: "0xdead", data: "0x1234" } });
+  const result = validateAction(action, observation, balances);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.intents.length, 0);
+  assert.equal(result.rawIntents.length, 1);
+  assert.deepEqual(result.rawIntents[0].tx, { to: "0xdead", data: "0x1234" });
+  assert.equal(result.rawIntents[0].priorityFeeWei, 10n);
+});
+
+test("validateAction rejects rawTx with excessive priority fee", () => {
+  const action = parseAction({ type: "rawTx", tx: { to: "0xdead", data: "0x1234" }, maxPriorityFeePerGasWei: "21" });
+  assert.deepEqual(validateAction(action, observation, balances), { ok: false, reason: "priority fee exceeds configured max" });
+});
+
+test("validateAction rejects oversized rawBundle", () => {
+  const txs = Array.from({ length: 6 }, () => ({ to: "0xdead", data: "0x1234" }));
+  const action = parseAction({ type: "rawBundle", txs });
+  assert.deepEqual(validateAction(action, observation, balances), { ok: false, reason: "rawBundle tx count exceeds configured max" });
+});
+
+test("validateAction expands rawBundle intents with bundleId", () => {
+  const action = parseAction({
+    type: "rawBundle",
+    txs: [
+      { to: "0xdead", data: "0x1234" },
+      { to: "0xbeef", data: "0x5678" }
+    ]
+  });
+  const result = validateAction(action, observation, balances);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.rawIntents.length, 2);
+  assert.equal(result.rawIntents[0].bundleIndex, 0);
+  assert.equal(result.rawIntents[1].bundleIndex, 1);
+  assert.ok(result.rawIntents[0].bundleId);
+  assert.equal(result.rawIntents[0].bundleId, result.rawIntents[1].bundleId);
 });

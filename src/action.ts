@@ -1,8 +1,11 @@
-import type { AgentAction, AgentObservation, BalanceSnapshot, BundleActionItem } from "./types.js";
+import type { AgentAction, AgentObservation, BalanceSnapshot, BundleActionItem, RawTx } from "./types.js";
+
+export type ValidatedIntent = { action: BundleActionItem; priorityFeeWei: bigint; bundleId?: string; bundleIndex?: number };
+export type ValidatedRawIntent = { tx: RawTx; priorityFeeWei: bigint; bundleId?: string; bundleIndex?: number };
 
 export type ActionValidation =
-  | { ok: true; action: { type: "noop"; reason?: string }; intents: []; priorityFeeWei: 0n; slippageBps: 0 }
-  | { ok: true; action: AgentAction; intents: Array<{ action: BundleActionItem; priorityFeeWei: bigint; bundleId?: string; bundleIndex?: number }> }
+  | { ok: true; action: { type: "noop"; reason?: string }; intents: []; rawIntents: []; priorityFeeWei: 0n; slippageBps: 0 }
+  | { ok: true; action: AgentAction; intents: ValidatedIntent[]; rawIntents: ValidatedRawIntent[] }
   | { ok: false; reason: string };
 
 const DECIMAL_INTEGER = /^[0-9]+$/;
@@ -14,11 +17,15 @@ export function parseAction(raw: unknown): AgentAction {
     return { type: "noop", reason: typeof obj.reason === "string" ? obj.reason : undefined };
   }
   if (obj.type === "bundle") return parseBundleAction(obj);
+  if (obj.type === "rawTx") return parseRawTxAction(obj);
+  if (obj.type === "rawBundle") return parseRawBundleAction(obj);
   return parseBundleActionItem(obj);
 }
 
 export function validateAction(action: AgentAction, observation: AgentObservation, balances: BalanceSnapshot): ActionValidation {
-  if (action.type === "noop") return { ok: true, action, intents: [], priorityFeeWei: 0n, slippageBps: 0 };
+  if (action.type === "noop") return { ok: true, action, intents: [], rawIntents: [], priorityFeeWei: 0n, slippageBps: 0 };
+  if (action.type === "rawTx") return validateRawTxAction(action, observation);
+  if (action.type === "rawBundle") return validateRawBundleAction(action, observation);
   if (action.type === "bundle") {
     if (action.actions.length === 0) return { ok: false, reason: "bundle actions must not be empty" };
     if (action.actions.length > observation.limits.maxBundleActions) return { ok: false, reason: "bundle action count exceeds configured max" };
@@ -58,7 +65,7 @@ function parseBundleActionItem(obj: Record<string, unknown>): BundleActionItem {
   if (obj.type === "mintLiquidity") return parseMintLiquidityAction(obj);
   if (obj.type === "removeLiquidity") return parseRemoveLiquidityAction(obj);
   if (obj.type === "collectFees") return parseCollectFeesAction(obj);
-  throw new Error("type must be noop, swap, mintLiquidity, removeLiquidity, collectFees, or bundle");
+  throw new Error("type must be noop, swap, mintLiquidity, removeLiquidity, collectFees, bundle, rawTx, or rawBundle");
 }
 
 function parseSwapAction(obj: Record<string, unknown>): BundleActionItem {
@@ -162,7 +169,7 @@ function validateActionItems(
       bundleIndex: bundleId === undefined ? undefined : i
     });
   }
-  return { ok: true, action: original, intents };
+  return { ok: true, action: original, intents, rawIntents: [] };
 }
 
 function validateSingleAction(action: BundleActionItem, observation: AgentObservation, balances: BalanceSnapshot): { ok: true } | { ok: false; reason: string } {
@@ -200,6 +207,60 @@ function validateSingleAction(action: BundleActionItem, observation: AgentObserv
     if (liquidity > BigInt(position.liquidity)) return { ok: false, reason: "liquidity exceeds owned position liquidity" };
   }
   return { ok: true };
+}
+
+const HEX_PATTERN = /^0x[0-9a-fA-F]*$/;
+
+function parseRawTxAction(obj: Record<string, unknown>): AgentAction {
+  if (!obj.tx || typeof obj.tx !== "object") throw new Error("rawTx must have a tx object");
+  const tx = parseRawTx(obj.tx as Record<string, unknown>);
+  const action: Extract<AgentAction, { type: "rawTx" }> = { type: "rawTx", tx };
+  addPriorityFee(action, obj);
+  return action;
+}
+
+function parseRawBundleAction(obj: Record<string, unknown>): AgentAction {
+  if (!Array.isArray(obj.txs)) throw new Error("rawBundle txs must be an array");
+  if (obj.txs.length === 0) throw new Error("rawBundle txs must not be empty");
+  const txs = obj.txs.map((item: unknown, i: number) => {
+    if (!item || typeof item !== "object") throw new Error(`rawBundle txs[${i}] must be an object`);
+    return parseRawTx(item as Record<string, unknown>);
+  });
+  const action: Extract<AgentAction, { type: "rawBundle" }> = { type: "rawBundle", txs };
+  addPriorityFee(action, obj);
+  return action;
+}
+
+function parseRawTx(obj: Record<string, unknown>): RawTx {
+  if (typeof obj.to !== "string" || !HEX_PATTERN.test(obj.to)) throw new Error("raw tx to must be a hex string");
+  if (typeof obj.data !== "string" || !HEX_PATTERN.test(obj.data)) throw new Error("raw tx data must be a hex string");
+  const tx: RawTx = { to: obj.to, data: obj.data };
+  if (obj.value !== undefined) {
+    requireDecimalString(obj.value, "raw tx value");
+    tx.value = obj.value;
+  }
+  return tx;
+}
+
+function validateRawTxAction(action: Extract<AgentAction, { type: "rawTx" }>, observation: AgentObservation): ActionValidation {
+  const priorityFeeWei = BigInt(action.maxPriorityFeePerGasWei ?? observation.limits.defaultPriorityFeePerGasWei);
+  if (priorityFeeWei > BigInt(observation.limits.maxPriorityFeePerGasWei)) {
+    return { ok: false, reason: "priority fee exceeds configured max" };
+  }
+  return { ok: true, action, intents: [], rawIntents: [{ tx: action.tx, priorityFeeWei }] };
+}
+
+function validateRawBundleAction(action: Extract<AgentAction, { type: "rawBundle" }>, observation: AgentObservation): ActionValidation {
+  if (action.txs.length > observation.limits.maxBundleActions) {
+    return { ok: false, reason: "rawBundle tx count exceeds configured max" };
+  }
+  const priorityFeeWei = BigInt(action.maxPriorityFeePerGasWei ?? observation.limits.defaultPriorityFeePerGasWei);
+  if (priorityFeeWei > BigInt(observation.limits.maxPriorityFeePerGasWei)) {
+    return { ok: false, reason: "priority fee exceeds configured max" };
+  }
+  const bundleId = `${observation.runId}:${observation.round}:${hashAction(action)}`;
+  const rawIntents = action.txs.map((tx, i) => ({ tx, priorityFeeWei, bundleId, bundleIndex: i }));
+  return { ok: true, action, intents: [], rawIntents };
 }
 
 function addPriorityFee(action: { maxPriorityFeePerGasWei?: string }, obj: Record<string, unknown>): void {

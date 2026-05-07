@@ -9,13 +9,15 @@ export class AgentProcess {
   private pending: Array<(line: string) => void> = [];
   private stderr = "";
 
-  constructor(readonly spec: AgentSpec) {
+  constructor(readonly spec: AgentSpec, rpcUrl: string, agentAddress: string) {
     this.child = spawn(spec.command, spec.args ?? [], {
       stdio: ["pipe", "pipe", "pipe"],
       env: {
         PATH: process.env.PATH ?? "",
         NODE_ENV: process.env.NODE_ENV ?? "development",
-        ERIS_AGENT_ID: spec.id
+        ERIS_AGENT_ID: spec.id,
+        ERIS_RPC_URL: rpcUrl,
+        ERIS_AGENT_ADDRESS: agentAddress
       }
     });
 
