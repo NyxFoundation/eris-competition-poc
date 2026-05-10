@@ -34,6 +34,7 @@ export type SimConfig = {
   maxLpUsdcUnits: bigint;
   maxOpenPositions: number;
   informedFlowMaxWethWei: bigint;
+  uninformedFlowVolumeMultiplier: number;
   privateKeys: {
     agent0: Hex;
     agent1: Hex;
@@ -70,6 +71,7 @@ export function loadConfig(env = process.env): SimConfig {
     maxLpUsdcUnits: bigintEnv(env.MAX_LP_USDC_UNITS, 5_000_000_000n),
     maxOpenPositions: intEnv(env.MAX_OPEN_POSITIONS, 10),
     informedFlowMaxWethWei: bigintEnv(env.INFORMED_FLOW_MAX_WETH_WEI, 2_000_000_000_000_000_000n),
+    uninformedFlowVolumeMultiplier: floatEnv(env.UNINFORMED_FLOW_VOLUME_MULTIPLIER, 2),
     privateKeys: {
       agent0: hexEnv(env.AGENT0_PRIVATE_KEY, DEFAULT_ANVIL_PRIVATE_KEYS[0]),
       agent1: hexEnv(env.AGENT1_PRIVATE_KEY, DEFAULT_ANVIL_PRIVATE_KEYS[1]),
@@ -192,6 +194,13 @@ function intEnv(value: string | undefined, fallback: number): number {
   if (value === undefined || value === "") return fallback;
   const parsed = Number(value);
   if (!Number.isInteger(parsed)) throw new Error(`Expected integer env value, got ${value}`);
+  return parsed;
+}
+
+function floatEnv(value: string | undefined, fallback: number): number {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`Expected numeric env value, got ${value}`);
   return parsed;
 }
 

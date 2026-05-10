@@ -320,7 +320,7 @@ async function buildFlowIntents(
   let runningUninformedWeth = uninformedBalances.wethWei;
   let runningUninformedUsdc = uninformedBalances.usdcUnits;
   const orderCount = rng.poisson(simParams.poissonLambda);
-  const meanUsdcPerOrder = simParams.lognormalMeanY * (poolPrice / 100);
+  const meanUsdcPerOrder = simParams.lognormalMeanY * (poolPrice / 100) * config.uninformedFlowVolumeMultiplier;
   for (let i = 0; i < orderCount; i++) {
     const tokenIn: "WETH" | "USDC" = rng.bool() ? "WETH" : "USDC";
     const sizeUsdc = rng.lognormal(meanUsdcPerOrder, simParams.lognormalSigma);
