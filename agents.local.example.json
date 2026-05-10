@@ -4,19 +4,22 @@
       "id": "noop",
       "command": "node",
       "args": ["--import", "tsx", "examples/agents/noop.ts"],
-      "wallet": "AGENT0_PRIVATE_KEY"
+      "wallet": "AGENT0_PRIVATE_KEY",
+      "description": "何もしない (基準ライン)"
     },
     {
       "id": "random",
       "command": "node",
       "args": ["--import", "tsx", "examples/agents/random.ts"],
-      "wallet": "AGENT1_PRIVATE_KEY"
+      "wallet": "AGENT1_PRIVATE_KEY",
+      "description": "ランダムに swap する (ノイズベンチマーク)"
     },
     {
       "id": "simple",
       "command": "node",
       "args": ["--import", "tsx", "examples/agents/simple-rule.ts"],
-      "wallet": "AGENT2_PRIVATE_KEY"
+      "wallet": "AGENT2_PRIVATE_KEY",
+      "description": "プール vs 公正価格の乖離で小ロット swap"
     }
   ]
 }

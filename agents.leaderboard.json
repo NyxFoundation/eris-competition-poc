@@ -1,0 +1,25 @@
+{
+  "agents": [
+    {
+      "id": "simple",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/simple-rule.ts"],
+      "wallet": "AGENT0_PRIVATE_KEY",
+      "description": "プール価格と公正価格の乖離 (>0.15%) を検知し、乖離幅に応じて小〜中ロットの swap でアービ"
+    },
+    {
+      "id": "lp-provider",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/lp-provider.ts"],
+      "wallet": "AGENT1_PRIVATE_KEY",
+      "description": "現在 tick を中心にレンジ LP を mint し、価格変動から外れたら remove + 再 mint で手数料収益を狙う"
+    },
+    {
+      "id": "aave-arb",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/aave-arb.ts"],
+      "wallet": "AGENT2_PRIVATE_KEY",
+      "description": "通常は遊休 USDC を Aave に supply して利回り、価格差 0.15% 超で withdraw → Uniswap でアービ"
+    }
+  ]
+}

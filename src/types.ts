@@ -130,6 +130,7 @@ export type AgentSpec = {
   command: string;
   args?: string[];
   wallet: string;
+  description?: string;
 };
 
 export type AgentsFile = {

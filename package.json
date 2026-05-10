@@ -6,6 +6,7 @@
   "scripts": {
     "anvil": "tsx src/cli/anvil.ts",
     "sim": "tsx src/cli/sim.ts",
+    "leaderboard": "tsx scripts/leaderboard.ts",
     "agent:noop": "tsx examples/agents/noop.ts",
     "agent:random": "tsx examples/agents/random.ts",
     "agent:simple": "tsx examples/agents/simple-rule.ts",

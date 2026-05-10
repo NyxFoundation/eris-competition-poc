@@ -124,11 +124,15 @@ function validateAgentsFile(parsed: unknown, path: string): AgentSpec[] {
     if (!isSupportedAgentWallet(agent.wallet)) {
       throw new Error(`${label}.wallet must be one of ${SUPPORTED_AGENT_WALLETS.join(", ")}`);
     }
+    if (agent.description !== undefined && typeof agent.description !== "string") {
+      throw new Error(`${label}.description must be a string when present`);
+    }
     return {
       id: agent.id,
       command: agent.command,
       args: agent.args,
-      wallet: agent.wallet
+      wallet: agent.wallet,
+      description: agent.description
     };
   });
 }
