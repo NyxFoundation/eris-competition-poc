@@ -262,9 +262,49 @@ export const aaveAdapter: ProtocolAdapter = {
     return [buildTx(owner, action)];
   },
 
-  async buildFlow(): Promise<FlowOrder[]> {
-    // Aave の orderflow は Phase 6 で実装（supply/borrow churn）
-    return [];
+  // supply/borrow/repay の churn を生成し HF を動かす
+  async buildFlow(ctx, _state, _fairPrice): Promise<FlowOrder[]> {
+    const wallet = ctx.flowWallet("aave", "informed");
+    const [weth] = await Promise.all([
+      userReserve(ctx.publicClient, TOKENS.WETH.address, wallet.address),
+    ]);
+    const usdc = await userReserve(
+      ctx.publicClient,
+      AAVE_STABLE,
+      wallet.address,
+    );
+    const fee =
+      ctx.config.defaultPriorityFeeWei +
+      BigInt(ctx.rng.int(1, 40)) * 1_000_000n;
+
+    let action: LeafAction;
+    if (weth.supplied === 0n) {
+      const amount = ctx.config.aaveFlowMaxWethWei / 2n;
+      action = {
+        type: "aaveSupply",
+        asset: "WETH",
+        amount: amount.toString(),
+      } as unknown as LeafAction;
+    } else if (usdc.borrowed < 1_000_000_000n) {
+      action = {
+        type: "aaveBorrow",
+        asset: "USDC",
+        amount: "500000000",
+      } as unknown as LeafAction; // 500 USDC
+    } else if (ctx.rng.bool()) {
+      action = {
+        type: "aaveRepay",
+        asset: "USDC",
+        amount: "max",
+      } as unknown as LeafAction;
+    } else {
+      action = {
+        type: "aaveWithdraw",
+        asset: "WETH",
+        amount: "max",
+      } as unknown as LeafAction;
+    }
+    return [{ kind: "informed", action, priorityFeeWei: fee }];
   },
 
   async valueUsdc(ctx, agent): Promise<number> {

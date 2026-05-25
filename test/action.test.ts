@@ -288,6 +288,95 @@ test("validateAction rejects oversized rawBundle", () => {
   });
 });
 
+test("parseAction accepts balancer and curve swaps", () => {
+  assert.deepEqual(
+    parseAction({ type: "balancerSwap", tokenIn: "WETH", amountIn: "10" }),
+    { type: "balancerSwap", tokenIn: "WETH", amountIn: "10" },
+  );
+  assert.deepEqual(
+    parseAction({ type: "curveSwap", tokenIn: "USDC", amountIn: "10" }),
+    { type: "curveSwap", tokenIn: "USDC", amountIn: "10" },
+  );
+});
+
+test("parseAction accepts aave actions including max sentinel", () => {
+  assert.deepEqual(
+    parseAction({ type: "aaveSupply", asset: "WETH", amount: "5" }),
+    { type: "aaveSupply", asset: "WETH", amount: "5" },
+  );
+  assert.deepEqual(
+    parseAction({ type: "aaveRepay", asset: "USDC", amount: "max" }),
+    { type: "aaveRepay", asset: "USDC", amount: "max" },
+  );
+});
+
+test("parseAction rejects max for aaveSupply (only withdraw/repay allow max)", () => {
+  assert.throws(
+    () => parseAction({ type: "aaveSupply", asset: "WETH", amount: "max" }),
+    /decimal integer string/,
+  );
+});
+
+test("parseAction accepts gmxIncrease and rejects it inside bundle", () => {
+  assert.deepEqual(
+    parseAction({
+      type: "gmxIncrease",
+      isLong: true,
+      collateral: "WETH",
+      collateralAmount: "1",
+      sizeDeltaUsd: "100",
+    }),
+    {
+      type: "gmxIncrease",
+      isLong: true,
+      collateral: "WETH",
+      collateralAmount: "1",
+      sizeDeltaUsd: "100",
+    },
+  );
+  assert.throws(
+    () =>
+      parseAction({
+        type: "bundle",
+        actions: [
+          {
+            type: "gmxIncrease",
+            isLong: true,
+            collateral: "WETH",
+            collateralAmount: "1",
+            sizeDeltaUsd: "100",
+          },
+        ],
+      }),
+    /cannot be bundled/,
+  );
+});
+
+test("validateAction rejects gmx size over configured max", () => {
+  const action = parseAction({
+    type: "gmxIncrease",
+    isLong: true,
+    collateral: "WETH",
+    collateralAmount: "1",
+    sizeDeltaUsd: "100",
+  });
+  assert.deepEqual(validateAction(action, observation, balances), {
+    ok: false,
+    reason: "sizeDeltaUsd exceeds configured max",
+  });
+});
+
+test("validateAction routes balancer swap intent with protocol tag", () => {
+  const result = validateAction(
+    parseAction({ type: "balancerSwap", tokenIn: "WETH", amountIn: "10" }),
+    observation,
+    balances,
+  );
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.intents[0].protocol, "balancer");
+});
+
 test("validateAction expands rawBundle intents with bundleId", () => {
   const action = parseAction({
     type: "rawBundle",

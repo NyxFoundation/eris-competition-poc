@@ -1,0 +1,33 @@
+{
+  "agents": [
+    {
+      "id": "venue-arb",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/venue-arb.ts"],
+      "wallet": "AGENT0_PRIVATE_KEY",
+      "description": "uniswap/balancer/curve の cross-venue 裁定"
+    },
+    {
+      "id": "aave-lev",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/aave-leverage.ts"],
+      "wallet": "AGENT1_PRIVATE_KEY",
+      "description": "Aave WETH supply -> USDC borrow"
+    },
+    {
+      "id": "gmx-long",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/gmx-perp.ts"],
+      "wallet": "AGENT2_PRIVATE_KEY",
+      "description": "GMX ETH ロング"
+    },
+    {
+      "id": "uni-arb",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/arb-bot.ts"],
+      "wallet": "AGENT3_PRIVATE_KEY",
+      "env": { "BID_PROFIT_FRACTION": "0.4" },
+      "description": "Uniswap gap 駆動 arb（priority fee 入札）"
+    }
+  ]
+}

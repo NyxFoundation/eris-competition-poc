@@ -601,8 +601,23 @@ export const gmxAdapter: ProtocolAdapter = {
     return [buildOrderTx(owner, ctx.gmx.market, action)];
   },
 
-  async buildFlow(): Promise<FlowOrder[]> {
-    return []; // Phase 6 で perp orderflow を実装
+  // perp orderflow: 小口のロング/ショートを開いて約定ボリュームを作る（keeper が約定）
+  async buildFlow(ctx): Promise<FlowOrder[]> {
+    if (!ctx.rng.bool()) return []; // 約半数のラウンドは見送り（OI 過剰・実行負荷を抑制）
+    const isLong = ctx.rng.bool();
+    const collateralWei = 100_000_000_000_000_000n; // 0.1 WETH
+    const sizeUsd = 400n * 10n ** 30n; // $400 (~2x)
+    const fee =
+      ctx.config.defaultPriorityFeeWei +
+      BigInt(ctx.rng.int(1, 60)) * 1_000_000n;
+    const action = {
+      type: "gmxIncrease",
+      isLong,
+      collateral: "WETH",
+      collateralAmount: collateralWei.toString(),
+      sizeDeltaUsd: sizeUsd.toString(),
+    } as unknown as LeafAction;
+    return [{ kind: "uninformed", action, priorityFeeWei: fee }];
   },
 
   // 競争ブロックで作成された注文を keeper が約定する
