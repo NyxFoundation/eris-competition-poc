@@ -13,12 +13,17 @@ export class AgentProcess {
     this.child = spawn(spec.command, spec.args ?? [], {
       stdio: ["pipe", "pipe", "pipe"],
       env: {
+        // Forward LLM-related vars from parent (spec.env can override below)
+        ...forwardedParentEnv(),
+        // Per-agent config from agents.<name>.json
         ...(spec.env ?? {}),
+        // Always-forced values
         PATH: process.env.PATH ?? "",
         NODE_ENV: process.env.NODE_ENV ?? "development",
         ERIS_AGENT_ID: spec.id,
         ERIS_RPC_URL: rpcUrl,
-        ERIS_AGENT_ADDRESS: agentAddress
+        ERIS_AGENT_ADDRESS: agentAddress,
+        REPORT_DIR: process.env.REPORT_DIR ?? "./runs"
       }
     });
 
@@ -55,4 +60,19 @@ export class AgentProcess {
   getStderr(): string {
     return this.stderr;
   }
+}
+
+/**
+ * Forward a small whitelist of parent env vars to the child agent process.
+ * Anything starting with ERIS_LLM_ is passed through (so users can do
+ * `ERIS_LLM_MODEL=claude-haiku-4-5 npm run sim`), plus ANTHROPIC_API_KEY.
+ * spec.env in the agents JSON overrides these.
+ */
+function forwardedParentEnv(): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (process.env.ANTHROPIC_API_KEY) out.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.startsWith("ERIS_LLM_") && v !== undefined) out[k] = v;
+  }
+  return out;
 }
