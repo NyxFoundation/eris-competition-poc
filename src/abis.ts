@@ -34,3 +34,22 @@ export const nonfungiblePositionManagerAbi = parseAbi([
   "function balanceOf(address owner) view returns (uint256)",
   "function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)",
 ]);
+
+// Balancer v2 Vault + Queries
+export const balancerVaultAbi = parseAbi([
+  "function getPoolTokens(bytes32 poolId) view returns (address[] tokens, uint256[] balances, uint256 lastChangeBlock)",
+  "function swap((bytes32 poolId, uint8 kind, address assetIn, address assetOut, uint256 amount, bytes userData) singleSwap, (address sender, bool fromInternalBalance, address recipient, bool toInternalBalance) funds, uint256 limit, uint256 deadline) payable returns (uint256 amountCalculated)",
+  "function joinPool(bytes32 poolId, address sender, address recipient, (address[] assets, uint256[] maxAmountsIn, bytes userData, bool fromInternalBalance) request) payable",
+]);
+
+export const balancerQueriesAbi = parseAbi([
+  "function querySwap((bytes32 poolId, uint8 kind, address assetIn, address assetOut, uint256 amount, bytes userData) singleSwap, (address sender, bool fromInternalBalance, address recipient, bool toInternalBalance) funds) returns (uint256)",
+]);
+
+// Curve CryptoSwap (tricrypto v0.2.x): exchange / get_dy / coins / balances
+export const curveTricryptoAbi = parseAbi([
+  "function get_dy(uint256 i, uint256 j, uint256 dx) view returns (uint256)",
+  "function exchange(uint256 i, uint256 j, uint256 dx, uint256 min_dy)",
+  "function coins(uint256 i) view returns (address)",
+  "function balances(uint256 i) view returns (uint256)",
+]);

@@ -13,7 +13,7 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { erc20Abi, wethAbi } from "./abis.js";
-import { TOKENS, WHALES } from "./constants.js";
+import { TOKENS } from "./constants.js";
 import type { BalanceSnapshot } from "./types.js";
 
 export function makeChain(chainId: number) {
@@ -40,11 +40,33 @@ export function accountAddress(privateKey: Hex): Address {
   return privateKeyToAccount(privateKey).address;
 }
 
+// ---------------------------------------------------------------------------
+// stable 統一会計：usdcUnits は active な stable(native USDC / USDC.e / USDT) の合算。
+// すべて 6 桁・$1 とみなす。coordinator が有効 adapter から active 集合を設定する。
+// ---------------------------------------------------------------------------
+let ACTIVE_STABLES: Address[] = [TOKENS.USDC.address];
+
+export function setActiveStables(addresses: Address[]): void {
+  const seen = new Set<string>();
+  const list: Address[] = [];
+  for (const a of [TOKENS.USDC.address, ...addresses]) {
+    const lower = a.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    list.push(a);
+  }
+  ACTIVE_STABLES = list;
+}
+
+export function activeStables(): Address[] {
+  return ACTIVE_STABLES;
+}
+
 export async function getBalances(
   publicClient: PublicClient,
   address: Address,
 ): Promise<BalanceSnapshot> {
-  const [ethWei, wethWei, usdcUnits] = await Promise.all([
+  const [ethWei, wethWei, ...stableBalances] = await Promise.all([
     publicClient.getBalance({ address }),
     publicClient.readContract({
       address: TOKENS.WETH.address,
@@ -52,18 +74,38 @@ export async function getBalances(
       functionName: "balanceOf",
       args: [address],
     }),
-    publicClient.readContract({
-      address: TOKENS.USDC.address,
-      abi: erc20Abi,
-      functionName: "balanceOf",
-      args: [address],
-    }),
+    ...ACTIVE_STABLES.map((token) =>
+      publicClient.readContract({
+        address: token,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [address],
+      }),
+    ),
   ]);
+  const usdcUnits = (stableBalances as bigint[]).reduce(
+    (sum, b) => sum + b,
+    0n,
+  );
   return { ethWei, wethWei, usdcUnits };
 }
 
+// 単一 stable の残高（adapter が自分の stable 在庫を確認するため）
+export async function tokenBalance(
+  publicClient: PublicClient,
+  token: Address,
+  address: Address,
+): Promise<bigint> {
+  return publicClient.readContract({
+    address: token,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: [address],
+  }) as Promise<bigint>;
+}
+
 // ---------------------------------------------------------------------------
-// anvil cheatcodes（既存の publicClient.request 方式を踏襲）
+// anvil cheatcodes
 // ---------------------------------------------------------------------------
 
 type AnvilRequest = Parameters<PublicClient["request"]>[0];
@@ -126,7 +168,19 @@ export async function resetFork(publicClient: PublicClient): Promise<void> {
   } as AnvilRequest);
 }
 
-function erc20BalanceStorageSlot(holder: Address, mappingSlot: number): Hex {
+async function setStorageAt(
+  publicClient: PublicClient,
+  token: Address,
+  slotKey: Hex,
+  value: Hex,
+): Promise<void> {
+  await publicClient.request({
+    method: "anvil_setStorageAt",
+    params: [token, slotKey, value],
+  } as AnvilRequest);
+}
+
+function balanceSlotKey(holder: Address, mappingSlot: number): Hex {
   return keccak256(
     encodeAbiParameters(
       [{ type: "address" }, { type: "uint256" }],
@@ -134,25 +188,49 @@ function erc20BalanceStorageSlot(holder: Address, mappingSlot: number): Hex {
     ),
   );
 }
-function pad32Hex(value: bigint): Hex {
+function pad32(value: bigint): Hex {
   return `0x${value.toString(16).padStart(64, "0")}` as Hex;
 }
-// フォールバック用（通常は whale / deposit を使う）
-export async function setErc20Balance(
+
+// ERC20 残高をストレージ書換で付与。balanceOf の mapping slot を 0..MAX で自動探索する
+// （native USDC は slot 9 等。proxy でも balances は proxy 側ストレージにあるため動作）。
+const PROBE_SENTINEL = 0x1234567890abcdef1234567890abcdefn;
+
+// balanceOf の mapping slot 候補（よくある順）。proxy(OZ upgradeable) は gap で 51 付近のことが多い。
+function candidateSlots(): number[] {
+  const priority = [9, 0, 2, 3, 1, 51, 52, 53, 4, 5, 6, 7, 8, 10, 11];
+  const seen = new Set(priority);
+  const rest: number[] = [];
+  for (let s = 0; s <= 200; s++) if (!seen.has(s)) rest.push(s);
+  return [...priority, ...rest];
+}
+
+export async function dealErc20(
   publicClient: PublicClient,
   token: Address,
   holder: Address,
   amount: bigint,
-  mappingSlot: number,
 ): Promise<void> {
-  await publicClient.request({
-    method: "anvil_setStorageAt",
-    params: [
-      token,
-      erc20BalanceStorageSlot(holder, mappingSlot),
-      pad32Hex(amount),
-    ],
-  } as AnvilRequest);
+  for (const slot of candidateSlots()) {
+    const key = balanceSlotKey(holder, slot);
+    const original = ((await publicClient.getStorageAt({
+      address: token,
+      slot: key,
+    })) ?? `0x${"0".repeat(64)}`) as Hex;
+    await setStorageAt(publicClient, token, key, pad32(PROBE_SENTINEL));
+    const probed = (await publicClient.readContract({
+      address: token,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [holder],
+    })) as bigint;
+    if (probed === PROBE_SENTINEL) {
+      await setStorageAt(publicClient, token, key, pad32(amount));
+      return;
+    }
+    await setStorageAt(publicClient, token, key, original);
+  }
+  throw new Error(`could not locate ERC20 balance slot for token ${token}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +261,7 @@ export async function sendAndMine(
   return hash;
 }
 
-// impersonated アドレスから送信（whale / admin / role-admin など）
+// impersonated アドレスから送信（role-admin / acl-admin など）
 export async function sendAsImpersonated(
   publicClient: PublicClient,
   walletClient: WalletClient,
@@ -191,6 +269,8 @@ export async function sendAsImpersonated(
   from: Address,
   tx: { to: Address; data?: Hex; value?: bigint },
 ): Promise<Hex> {
+  await setEthBalance(publicClient, from, 10n ** 21n);
+  await impersonate(publicClient, from);
   const block = await publicClient.getBlock();
   const baseFee = block.baseFeePerGas ?? 0n;
   const hash = await walletClient.sendTransaction({
@@ -204,11 +284,12 @@ export async function sendAsImpersonated(
   });
   await mine(publicClient);
   await publicClient.waitForTransactionReceipt({ hash });
+  await stopImpersonate(publicClient, from);
   return hash;
 }
 
 // ---------------------------------------------------------------------------
-// 資金調達（Arbitrum）：ETH=setBalance / WETH=deposit / USDC=whale transfer
+// 資金調達（Arbitrum）：ETH=setBalance / WETH=deposit / stable=dealErc20
 // ---------------------------------------------------------------------------
 
 const GAS_BUFFER_WEI = 5_000_000_000_000_000_000n; // 5 ETH
@@ -223,7 +304,6 @@ export async function fundWallet(
   usdcUnits: bigint,
 ): Promise<void> {
   const address = accountAddress(privateKey);
-  // WETH deposit と gas を賄えるよう多めに ETH を付与してから wrap
   await setEthBalance(publicClient, address, ethWei + wethWei + GAS_BUFFER_WEI);
   if (wethWei > 0n) {
     await sendAndMine(publicClient, walletClient, chain, privateKey, {
@@ -237,45 +317,11 @@ export async function fundWallet(
     });
   }
   if (usdcUnits > 0n) {
-    await fundUsdcFromWhale(
-      publicClient,
-      walletClient,
-      chain,
-      address,
-      usdcUnits,
-    );
+    // active な各 stable に usdcUnits を付与（cross-venue で各 stable 在庫を持たせる）
+    for (const token of ACTIVE_STABLES) {
+      await dealErc20(publicClient, token, address, usdcUnits);
+    }
   }
-}
-
-export async function fundUsdcFromWhale(
-  publicClient: PublicClient,
-  walletClient: WalletClient,
-  chain: ReturnType<typeof makeChain>,
-  to: Address,
-  amount: bigint,
-): Promise<void> {
-  for (const whale of WHALES.USDC) {
-    const balance = (await publicClient.readContract({
-      address: TOKENS.USDC.address,
-      abi: erc20Abi,
-      functionName: "balanceOf",
-      args: [whale],
-    })) as bigint;
-    if (balance < amount) continue;
-    await setEthBalance(publicClient, whale, GAS_BUFFER_WEI);
-    await impersonate(publicClient, whale);
-    await sendAsImpersonated(publicClient, walletClient, chain, whale, {
-      to: TOKENS.USDC.address,
-      data: encodeFunctionData({
-        abi: erc20Abi,
-        functionName: "transfer",
-        args: [to, amount],
-      }),
-    });
-    await stopImpersonate(publicClient, whale);
-    return;
-  }
-  throw new Error(`no USDC whale with >= ${amount} units at fork block`);
 }
 
 export function snapshotForLog(snapshot: BalanceSnapshot) {

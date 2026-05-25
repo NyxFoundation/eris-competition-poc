@@ -20,6 +20,15 @@ export const TOKENS = {
   },
 } as const;
 
+// stable 統一会計: native USDC / USDC.e / USDT(USD₮0) をすべて $1・6 桁の「USDC 相当」とみなす。
+// Arbitrum では Balancer/Curve の深い WETH/stable プールが USDC.e / USDT ペアのため、
+// venue ごとに異なる stable を使いつつ残高・PnL は合算する。
+export const USDC_VARIANTS = {
+  native: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address,
+  bridged: "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8" as Address, // USDC.e
+  usdt: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9" as Address, // USD₮0
+} as const;
+
 export function tokenAddress(symbol: TokenSymbol): Address {
   return TOKENS[symbol].address;
 }
@@ -61,20 +70,38 @@ export const USDC_DECIMALS = 6;
 export const MAX_BUNDLE_ACTIONS = 5;
 
 // ---------------------------------------------------------------------------
-// Balancer v2 (全チェーン共通 Vault)。WETH/USDC を含む weighted pool。
-// poolId は実装時にフォークで確認すること（例は WETH/USDC 等加重プール）。
+// Balancer v2。33/33/34 加重プール [WETH, native USDC, USDT]（poolId 確認済み）。
+// フォーク時点では枯渇しているため setupGlobal で admin が joinPool して seed する。
+// stable は native USDC を使用（プールに含まれる）。
 // ---------------------------------------------------------------------------
 export const BALANCER = {
   vault: "0xBA12222222228d8Ba445958a75a0704d566BF2C8" as Address,
-  poolId: "0x" as `0x${string}`,
+  queries: "0xE39B5e3B6D74016b2F6A9673D7d7493B6DF549d5" as Address,
+  pool: "0x3b106b7ae88c3f8869b5221d2bbae398afc26737" as Address,
+  poolId:
+    "0x3b106b7ae88c3f8869b5221d2bbae398afc26737000100000000000000000534" as `0x${string}`,
+  // Vault に登録されたトークン順（getPoolTokens 準拠）
+  tokens: [
+    "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", // WETH
+    "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", // native USDC
+    "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", // USDT
+  ] as Address[],
+  usdcToken: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address,
+  // seed 投入量（admin が join）。ETH~$2100 想定で 33/33/34 にほぼ均衡。
+  seedWethWei: 200_000_000_000_000_000_000n, // 200 WETH
+  seedUsdcUnits: 420_000_000_000n, // 420,000 USDC
+  seedUsdtUnits: 420_000_000_000n, // 420,000 USDT
 } as const;
 
 // ---------------------------------------------------------------------------
-// Curve (Arbitrum)。WETH/USDC を含む実在プール（tricrypto 等）。WETH<->USDC leg のみ使用。
-// トークン index は実装時に coins() で判定。
+// Curve (Arbitrum) tricrypto 0x960ea3: coins [USDT(0), WBTC(1), WETH(2)]（深い）。
+// WETH<->USDT leg のみ使用。stable は USDT。
 // ---------------------------------------------------------------------------
 export const CURVE = {
-  pool: "0x" as Address,
+  pool: "0x960ea3e3C7FB317332d990873d354E18d7645590" as Address,
+  wethIndex: 2,
+  usdtIndex: 0,
+  usdcToken: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9" as Address, // USDT
 } as const;
 
 // ---------------------------------------------------------------------------

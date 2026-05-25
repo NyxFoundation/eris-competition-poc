@@ -57,6 +57,10 @@ export interface SimContext {
 export interface ProtocolAdapter {
   id: ProtocolId;
 
+  // この protocol が「USDC」として扱う stable トークン（stable 統一会計用）。
+  // 未指定なら native USDC とみなす。
+  stableToken?: Address;
+
   // ---- アクション parse/validate（純粋関数。clients 不要）----
   // 自分の type でなければ null
   parse(obj: Record<string, unknown>): LeafAction | null;

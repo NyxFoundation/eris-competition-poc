@@ -1,9 +1,15 @@
 import type { LeafAction, ProtocolId } from "../types.js";
 import type { ProtocolAdapter } from "./types.js";
 import { uniswapAdapter } from "./uniswap.js";
+import { balancerAdapter } from "./balancer.js";
+import { curveAdapter } from "./curve.js";
 
 // 全 adapter（実装済みのみ登録）。フェーズ進行に伴い追加する。
-const ALL_ADAPTERS: ProtocolAdapter[] = [uniswapAdapter];
+const ALL_ADAPTERS: ProtocolAdapter[] = [
+  uniswapAdapter,
+  balancerAdapter,
+  curveAdapter,
+];
 
 const ALL_BY_ID = new Map<ProtocolId, ProtocolAdapter>(
   ALL_ADAPTERS.map((a) => [a.id, a]),

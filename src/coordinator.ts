@@ -24,6 +24,7 @@ import {
   mine,
   resetFork,
   sendAndMine,
+  setActiveStables,
   setEthBalance,
   snapshotForLog,
 } from "./chain.js";
@@ -76,13 +77,17 @@ type ReceiptResult = {
   gasCostWei: bigint;
 };
 
-const GAS_ONLY_WEI = 10_000_000_000_000_000_000n; // 10 ETH（admin/keeper のガス）
+const GAS_ONLY_WEI = 2_000_000_000_000_000_000_000_000n; // 2,000,000 ETH（admin/keeper: gas + Balancer seed の wrap 等）
 
 export async function runSimulation(): Promise<void> {
   const config = loadConfig();
   setEnabledProtocols(config.enabledProtocols);
   const adapters = enabledAdapters();
   const enabledIds = adapters.map((a) => a.id);
+  // stable 統一会計: 有効 adapter が使う stable を残高合算対象に登録
+  setActiveStables(
+    adapters.map((a) => a.stableToken).filter((t): t is Address => Boolean(t)),
+  );
 
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   const logger = new RunLogger(config.runDirRoot, runId);
@@ -158,7 +163,11 @@ export async function runSimulation(): Promise<void> {
   };
 
   try {
-    // ---- グローバル setup（mock deploy / role 付与 / oracle source 差替）----
+    // ---- admin / keeper にガス用 ETH（setupGlobal の seed/deploy より前）----
+    await setEthBalance(publicClient, accountAddress(adminPk), GAS_ONLY_WEI);
+    await setEthBalance(publicClient, accountAddress(keeperPk), GAS_ONLY_WEI);
+
+    // ---- グローバル setup（mock deploy / role 付与 / oracle source 差替 / liquidity seed）----
     for (const adapter of adapters) {
       if (adapter.setupGlobal) {
         logger.event({ type: "protocol_setup_started", protocol: adapter.id });
@@ -169,10 +178,6 @@ export async function runSimulation(): Promise<void> {
         });
       }
     }
-
-    // ---- admin / keeper にガス用 ETH ----
-    await setEthBalance(publicClient, accountAddress(adminPk), GAS_ONLY_WEI);
-    await setEthBalance(publicClient, accountAddress(keeperPk), GAS_ONLY_WEI);
 
     // ---- 全ウォレットの資金調達 + approve ----
     const fundTargets: Array<{
