@@ -4,6 +4,7 @@ import { uniswapAdapter } from "./uniswap.js";
 import { balancerAdapter } from "./balancer.js";
 import { curveAdapter } from "./curve.js";
 import { aaveAdapter } from "./aave.js";
+import { gmxAdapter } from "./gmx.js";
 
 // 全 adapter（実装済みのみ登録）。フェーズ進行に伴い追加する。
 const ALL_ADAPTERS: ProtocolAdapter[] = [
@@ -11,6 +12,7 @@ const ALL_ADAPTERS: ProtocolAdapter[] = [
   balancerAdapter,
   curveAdapter,
   aaveAdapter,
+  gmxAdapter,
 ];
 
 const ALL_BY_ID = new Map<ProtocolId, ProtocolAdapter>(
