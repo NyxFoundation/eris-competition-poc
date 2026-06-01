@@ -109,6 +109,11 @@ export class ClaudeSubscriptionStrategist implements Strategist {
       ]
     });
 
+    const cleanEnv: Record<string, string | undefined> = { ...process.env };
+    for (const key of Object.keys(cleanEnv)) {
+      if (key.startsWith("CLAUDE_CODE_")) delete cleanEnv[key];
+    }
+
     const options: Options = {
       model: this.model,
       systemPrompt: `${SYSTEM_PROMPT}\n\n${SIM_RULES}`,
@@ -116,7 +121,14 @@ export class ClaudeSubscriptionStrategist implements Strategist {
       allowedTools: ["mcp__strategy__set_strategy"],
       disallowedTools: DISALLOWED_TOOLS,
       permissionMode: "bypassPermissions",
-      maxTurns: 2
+      maxTurns: 2,
+      env: cleanEnv,
+      // Isolation mode — do not inherit user/project skills, plugins, MCP
+      // servers, hooks, or settings.json. The agent only needs OAuth credentials
+      // from disk; loading 70+ user skills per call adds seconds and pollutes
+      // the system prompt context budget.
+      settingSources: [],
+      ...(process.env.ERIS_CLAUDE_BIN ? { pathToClaudeCodeExecutable: process.env.ERIS_CLAUDE_BIN } : {})
     };
 
     try {
