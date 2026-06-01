@@ -30,6 +30,7 @@ export type SimConfig = {
   rpcUrl: string;
   chainId: number;
   rounds: number;
+  roundTimeSeconds: number;
   seed: number;
   runDirRoot: string;
   agentTimeoutMs: number;
@@ -77,6 +78,9 @@ export function loadConfig(env = process.env): SimConfig {
     rpcUrl: env.ANVIL_RPC_URL ?? `http://127.0.0.1:${anvilPort}`,
     chainId: intEnv(env.CHAIN_ID, CHAIN_ID),
     rounds: intEnv(env.ROUNDS, 50),
+    // 1 ラウンドあたりに進める EVM 時間（秒）。Aave 変動金利の累積や GMX funding
+    // を現実的なスケールで発生させるためにラウンドループで evm_increaseTime に渡す。
+    roundTimeSeconds: intEnv(env.ROUND_TIME_SECONDS, 3600),
     seed: intEnv(env.SEED, 1),
     runDirRoot: env.REPORT_DIR ?? "./runs",
     agentTimeoutMs: intEnv(env.AGENT_TIMEOUT_MS, 5000),

@@ -342,9 +342,12 @@ function applySlippage(amount: bigint, slippageBps: number): bigint {
   return (amount * BigInt(10_000 - slippageBps)) / 10_000n;
 }
 
+// Date.now() ベースだと evm_increaseTime で EVM time が wall clock を追い越した時に
+// "Transaction too old" になる。実害のない MEV 保護用フィールドなので遠未来定数を使う。
 function deadline(): bigint {
-  return BigInt(Math.floor(Date.now() / 1000) + 3600);
+  return DEADLINE_FAR_FUTURE;
 }
+const DEADLINE_FAR_FUTURE = BigInt(2 ** 32 - 1); // ~ year 2106
 
 function isWethUsdcPosition(
   token0: Address,

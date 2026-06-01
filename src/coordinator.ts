@@ -20,6 +20,7 @@ import {
   accountAddress,
   fundWallet,
   getBalances,
+  increaseTime,
   makeClients,
   mine,
   resetFork,
@@ -251,6 +252,13 @@ export async function runSimulation(): Promise<void> {
 
     for (let round = 1; round <= config.rounds; round++) {
       fairPrice = nextFairPrice(fairPrice, rng);
+
+      // ---- 0) EVM 時間を進める（Aave 変動金利・GMX funding が現実スケールで効くように）----
+      // evm_increaseTime は「次の mine 時点での timestamp」に効くので、
+      // 直後の updateOracles が +roundTimeSeconds 経過した timestamp で価格を書き込む。
+      if (config.roundTimeSeconds > 0) {
+        await increaseTime(publicClient, config.roundTimeSeconds);
+      }
 
       // ---- 1) Oracle ブロック（GMX/Aave の mock 価格を fairPrice に追従）----
       // updateOracles は内部で sendAndMine するため追加 mine は不要。
