@@ -10,6 +10,7 @@ import { accountAddress, getBalances, makeClients, mine, resetFork, setupWallet,
 import { RunLogger, safeStringify } from "./logger.js";
 import { balanceToInventory, positionsValueUsdc, valueUsdc, valueUsdcWithPositions } from "./pnl.js";
 import { nextFairPrice, Rng } from "./rng.js";
+import { sampleSimParams, type SimSampledParams } from "./simParams.js";
 import type { AgentAction, AgentObservation, BalanceSnapshot, RawTxIntent, SimWallet, TxIntent, WalletRole } from "./types.js";
 import { buildLpActionData, buildSwapData, getLpPositions, getPoolPriceUsdcPerWeth, getPoolState } from "./uniswap.js";
 
@@ -85,6 +86,8 @@ export async function runSimulation(): Promise<void> {
 
     let fairPrice = await getPoolPriceUsdcPerWeth(publicClient);
     const rng = new Rng(config.seed);
+    const simParams = sampleSimParams(rng);
+    logger.event({ type: "sim_params_sampled", simParams });
     const history: AgentObservation["history"] = [];
     for (const agent of agentRuntimes) {
       agent.initial = await getBalances(publicClient, accountAddress(agent.privateKey));
@@ -93,7 +96,7 @@ export async function runSimulation(): Promise<void> {
     for (let round = 1; round <= config.rounds; round++) {
       const poolState = await getPoolState(publicClient);
       const poolPrice = poolState.priceUsdcPerWeth;
-      fairPrice = nextFairPrice(fairPrice, rng);
+      fairPrice = nextFairPrice(fairPrice, rng, simParams.sigmaPerStep);
       history.push({ round, poolPriceUsdcPerWeth: poolPrice, fairPriceUsdcPerWeth: fairPrice });
 
       const block = await publicClient.getBlock();
@@ -136,7 +139,7 @@ export async function runSimulation(): Promise<void> {
         }
       }
 
-      const flowIntents = await buildFlowIntents(publicClient, config, rng, poolPrice, fairPrice);
+      const flowIntents = await buildFlowIntents(publicClient, config, rng, simParams, poolPrice, fairPrice);
       const submitted: SubmittedTx[] = [];
       for (const intent of [...flowIntents, ...agentIntents]) {
         try {
@@ -252,7 +255,7 @@ export async function runSimulation(): Promise<void> {
         stderrTail: agent.process.getStderr()
       });
     }
-    logger.summary({ runId, rounds: config.rounds, finalFairPriceUsdcPerWeth: finalFairPrice, agents });
+    logger.summary({ runId, rounds: config.rounds, simParams, finalFairPriceUsdcPerWeth: finalFairPrice, agents });
     writeFileSync(join(logger.runDir, "history.json"), `${safeStringify(history, 2)}\n`);
     logger.event({ type: "run_completed", runId, runDir: logger.runDir });
     console.log(`simulation completed: ${logger.runDir}`);
@@ -307,14 +310,37 @@ async function buildFlowIntents(
   publicClient: ReturnType<typeof makeClients>["publicClient"],
   config: SimConfig,
   rng: Rng,
+  simParams: SimSampledParams,
   poolPrice: number,
   fairPrice: number
 ): Promise<TxIntent[]> {
-  const uninformedTokenIn = rng.bool() ? "WETH" : "USDC";
-  const uninformedAmount =
-    uninformedTokenIn === "WETH"
-      ? randomBigInt(rng, config.uninformedFlowMaxWethWei / 20n, config.uninformedFlowMaxWethWei)
-      : randomBigInt(rng, 100_000_000n, 2_500_000_000n);
+  const intents: TxIntent[] = [];
+
+  const uninformedBalances = await getBalances(publicClient, accountAddress(config.privateKeys.uninformedFlow));
+  let runningUninformedWeth = uninformedBalances.wethWei;
+  let runningUninformedUsdc = uninformedBalances.usdcUnits;
+  const orderCount = rng.poisson(simParams.poissonLambda);
+  const meanUsdcPerOrder = simParams.lognormalMeanY * (poolPrice / 100) * config.uninformedFlowVolumeMultiplier;
+  for (let i = 0; i < orderCount; i++) {
+    const tokenIn: "WETH" | "USDC" = rng.bool() ? "WETH" : "USDC";
+    const sizeUsdc = rng.lognormal(meanUsdcPerOrder, simParams.lognormalSigma);
+    const desired =
+      tokenIn === "USDC"
+        ? BigInt(Math.max(1, Math.floor(sizeUsdc * 1_000_000)))
+        : BigInt(Math.max(1, Math.floor((sizeUsdc / poolPrice) * 1e18)));
+    const available = tokenIn === "WETH" ? runningUninformedWeth : runningUninformedUsdc;
+    const capped = desired > available ? available : desired;
+    if (capped <= 0n) continue;
+    if (tokenIn === "WETH") runningUninformedWeth -= capped;
+    else runningUninformedUsdc -= capped;
+    intents.push({
+      ownerId: "uninformed-flow",
+      role: "uninformed-flow",
+      privateKey: config.privateKeys.uninformedFlow,
+      action: { type: "swap", tokenIn, amountIn: capped.toString(), slippageBps: FLOW_SLIPPAGE_BPS },
+      priorityFeeWei: config.defaultPriorityFeeWei + BigInt(rng.int(1, 50)) * 1_000_000n
+    });
+  }
 
   const informedTokenIn = poolPrice < fairPrice ? "USDC" : "WETH";
   const gap = Math.min(1, Math.abs(fairPrice / poolPrice - 1) * 20);
@@ -322,20 +348,7 @@ async function buildFlowIntents(
     informedTokenIn === "WETH"
       ? (config.informedFlowMaxWethWei * BigInt(Math.max(1, Math.floor(gap * 100)))) / 100n
       : BigInt(Math.max(100_000_000, Math.floor(gap * 5_000_000_000)));
-
-  const uninformedBalances = await getBalances(publicClient, accountAddress(config.privateKeys.uninformedFlow));
   const informedBalances = await getBalances(publicClient, accountAddress(config.privateKeys.informedFlow));
-  const intents: TxIntent[] = [];
-  const cappedUninformedAmount = capToFlowBalance(uninformedTokenIn, uninformedAmount, uninformedBalances);
-  if (cappedUninformedAmount > 0n) {
-    intents.push({
-      ownerId: "uninformed-flow",
-      role: "uninformed-flow",
-      privateKey: config.privateKeys.uninformedFlow,
-      action: { type: "swap", tokenIn: uninformedTokenIn, amountIn: cappedUninformedAmount.toString(), slippageBps: FLOW_SLIPPAGE_BPS },
-      priorityFeeWei: config.defaultPriorityFeeWei + BigInt(rng.int(1, 50)) * 1_000_000n
-    });
-  }
   const cappedInformedAmount = capToFlowBalance(informedTokenIn, informedAmount, informedBalances);
   if (cappedInformedAmount > 0n) {
     intents.push({
@@ -451,11 +464,6 @@ async function logReceiptsAndOrdering(
     });
   }
   return results;
-}
-
-function randomBigInt(rng: Rng, minInclusive: bigint, maxInclusive: bigint): bigint {
-  const span = maxInclusive - minInclusive + 1n;
-  return minInclusive + (BigInt(Math.floor(rng.next() * 1_000_000)) * span) / 1_000_000n;
 }
 
 function capToFlowBalance(tokenIn: "WETH" | "USDC", desired: bigint, balances: BalanceSnapshot): bigint {
