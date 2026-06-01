@@ -5,15 +5,20 @@
 // env:
 //   SPREAD_BPS  発注する最小スプレッド (bps, default 15)
 import { createInterface } from "node:readline";
+import { createEmitter } from "./lib/agentLog.js";
 
 const SPREAD_BPS = Number(process.env.SPREAD_BPS ?? "15");
 const SIZE_BPS_MIN = 250;
 const SIZE_BPS_MAX = 5000;
 
+const emit = createEmitter();
+
 const rl = createInterface({ input: process.stdin });
 
 rl.on("line", (line) => {
   const obs = JSON.parse(line);
+  const round = obs.round;
+  const signals: Record<string, number> = {};
   const bal = obs.protocols?.balancer?.priceUsdcPerWeth;
   const curve = obs.protocols?.curve?.priceUsdcPerWeth;
   const fee = obs.limits.defaultPriorityFeePerGasWei;
@@ -23,13 +28,20 @@ rl.on("line", (line) => {
     !Number.isFinite(curve) ||
     curve <= 0
   ) {
-    out({ type: "noop", reason: "balancer/curve unavailable" });
+    emit(
+      { type: "noop", reason: "balancer/curve unavailable" },
+      { round, signals },
+    );
     return;
   }
 
   const spread = Math.abs(bal / curve - 1);
+  signals.bal = bal;
+  signals.curve = curve;
+  signals.spread = spread;
+  signals.spreadBps = spread * 10_000;
   if (spread < SPREAD_BPS / 10_000) {
-    out({ type: "noop", reason: "spread too small" });
+    emit({ type: "noop", reason: "spread too small" }, { round, signals });
     return;
   }
 
@@ -42,30 +54,30 @@ rl.on("line", (line) => {
     SIZE_BPS_MAX,
     Math.max(SIZE_BPS_MIN, Math.floor(spread * 200_000)),
   );
+  signals.sizeBps = sizeBps;
   const usdcIn =
     (BigInt(obs.limits.maxUsdcInUnits) * BigInt(sizeBps)) / 10_000n;
   const wethIn = (BigInt(obs.limits.maxWethInWei) * BigInt(sizeBps)) / 10_000n;
 
-  out({
-    type: "bundle",
-    actions: [
-      {
-        type: buyVenue,
-        tokenIn: "USDC",
-        amountIn: usdcIn.toString(),
-        slippageBps: 75,
-      },
-      {
-        type: sellVenue,
-        tokenIn: "WETH",
-        amountIn: wethIn.toString(),
-        slippageBps: 75,
-      },
-    ],
-    maxPriorityFeePerGasWei: fee,
-  });
+  emit(
+    {
+      type: "bundle",
+      actions: [
+        {
+          type: buyVenue,
+          tokenIn: "USDC",
+          amountIn: usdcIn.toString(),
+          slippageBps: 75,
+        },
+        {
+          type: sellVenue,
+          tokenIn: "WETH",
+          amountIn: wethIn.toString(),
+          slippageBps: 75,
+        },
+      ],
+      maxPriorityFeePerGasWei: fee,
+    },
+    { round, signals },
+  );
 });
-
-function out(action: unknown): void {
-  process.stdout.write(`${JSON.stringify(action)}\n`);
-}

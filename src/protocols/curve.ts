@@ -7,14 +7,8 @@ import type {
   CurveSwapAction,
   LeafAction,
 } from "../types.js";
-import type {
-  BuiltTx,
-  FlowOrder,
-  ProtocolAdapter,
-  SimContext,
-  ValidationResult,
-} from "./types.js";
-import { approveTx, buildAmmFlow } from "./uniswap.js";
+import type { BuiltTx, ProtocolAdapter, ValidationResult } from "./types.js";
+import { approveTx } from "./uniswap.js";
 
 const DECIMAL_INTEGER = /^[0-9]+$/;
 
@@ -158,18 +152,6 @@ export const curveAdapter: ProtocolAdapter = {
     if (action.type !== "curveSwap")
       throw new Error("curve buildTxs: unexpected action");
     return [await buildSwapTx(ctx.publicClient, action)];
-  },
-
-  async buildFlow(ctx, state, fairPrice): Promise<FlowOrder[]> {
-    const s = state as CurveState;
-    return buildAmmFlow(
-      ctx,
-      "curve",
-      s.priceUsdcPerWeth,
-      fairPrice,
-      ctx.config.curveFlowMaxWethWei,
-      ctx.config.curveFlowMaxWethWei,
-    );
   },
 
   async valueUsdc(): Promise<number> {

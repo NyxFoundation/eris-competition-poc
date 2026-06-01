@@ -56,6 +56,10 @@ export type SimConfig = {
   curveFlowMaxWethWei: bigint;
   gmxFlowMaxSizeUsd: bigint;
   aaveFlowMaxWethWei: bigint;
+  // orderflow bot（独立プロセス）の起動コマンドと決定論シード。
+  flowBotCommand: string;
+  flowBotArgs: string[];
+  flowSeed: number;
   privateKeys: {
     agent0: Hex;
     agent1: Hex;
@@ -139,6 +143,13 @@ export function loadConfig(env = process.env): SimConfig {
       env.AAVE_FLOW_MAX_WETH_WEI,
       2_000_000_000_000_000_000n,
     ),
+    flowBotCommand: env.FLOW_BOT_COMMAND ?? "node",
+    flowBotArgs:
+      env.FLOW_BOT_ARGS && env.FLOW_BOT_ARGS.trim() !== ""
+        ? env.FLOW_BOT_ARGS.trim().split(/\s+/)
+        : ["--import", "tsx", "examples/flow/market-maker.ts"],
+    // flow bot のシード。未指定なら SEED と同じにして単一 SEED が run 全体を決定する。
+    flowSeed: intEnv(env.FLOW_SEED, intEnv(env.SEED, 1)),
     privateKeys: {
       agent0: hexEnv(env.AGENT0_PRIVATE_KEY, DEFAULT_ANVIL_PRIVATE_KEYS[0]),
       agent1: hexEnv(env.AGENT1_PRIVATE_KEY, DEFAULT_ANVIL_PRIVATE_KEYS[1]),

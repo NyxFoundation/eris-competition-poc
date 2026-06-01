@@ -45,6 +45,9 @@ import { enabledAdapters, setEnabledProtocols } from "./protocols/registry.js";
 import type { FlowKind, FlowWallet, SimContext } from "./protocols/types.js";
 import { updateOracles } from "./protocols/oracles.js";
 import { GMX_MARKETS } from "./constants.js";
+import { FlowProcess } from "./flowProcess.js";
+import type { FlowContextWire } from "./flow/logic.js";
+import { readAaveFlowReserves } from "./protocols/aave.js";
 
 type AgentRuntime = {
   id: string;
@@ -117,12 +120,22 @@ export async function runSimulation(): Promise<void> {
         spec,
         config.rpcUrl,
         accountAddress(privateKey),
+        logger.runDir,
       ),
       initial: { ethWei: 0n, wethWei: 0n, usdcUnits: 0n },
     };
   });
   const agentMetrics = new Map(
     agentRuntimes.map((agent) => [agent.id, emptyAgentMetrics()]),
+  );
+
+  // orderflow bot（独立プロセス）。毎ラウンド FlowContext を渡し FlowOrder[] を受け取る。
+  // bot は RPC に触れず注文を決めるだけ。seeded RNG で決定論（同一 seed → 同一市場）。
+  const flowProcess = new FlowProcess(
+    config.flowBotCommand,
+    config.flowBotArgs,
+    config.flowSeed,
+    logger.runDir,
   );
 
   // protocol/kind ごとの flow ウォレットを導出
@@ -138,10 +151,6 @@ export async function runSimulation(): Promise<void> {
       });
     }
   }
-  const flowPrivateKeys = new Map<string, Hex>(
-    [...flowWalletMap.values()].map((w) => [w.id, w.privateKey]),
-  );
-
   const adminPk = config.privateKeys.admin;
   const keeperPk = config.privateKeys.keeper;
   const rng = new Rng(config.seed);
@@ -345,11 +354,14 @@ export async function runSimulation(): Promise<void> {
         }
       }
 
-      const flowIntents = await buildFlowIntents(
+      const flowIntents = await requestFlowIntents(
         ctx,
-        adapters,
+        flowProcess,
+        enabledIds,
         stateById,
         fairPrice,
+        round,
+        config.agentTimeoutMs,
       );
 
       const submitted: SubmittedTx[] = [];
@@ -502,7 +514,7 @@ export async function runSimulation(): Promise<void> {
     console.log(`simulation completed: ${logger.runDir}`);
   } finally {
     for (const agent of agentRuntimes) agent.process.close();
-    void flowPrivateKeys;
+    flowProcess.close();
   }
 }
 
@@ -568,31 +580,68 @@ async function observationFor(
   };
 }
 
-async function buildFlowIntents(
+// orderflow bot プロセスに FlowContext を渡して FlowOrder[] を受け取り、TxIntent に変換する。
+// flow ウォレットの選択と tx 提出は coordinator が所有（bot は注文を決めるだけ）。
+async function requestFlowIntents(
   ctx: SimContext,
-  adapters: ReturnType<typeof enabledAdapters>,
+  flowProcess: FlowProcess,
+  enabledIds: ProtocolId[],
   stateById: Map<ProtocolId, unknown>,
   fairPrice: number,
+  round: number,
+  timeoutMs: number,
 ): Promise<TxIntent[]> {
+  const poolPrices: Partial<Record<"uniswap" | "balancer" | "curve", number>> =
+    {};
+  for (const id of ["uniswap", "balancer", "curve"] as const) {
+    if (!enabledIds.includes(id)) continue;
+    const s = stateById.get(id) as { priceUsdcPerWeth?: number } | undefined;
+    if (s && typeof s.priceUsdcPerWeth === "number")
+      poolPrices[id] = s.priceUsdcPerWeth;
+  }
+
+  // aave flow は flow ウォレットの reserve に依存する。RPC 読取は coordinator 側で行い渡す。
+  let aaveReserves: FlowContextWire["aaveReserves"];
+  if (enabledIds.includes("aave")) {
+    const wallet = ctx.flowWallet("aave", "informed");
+    const r = await readAaveFlowReserves(ctx.publicClient, wallet.address);
+    aaveReserves = {
+      wethSupplied: r.wethSupplied.toString(),
+      usdcBorrowed: r.usdcBorrowed.toString(),
+    };
+  }
+
+  const context: FlowContextWire = {
+    round,
+    fairPriceUsdcPerWeth: fairPrice,
+    protocols: enabledIds,
+    poolPrices,
+    aaveReserves,
+    limits: {
+      uninformedFlowMaxWethWei: ctx.config.uninformedFlowMaxWethWei.toString(),
+      informedFlowMaxWethWei: ctx.config.informedFlowMaxWethWei.toString(),
+      balancerFlowMaxWethWei: ctx.config.balancerFlowMaxWethWei.toString(),
+      curveFlowMaxWethWei: ctx.config.curveFlowMaxWethWei.toString(),
+      gmxFlowMaxSizeUsd: ctx.config.gmxFlowMaxSizeUsd.toString(),
+      aaveFlowMaxWethWei: ctx.config.aaveFlowMaxWethWei.toString(),
+      maxAaveBorrowUsdcUnits: ctx.config.maxAaveBorrowUsdcUnits.toString(),
+      defaultPriorityFeeWei: ctx.config.defaultPriorityFeeWei.toString(),
+    },
+  };
+
+  const orders = await flowProcess.requestOrders(context, timeoutMs);
   const intents: TxIntent[] = [];
-  for (const adapter of adapters) {
-    const orders = await adapter.buildFlow(
-      ctx,
-      stateById.get(adapter.id),
-      fairPrice,
-    );
-    for (const order of orders) {
-      const wallet = ctx.flowWallet(adapter.id, order.kind);
-      intents.push({
-        ownerId: wallet.id,
-        role: order.kind === "informed" ? "informed-flow" : "uninformed-flow",
-        privateKey: wallet.privateKey,
-        protocol: adapter.id,
-        action: order.action,
-        priorityFeeWei: order.priorityFeeWei,
-        gmxOrder: adapter.id === "gmx",
-      });
-    }
+  for (const order of orders) {
+    const wallet = ctx.flowWallet(order.protocol, order.kind);
+    intents.push({
+      ownerId: wallet.id,
+      role: order.kind === "informed" ? "informed-flow" : "uninformed-flow",
+      privateKey: wallet.privateKey,
+      protocol: order.protocol,
+      action: order.action,
+      priorityFeeWei: BigInt(order.priorityFeeWei),
+      gmxOrder: order.protocol === "gmx",
+    });
   }
   return intents;
 }

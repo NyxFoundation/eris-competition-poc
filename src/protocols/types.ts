@@ -93,13 +93,6 @@ export interface ProtocolAdapter {
     state: unknown,
   ): Promise<BuiltTx[]>;
 
-  // ---- orderflow 生成 ----
-  buildFlow(
-    ctx: SimContext,
-    state: unknown,
-    fairPrice: number,
-  ): Promise<FlowOrder[]>;
-
   // ---- mine 後フック（GMX keeper 実行）----
   afterMine?(ctx: SimContext): Promise<void>;
 

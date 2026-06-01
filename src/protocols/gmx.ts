@@ -29,7 +29,6 @@ import type {
 } from "../types.js";
 import type {
   BuiltTx,
-  FlowOrder,
   ProtocolAdapter,
   SimContext,
   ValidationResult,
@@ -606,30 +605,6 @@ export const gmxAdapter: ProtocolAdapter = {
 
   async buildTxs(ctx, owner, action): Promise<BuiltTx[]> {
     return [buildOrderTx(owner, ctx.gmx.market, action)];
-  },
-
-  // perp orderflow: 小口のロング/ショートを開いて約定ボリュームを作る（keeper が約定）
-  async buildFlow(ctx): Promise<FlowOrder[]> {
-    if (!ctx.rng.bool()) return []; // 約半数のラウンドは見送り（OI 過剰・実行負荷を抑制）
-    const isLong = ctx.rng.bool();
-    // size は gmxFlowMaxSizeUsd の 1/50 を基準（約 2x になるよう担保を size/2x で算出）
-    const sizeUsd = ctx.config.gmxFlowMaxSizeUsd / 50n;
-    // collateral(WETH wei) ≈ (sizeUsd/2) を USD->WETH 換算。oraclePrices は使えないため概算 fairPrice 相当で割る
-    const sizeUsdNum = Number(sizeUsd) / 1e30;
-    const collateralWei = BigInt(
-      Math.max(1, Math.floor(((sizeUsdNum / 2) * 1e18) / 2100)),
-    );
-    const fee =
-      ctx.config.defaultPriorityFeeWei +
-      BigInt(ctx.rng.int(1, 60)) * 1_000_000n;
-    const action = {
-      type: "gmxIncrease",
-      isLong,
-      collateral: "WETH",
-      collateralAmount: collateralWei.toString(),
-      sizeDeltaUsd: sizeUsd.toString(),
-    } as unknown as LeafAction;
-    return [{ kind: "uninformed", action, priorityFeeWei: fee }];
   },
 
   // 競争ブロックで作成された注文を keeper が約定する

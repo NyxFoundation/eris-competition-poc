@@ -16,7 +16,6 @@ import type {
 } from "../types.js";
 import type {
   BuiltTx,
-  FlowOrder,
   ProtocolAdapter,
   SimContext,
   ValidationResult,
@@ -226,6 +225,20 @@ async function userReserve(
   return { supplied: r[0], borrowed: r[2] };
 }
 
+// orderflow bot の Aave 状態機械が必要とする reserve を読む。
+// flow 生成自体は bot プロセス側だが、RPC 読取は coordinator が担い結果を FlowContext で渡す。
+export async function readAaveFlowReserves(
+  publicClient: PublicClient,
+  wallet: Address,
+): Promise<{ wethSupplied: bigint; usdcBorrowed: bigint }> {
+  // 独立した 2 リードなので並列化して RPC レイテンシを抑える。
+  const [weth, usdc] = await Promise.all([
+    userReserve(publicClient, TOKENS.WETH.address, wallet),
+    userReserve(publicClient, AAVE_STABLE, wallet),
+  ]);
+  return { wethSupplied: weth.supplied, usdcBorrowed: usdc.borrowed };
+}
+
 export const aaveAdapter: ProtocolAdapter = {
   id: "aave",
   stableToken: AAVE_STABLE,
@@ -266,57 +279,6 @@ export const aaveAdapter: ProtocolAdapter = {
 
   async buildTxs(_ctx, owner, action): Promise<BuiltTx[]> {
     return [buildTx(owner, action)];
-  },
-
-  // supply/borrow/repay の churn を生成し HF を動かす
-  async buildFlow(ctx, _state, _fairPrice): Promise<FlowOrder[]> {
-    const wallet = ctx.flowWallet("aave", "informed");
-    const [weth] = await Promise.all([
-      userReserve(ctx.publicClient, TOKENS.WETH.address, wallet.address),
-    ]);
-    const usdc = await userReserve(
-      ctx.publicClient,
-      AAVE_STABLE,
-      wallet.address,
-    );
-    const fee =
-      ctx.config.defaultPriorityFeeWei +
-      BigInt(ctx.rng.int(1, 40)) * 1_000_000n;
-
-    // 状態機械: supply -> (borrow <-> repay を反復) -> 債務0のとき確率で withdraw。
-    //   - withdraw は borrowed===0 のときのみ（債務未返済での withdraw revert を回避）
-    //   - 債務があれば必ず repay max（flow walletは初期USDCも保有するため利息込みで完済でき端数ループを回避）
-    let action: LeafAction;
-    if (weth.supplied === 0n) {
-      const amount = ctx.config.aaveFlowMaxWethWei / 2n;
-      action = {
-        type: "aaveSupply",
-        asset: "WETH",
-        amount: amount.toString(),
-      } as unknown as LeafAction;
-    } else if (usdc.borrowed > 0n) {
-      action = {
-        type: "aaveRepay",
-        asset: "USDC",
-        amount: "max",
-      } as unknown as LeafAction;
-    } else if (ctx.rng.bool()) {
-      // 債務0 → borrow（maxAaveBorrowUsdcUnits を尊重）
-      const amount = ctx.config.maxAaveBorrowUsdcUnits / 5n;
-      action = {
-        type: "aaveBorrow",
-        asset: "USDC",
-        amount: (amount > 0n ? amount : 100_000_000n).toString(),
-      } as unknown as LeafAction;
-    } else {
-      // 債務0 → 担保を引き上げてサイクルを閉じる
-      action = {
-        type: "aaveWithdraw",
-        asset: "WETH",
-        amount: "max",
-      } as unknown as LeafAction;
-    }
-    return [{ kind: "informed", action, priorityFeeWei: fee }];
   },
 
   async valueUsdc(ctx, agent): Promise<number> {

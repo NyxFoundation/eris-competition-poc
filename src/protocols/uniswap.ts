@@ -32,16 +32,9 @@ import type {
   TokenSymbol,
   UniswapObservation,
 } from "../types.js";
-import type {
-  BuiltTx,
-  FlowOrder,
-  ProtocolAdapter,
-  SimContext,
-  ValidationResult,
-} from "./types.js";
+import type { BuiltTx, ProtocolAdapter, ValidationResult } from "./types.js";
 
 const DECIMAL_INTEGER = /^[0-9]+$/;
-const FLOW_SLIPPAGE_BPS = 100;
 
 type UniswapState = {
   priceUsdcPerWeth: number;
@@ -545,22 +538,6 @@ function validate(
   return { ok: true };
 }
 
-// ---------------------------------------------------------------------------
-// flow
-// ---------------------------------------------------------------------------
-
-function randomBigInt(
-  rng: SimContext["rng"],
-  minInclusive: bigint,
-  maxInclusive: bigint,
-): bigint {
-  const span = maxInclusive - minInclusive + 1n;
-  return (
-    minInclusive +
-    (BigInt(Math.floor(rng.next() * 1_000_000)) * span) / 1_000_000n
-  );
-}
-
 function capToBalance(
   tokenIn: TokenSymbol,
   desired: bigint,
@@ -621,18 +598,6 @@ export const uniswapAdapter: ProtocolAdapter = {
     return [{ to: UNISWAP.nonfungiblePositionManager, data }];
   },
 
-  async buildFlow(ctx, state, fairPrice): Promise<FlowOrder[]> {
-    const s = state as UniswapState;
-    return buildAmmFlow(
-      ctx,
-      "uniswap",
-      s.priceUsdcPerWeth,
-      fairPrice,
-      ctx.config.uninformedFlowMaxWethWei,
-      ctx.config.informedFlowMaxWethWei,
-    );
-  },
-
   async valueUsdc(ctx, agent, _state, fairPrice): Promise<number> {
     const positions = await getLpPositions(ctx.publicClient, agent, fairPrice);
     return positions.reduce((sum, p) => sum + p.valueUsdc, 0);
@@ -647,65 +612,6 @@ export const uniswapAdapter: ProtocolAdapter = {
     ];
   },
 };
-
-// flow を生成する共通ロジック（balancer/curve でも再利用）
-export function buildAmmFlow(
-  ctx: SimContext,
-  protocol: "uniswap" | "balancer" | "curve",
-  poolPrice: number,
-  fairPrice: number,
-  uninformedMaxWethWei: bigint,
-  informedMaxWethWei: bigint,
-): FlowOrder[] {
-  const orders: FlowOrder[] = [];
-  const swapType =
-    protocol === "uniswap"
-      ? "swap"
-      : protocol === "balancer"
-        ? "balancerSwap"
-        : "curveSwap";
-
-  // uninformed
-  const uninformedTokenIn: TokenSymbol = ctx.rng.bool() ? "WETH" : "USDC";
-  const uninformedAmount =
-    uninformedTokenIn === "WETH"
-      ? randomBigInt(ctx.rng, uninformedMaxWethWei / 20n, uninformedMaxWethWei)
-      : randomBigInt(ctx.rng, 100_000_000n, 2_500_000_000n);
-  orders.push({
-    kind: "uninformed",
-    action: {
-      type: swapType,
-      tokenIn: uninformedTokenIn,
-      amountIn: uninformedAmount.toString(),
-      slippageBps: FLOW_SLIPPAGE_BPS,
-    } as LeafAction,
-    priorityFeeWei:
-      ctx.config.defaultPriorityFeeWei +
-      BigInt(ctx.rng.int(1, 50)) * 1_000_000n,
-  });
-
-  // informed: pool 価格を fairPrice に寄せる
-  const informedTokenIn: TokenSymbol = poolPrice < fairPrice ? "USDC" : "WETH";
-  const gap = Math.min(1, Math.abs(fairPrice / poolPrice - 1) * 20);
-  const informedAmount =
-    informedTokenIn === "WETH"
-      ? (informedMaxWethWei * BigInt(Math.max(1, Math.floor(gap * 100)))) / 100n
-      : BigInt(Math.max(100_000_000, Math.floor(gap * 5_000_000_000)));
-  orders.push({
-    kind: "informed",
-    action: {
-      type: swapType,
-      tokenIn: informedTokenIn,
-      amountIn: informedAmount.toString(),
-      slippageBps: FLOW_SLIPPAGE_BPS,
-    } as LeafAction,
-    priorityFeeWei:
-      ctx.config.defaultPriorityFeeWei +
-      BigInt(ctx.rng.int(50, 100)) * 1_000_000n,
-  });
-
-  return orders;
-}
 
 // approve 1 件分の BuiltTx を組む（balancer/curve/aave/gmx の setupWallet でも再利用）
 export function approveTx(token: Address, spender: Address): BuiltTx {

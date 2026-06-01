@@ -9,7 +9,12 @@ export class AgentProcess {
   private pending: Array<(line: string) => void> = [];
   private stderr = "";
 
-  constructor(readonly spec: AgentSpec, rpcUrl: string, agentAddress: string) {
+  constructor(
+    readonly spec: AgentSpec,
+    rpcUrl: string,
+    agentAddress: string,
+    runDir: string,
+  ) {
     this.child = spawn(spec.command, spec.args ?? [], {
       stdio: ["pipe", "pipe", "pipe"],
       env: {
@@ -18,8 +23,10 @@ export class AgentProcess {
         NODE_ENV: process.env.NODE_ENV ?? "development",
         ERIS_AGENT_ID: spec.id,
         ERIS_RPC_URL: rpcUrl,
-        ERIS_AGENT_ADDRESS: agentAddress
-      }
+        ERIS_AGENT_ADDRESS: agentAddress,
+        // エージェントが行動ログを runs/<runId>/agents/<id>.jsonl に残すための出力先。
+        ERIS_RUN_DIR: runDir,
+      },
     });
 
     const stdout = createInterface({ input: this.child.stdout });
@@ -33,9 +40,15 @@ export class AgentProcess {
     });
   }
 
-  async requestAction(observation: AgentObservation, timeoutMs: number): Promise<AgentAction> {
-    if (this.child.killed) return { type: "noop", reason: "agent process killed" };
-    const linePromise = new Promise<string>((resolve) => this.pending.push(resolve));
+  async requestAction(
+    observation: AgentObservation,
+    timeoutMs: number,
+  ): Promise<AgentAction> {
+    if (this.child.killed)
+      return { type: "noop", reason: "agent process killed" };
+    const linePromise = new Promise<string>((resolve) =>
+      this.pending.push(resolve),
+    );
     this.child.stdin.write(`${safeStringify(observation)}\n`);
     const timeout = new Promise<never>((_, reject) => {
       setTimeout(() => reject(new Error("agent timeout")), timeoutMs).unref();
@@ -44,7 +57,10 @@ export class AgentProcess {
       const line = await Promise.race([linePromise, timeout]);
       return parseAction(JSON.parse(line));
     } catch (error) {
-      return { type: "noop", reason: `${this.spec.id}: ${error instanceof Error ? error.message : String(error)}` };
+      return {
+        type: "noop",
+        reason: `${this.spec.id}: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
   }
 

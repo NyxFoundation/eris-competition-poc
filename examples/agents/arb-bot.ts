@@ -14,8 +14,10 @@
  *   7. clamp(bid, defaultPriorityFee, maxPriorityFee)
  */
 import { createInterface } from "node:readline";
+import { createEmitter } from "./lib/agentLog.js";
 
 type Observation = {
+  round: number;
   protocols: { uniswap: { pool: { priceUsdcPerWeth: number } } };
   fairPriceUsdcPerWeth: number;
   limits: {
@@ -25,6 +27,8 @@ type Observation = {
     maxPriorityFeePerGasWei: string;
   };
 };
+
+const emit = createEmitter();
 
 const PROFIT_FRACTION = Number(process.env.BID_PROFIT_FRACTION ?? "0.3");
 const GAS_UNITS_ESTIMATE = 180_000n;
@@ -43,10 +47,10 @@ const rl = createInterface({ input: process.stdin });
 
 rl.on("line", (line) => {
   const obs = JSON.parse(line) as Observation;
+  const round = obs.round;
+  const signals: Record<string, number> = {};
   if (!obs.protocols?.uniswap?.pool) {
-    process.stdout.write(
-      `${JSON.stringify({ type: "noop", reason: "uniswap disabled" })}\n`,
-    );
+    emit({ type: "noop", reason: "uniswap disabled" }, { round, signals });
     return;
   }
   const pool = obs.protocols.uniswap.pool.priceUsdcPerWeth;
@@ -57,16 +61,16 @@ rl.on("line", (line) => {
     !Number.isFinite(fair) ||
     fair <= 0
   ) {
-    process.stdout.write(
-      `${JSON.stringify({ type: "noop", reason: "invalid prices" })}\n`,
-    );
+    emit({ type: "noop", reason: "invalid prices" }, { round, signals });
     return;
   }
   const gap = fair / pool - 1;
+  signals.pool = pool;
+  signals.fair = fair;
+  signals.gap = gap;
+  signals.gapBps = gap * 10_000;
   if (Math.abs(gap) < GAP_THRESHOLD) {
-    process.stdout.write(
-      `${JSON.stringify({ type: "noop", reason: "gap too small" })}\n`,
-    );
+    emit({ type: "noop", reason: "gap too small" }, { round, signals });
     return;
   }
 
@@ -103,13 +107,17 @@ rl.on("line", (line) => {
         ? maxBid
         : bidPerGasWei;
 
-  process.stdout.write(
-    `${JSON.stringify({
+  signals.sizeUsdc = sizeUsdc;
+  signals.profitUsdc = profitUsdc;
+  signals.bidGwei = Number(bid / 1_000_000_000n);
+  emit(
+    {
       type: "swap",
       tokenIn,
       amountIn: amountIn.toString(),
       maxPriorityFeePerGasWei: bid.toString(),
       slippageBps: 75,
-    })}\n`,
+    },
+    { round, signals },
   );
 });

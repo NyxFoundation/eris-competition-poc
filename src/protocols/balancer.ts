@@ -20,12 +20,11 @@ import type {
 } from "../types.js";
 import type {
   BuiltTx,
-  FlowOrder,
   ProtocolAdapter,
   SimContext,
   ValidationResult,
 } from "./types.js";
-import { approveTx, buildAmmFlow } from "./uniswap.js";
+import { approveTx } from "./uniswap.js";
 import { accountAddress } from "../chain.js";
 
 const DECIMAL_INTEGER = /^[0-9]+$/;
@@ -225,18 +224,6 @@ export const balancerAdapter: ProtocolAdapter = {
     if (action.type !== "balancerSwap")
       throw new Error("balancer buildTxs: unexpected action");
     return [await buildSwapTx(ctx.publicClient, owner, action)];
-  },
-
-  async buildFlow(ctx, state, fairPrice): Promise<FlowOrder[]> {
-    const s = state as BalancerState;
-    return buildAmmFlow(
-      ctx,
-      "balancer",
-      s.priceUsdcPerWeth,
-      fairPrice,
-      ctx.config.balancerFlowMaxWethWei,
-      ctx.config.balancerFlowMaxWethWei,
-    );
   },
 
   async valueUsdc(): Promise<number> {
