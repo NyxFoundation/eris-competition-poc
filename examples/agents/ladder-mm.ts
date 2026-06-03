@@ -62,12 +62,29 @@ type AgentAction =
 type ManagedPosition = { tickLower: number; tickUpper: number; weight: number };
 
 const LADDER_STEPS = clampInt(intEnv("LADDER_STEPS", 3), 1, 9);
-const LADDER_INNER_WEIGHT = floatEnv("LADDER_INNER_WEIGHT", 0.6);
-const LADDER_OUTER_WEIGHT = floatEnv("LADDER_OUTER_WEIGHT", 0.4);
-const LADDER_STEP_WIDTH_MULTIPLIER = intEnv("LADDER_STEP_WIDTH_MULTIPLIER", 20);
+// Weight allocation: concentrate the inner step heavily so the at-price
+// capital approaches the single-range LP baseline; outer steps are thin
+// inventory-management reserves that capture flow during larger drift.
+const LADDER_INNER_WEIGHT = floatEnv("LADDER_INNER_WEIGHT", 0.8);
+const LADDER_OUTER_WEIGHT = floatEnv("LADDER_OUTER_WEIGHT", 0.2);
+// Step width: each step covers ±(width/2) ticks. tickSpacing=10 for the 5-bps
+// WETH/USDC pool, so multiplier=120 → each step spans 1200 ticks (~±6%), the
+// same width as the single-range LP baseline (`lp-provider`'s
+// RANGE_WIDTH_MULTIPLIER=60 = half-width 600 ticks = total width 1200 ticks).
+// Matching the baseline width neutralises the concentration-IL premium so the
+// ladder's inventory-skew advantage can show up in PnL.
+//
+// Previously 20 (~±1% per step) drained ladder slots within <128 rounds, since
+// drained NFTs permanently consume a `maxOpenPositions` slot (no burn action).
+const LADDER_STEP_WIDTH_MULTIPLIER = intEnv("LADDER_STEP_WIDTH_MULTIPLIER", 120);
 const LADDER_REBALANCE_GAP_BPS = intEnv("LADDER_REBALANCE_GAP_BPS", 80);
 const LADDER_REBALANCE_SKEW = floatEnv("LADDER_REBALANCE_SKEW", 0.3);
-const LADDER_MINT_BUDGET_BPS = intEnv("LADDER_MINT_BUDGET_BPS", 3500);
+// Total fraction of available balance to deploy across the ladder. The single-
+// range LP baseline uses 3500 (35%); we use 5000 (50%) because ladder splits
+// across multiple positions, so each position individually receives less. With
+// inner=0.8 and budget=0.5 the inner position holds ~40% of capped balance,
+// slightly above the single-range baseline.
+const LADDER_MINT_BUDGET_BPS = intEnv("LADDER_MINT_BUDGET_BPS", 5000);
 const LADDER_SKEW_TILT = floatEnv("LADDER_SKEW_TILT", 0.5);
 const MIN_WETH_MINT_WEI = 5_000_000_000_000_000n; // 0.005 WETH
 const MIN_USDC_MINT_UNITS = 10_000_000n; // 10 USDC
