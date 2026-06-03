@@ -1,0 +1,11 @@
+{
+  "agents": [
+    {
+      "id": "claude-llm",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AGENT0_PRIVATE_KEY",
+      "description": "Claude Sonnet 4.6 autonomous strategist (NL strategy + TS executor, async revisions). Requires ANTHROPIC_API_KEY in the parent shell, or set ERIS_LLM_MOCK=1 to use the offline mock."
+    }
+  ]
+}

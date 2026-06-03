@@ -1,0 +1,227 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  createState,
+  handleLine,
+  whichReviseReason
+} from "../src/llm/claudeAgent.js";
+import type { Strategist, StrategyResult } from "../src/llm/claudeStrategist.js";
+import type { Strategy } from "../src/llm/strategy.js";
+import type { AgentObservation } from "../src/types.js";
+import type { ReviseReason } from "../src/llm/prompts.js";
+import type { RoundRecord } from "../src/llm/history.js";
+
+function makeObs(round: number, valueUsdc = 100, runId = `test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`): AgentObservation {
+  return {
+    kind: "observation",
+    runId,
+    round,
+    blockNumber: String(round + 1),
+    agentAddress: "0x0000000000000000000000000000000000000001",
+    pool: { pair: "WETH/USDC", fee: 500, priceUsdcPerWeth: 3000, tick: 0, tickSpacing: 10 },
+    positions: [],
+    fairPriceUsdcPerWeth: 3030,
+    balances: { ethWei: "1000000000000000000", wethWei: "10000000000000000000", usdcUnits: "25000000000" },
+    inventory: { valueUsdc, weth: 10, usdc: 25000, eth: 1 },
+    history: [],
+    limits: {
+      maxWethInWei: "1000000000000000000",
+      maxUsdcInUnits: "5000000000",
+      defaultPriorityFeePerGasWei: "100000000",
+      maxPriorityFeePerGasWei: "5000000000",
+      defaultSlippageBps: 50,
+      maxBundleActions: 5,
+      maxLpWethWei: "1000000000000000000",
+      maxLpUsdcUnits: "5000000000",
+      maxOpenPositions: 10
+    }
+  };
+}
+
+/**
+ * Strategist stub that can either resolve immediately or defer until the test
+ * calls .release(). Deferral lets the test observe state.pendingPhase mid-flight.
+ */
+class StubStrategist implements Strategist {
+  initCount = 0;
+  reviseCount = 0;
+  lastReviseReason: ReviseReason | null = null;
+  fail = false;
+  defer = false;
+  private queue: Array<{ resolve: (r: StrategyResult) => void; phase: "init" | "revise"; version: number; reason?: ReviseReason }> = [];
+  constructor(private executorTs = `return { type: "noop", reason: "stub v" + params.v };`) {}
+
+  init(_obs: AgentObservation, version: number): Promise<StrategyResult> {
+    this.initCount++;
+    return this.build("init", version);
+  }
+  revise(_p: Strategy, _h: RoundRecord[], reason: ReviseReason, _i: number, _c: number, version: number): Promise<StrategyResult> {
+    this.reviseCount++;
+    this.lastReviseReason = reason;
+    return this.build("revise", version, reason);
+  }
+  private build(phase: "init" | "revise", version: number, reason?: ReviseReason): Promise<StrategyResult> {
+    const make = (): StrategyResult => this.fail
+      ? { ok: false, reason: "stub failure" }
+      : {
+          ok: true,
+          strategy: { version, notes: `stub ${phase}${reason ? ` (${reason})` : ""}`, params: { v: version }, executorTs: this.executorTs },
+          meta: { phase, latencyMs: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }
+        };
+    if (!this.defer) return Promise.resolve(make());
+    return new Promise<StrategyResult>((resolve) => {
+      this.queue.push({ resolve: () => resolve(make()), phase, version, reason });
+    });
+  }
+  release(): void {
+    const items = this.queue;
+    this.queue = [];
+    for (const item of items) item.resolve(undefined as unknown as StrategyResult);
+  }
+}
+
+function withTmpReportDir<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = process.env.REPORT_DIR;
+  const dir = mkdtempSync(join(tmpdir(), "eris-llm-test-"));
+  process.env.REPORT_DIR = dir;
+  return fn().finally(() => {
+    if (prev === undefined) delete process.env.REPORT_DIR;
+    else process.env.REPORT_DIR = prev;
+  });
+}
+
+test("first observation returns noop and init runs in the background", async () => {
+  await withTmpReportDir(async () => {
+    const state = createState("test-agent");
+    const strategist = new StubStrategist();
+    strategist.defer = true;
+    const action = await handleLine(JSON.stringify(makeObs(0)), state, strategist);
+    assert.equal(action.type, "noop");
+    if (action.type === "noop") assert.match(action.reason ?? "", /strategy init pending/);
+    // While deferred, pendingPhase is still "init" and strategy is unset.
+    assert.equal(state.pendingPhase, "init");
+    assert.equal(state.strategy === null, true);
+    strategist.release();
+    await state.pending;
+    assert.equal(state.strategy?.version, 1);
+    assert.equal(state.pendingPhase, null);
+  });
+});
+
+test("after init, executor produces real actions on subsequent rounds", async () => {
+  await withTmpReportDir(async () => {
+    const state = createState("test-agent");
+    const strategist = new StubStrategist(`return { type: "swap", tokenIn: "WETH", amountIn: "1000000000" };`);
+    await handleLine(JSON.stringify(makeObs(0)), state, strategist);
+    await state.pending;
+    const action = await handleLine(JSON.stringify(makeObs(1)), state, strategist);
+    assert.equal(action.type, "swap");
+  });
+});
+
+test("strategy revision fires on the scheduled round and bumps version", async () => {
+  await withTmpReportDir(async () => {
+    const state = createState("test-agent");
+    const strategist = new StubStrategist();
+    await handleLine(JSON.stringify(makeObs(0)), state, strategist);
+    await state.pending;
+    assert.equal(state.strategy?.version, 1);
+
+    strategist.defer = true;
+    await handleLine(JSON.stringify(makeObs(10)), state, strategist);
+    assert.equal(state.pendingPhase, "revise");
+    strategist.release();
+    await state.pending;
+    assert.equal(state.strategy?.version, 2);
+    assert.equal(strategist.lastReviseReason, "scheduled");
+  });
+});
+
+test("strategy revision fires on PnL drop", async () => {
+  await withTmpReportDir(async () => {
+    const state = createState("test-agent");
+    const strategist = new StubStrategist();
+    await handleLine(JSON.stringify(makeObs(0, 100)), state, strategist);
+    await state.pending;
+    strategist.defer = true;
+    await handleLine(JSON.stringify(makeObs(3, 90)), state, strategist);
+    assert.equal(state.pendingPhase, "revise");
+    strategist.release();
+    await state.pending;
+    assert.equal(strategist.lastReviseReason, "pnl_drop");
+    assert.equal(state.strategy?.version, 2);
+  });
+});
+
+test("failed init leaves no strategy and retries on next round", async () => {
+  await withTmpReportDir(async () => {
+    const state = createState("test-agent");
+    const strategist = new StubStrategist();
+    strategist.fail = true;
+    await handleLine(JSON.stringify(makeObs(0)), state, strategist);
+    await state.pending;
+    assert.equal(state.strategy, null);
+    assert.equal(state.pendingPhase, null);
+    assert.equal(strategist.initCount, 1);
+
+    await handleLine(JSON.stringify(makeObs(1)), state, strategist);
+    await state.pending;
+    assert.equal(strategist.initCount, 2, "second round retries init");
+  });
+});
+
+test("failed revise keeps the previous strategy", async () => {
+  await withTmpReportDir(async () => {
+    const state = createState("test-agent");
+    const strategist = new StubStrategist();
+    await handleLine(JSON.stringify(makeObs(0)), state, strategist);
+    await state.pending;
+    assert.equal(state.strategy?.version, 1);
+    strategist.fail = true;
+    await handleLine(JSON.stringify(makeObs(10)), state, strategist);
+    await state.pending;
+    assert.equal(state.strategy?.version, 1, "old strategy retained when revise fails");
+    assert.equal(strategist.reviseCount, 1);
+  });
+});
+
+test("strategy + decisions + claude-calls files land under REPORT_DIR/runId/agent-<id>", async () => {
+  await withTmpReportDir(async () => {
+    const state = createState("persist-agent");
+    const strategist = new StubStrategist();
+    const obs = makeObs(0);
+    await handleLine(JSON.stringify(obs), state, strategist);
+    await state.pending;
+    const dir = join(process.env.REPORT_DIR!, obs.runId, "agent-persist-agent");
+    assert.ok(existsSync(dir), `expected dir ${dir}`);
+    const files = readdirSync(dir);
+    assert.ok(files.includes("strategy-v1.md"));
+    assert.ok(files.includes("strategy-v1.params.json"));
+    assert.ok(files.includes("strategy-v1.executor.ts"));
+    assert.ok(files.includes("decisions.jsonl"));
+    assert.ok(files.includes("claude-calls.jsonl"));
+    const md = readFileSync(join(dir, "strategy-v1.md"), "utf8");
+    assert.match(md, /Strategy v1/);
+    const calls = readFileSync(join(dir, "claude-calls.jsonl"), "utf8").trim().split("\n");
+    assert.equal(calls.length, 1);
+    const callRow = JSON.parse(calls[0]);
+    assert.equal(callRow.phase, "init");
+    assert.equal(callRow.ok, true);
+    assert.equal(callRow.strategyVersion, 1);
+  });
+});
+
+test("whichReviseReason cadence and drawdown logic", () => {
+  // Cadence: round % 10 == 0 and round > 0
+  assert.equal(whichReviseReason(0, -1, 100, 100), null);
+  assert.equal(whichReviseReason(10, -1, 100, 100), "scheduled");
+  assert.equal(whichReviseReason(10, 10, 100, 100), null, "no double-fire on the same round");
+  // Drawdown -5%
+  assert.equal(whichReviseReason(3, -1, 95, 100), null, "boundary: -5% exactly is not triggered");
+  assert.equal(whichReviseReason(3, -1, 94.9, 100), "pnl_drop");
+  // Initial 0 → never trigger drawdown
+  assert.equal(whichReviseReason(3, -1, -10, 0), null);
+});
