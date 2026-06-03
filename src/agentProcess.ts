@@ -15,18 +15,25 @@ export class AgentProcess {
     agentAddress: string,
     runDir: string,
   ) {
+    const childEnv: NodeJS.ProcessEnv = { ...process.env };
+    // Strip parent Claude Code session vars so SDK-spawned claude
+    // subprocesses authenticate via their own OAuth rather than inheriting
+    // a foreign session id from the surrounding Claude Code harness.
+    for (const k of Object.keys(childEnv)) {
+      if (k.startsWith("CLAUDE_CODE_")) delete childEnv[k];
+    }
+    Object.assign(childEnv, spec.env ?? {});
+    childEnv.NODE_ENV = process.env.NODE_ENV ?? "development";
+    childEnv.ERIS_AGENT_ID = spec.id;
+    childEnv.ERIS_RPC_URL = rpcUrl;
+    childEnv.ERIS_AGENT_ADDRESS = agentAddress;
+    childEnv.REPORT_DIR = process.env.REPORT_DIR ?? "./runs";
+    // エージェントが行動ログを runs/<runId>/agents/<id>.jsonl に残すための出力先。
+    childEnv.ERIS_RUN_DIR = runDir;
+
     this.child = spawn(spec.command, spec.args ?? [], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...(spec.env ?? {}),
-        PATH: process.env.PATH ?? "",
-        NODE_ENV: process.env.NODE_ENV ?? "development",
-        ERIS_AGENT_ID: spec.id,
-        ERIS_RPC_URL: rpcUrl,
-        ERIS_AGENT_ADDRESS: agentAddress,
-        // エージェントが行動ログを runs/<runId>/agents/<id>.jsonl に残すための出力先。
-        ERIS_RUN_DIR: runDir,
-      },
+      env: childEnv,
     });
 
     const stdout = createInterface({ input: this.child.stdout });
