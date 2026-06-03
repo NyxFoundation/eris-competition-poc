@@ -6,25 +6,48 @@ import { join } from "node:path";
 import {
   createState,
   handleLine,
-  whichReviseReason
+  whichReviseReason,
 } from "../src/llm/claudeAgent.js";
-import type { Strategist, StrategyResult } from "../src/llm/claudeStrategist.js";
+import type {
+  Strategist,
+  StrategyResult,
+} from "../src/llm/claudeStrategist.js";
 import type { Strategy } from "../src/llm/strategy.js";
 import type { AgentObservation } from "../src/types.js";
 import type { ReviseReason } from "../src/llm/prompts.js";
 import type { RoundRecord } from "../src/llm/history.js";
 
-function makeObs(round: number, valueUsdc = 100, runId = `test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`): AgentObservation {
+function makeObs(
+  round: number,
+  valueUsdc = 100,
+  runId = `test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+): AgentObservation {
   return {
     kind: "observation",
     runId,
     round,
     blockNumber: String(round + 1),
     agentAddress: "0x0000000000000000000000000000000000000001",
-    pool: { pair: "WETH/USDC", fee: 500, priceUsdcPerWeth: 3000, tick: 0, tickSpacing: 10 },
-    positions: [],
     fairPriceUsdcPerWeth: 3030,
-    balances: { ethWei: "1000000000000000000", wethWei: "10000000000000000000", usdcUnits: "25000000000" },
+    oraclePrices: { wethUsd: 3000, usdcUsd: 1 },
+    enabledProtocols: ["uniswap"],
+    protocols: {
+      uniswap: {
+        pool: {
+          pair: "WETH/USDC",
+          fee: 500,
+          priceUsdcPerWeth: 3000,
+          tick: 0,
+          tickSpacing: 10,
+        },
+        positions: [],
+      },
+    },
+    balances: {
+      ethWei: "1000000000000000000",
+      wethWei: "10000000000000000000",
+      usdcUnits: "25000000000",
+    },
     inventory: { valueUsdc, weth: 10, usdc: 25000, eth: 1 },
     history: [],
     limits: {
@@ -36,8 +59,11 @@ function makeObs(round: number, valueUsdc = 100, runId = `test-${process.pid}-${
       maxBundleActions: 5,
       maxLpWethWei: "1000000000000000000",
       maxLpUsdcUnits: "5000000000",
-      maxOpenPositions: 10
-    }
+      maxOpenPositions: 10,
+      maxGmxSizeUsd: "0",
+      maxAaveSupplyWethWei: "0",
+      maxAaveBorrowUsdcUnits: "0",
+    },
   };
 }
 
@@ -51,35 +77,72 @@ class StubStrategist implements Strategist {
   lastReviseReason: ReviseReason | null = null;
   fail = false;
   defer = false;
-  private queue: Array<{ resolve: (r: StrategyResult) => void; phase: "init" | "revise"; version: number; reason?: ReviseReason }> = [];
-  constructor(private executorTs = `return { type: "noop", reason: "stub v" + params.v };`) {}
+  private queue: Array<{
+    resolve: (r: StrategyResult) => void;
+    phase: "init" | "revise";
+    version: number;
+    reason?: ReviseReason;
+  }> = [];
+  constructor(
+    private executorTs = `return { type: "noop", reason: "stub v" + params.v };`,
+  ) {}
 
   init(_obs: AgentObservation, version: number): Promise<StrategyResult> {
     this.initCount++;
     return this.build("init", version);
   }
-  revise(_p: Strategy, _h: RoundRecord[], reason: ReviseReason, _i: number, _c: number, version: number): Promise<StrategyResult> {
+  revise(
+    _p: Strategy,
+    _h: RoundRecord[],
+    reason: ReviseReason,
+    _i: number,
+    _c: number,
+    version: number,
+  ): Promise<StrategyResult> {
     this.reviseCount++;
     this.lastReviseReason = reason;
     return this.build("revise", version, reason);
   }
-  private build(phase: "init" | "revise", version: number, reason?: ReviseReason): Promise<StrategyResult> {
-    const make = (): StrategyResult => this.fail
-      ? { ok: false, reason: "stub failure" }
-      : {
-          ok: true,
-          strategy: { version, notes: `stub ${phase}${reason ? ` (${reason})` : ""}`, params: { v: version }, executorTs: this.executorTs },
-          meta: { phase, latencyMs: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }
-        };
+  private build(
+    phase: "init" | "revise",
+    version: number,
+    reason?: ReviseReason,
+  ): Promise<StrategyResult> {
+    const make = (): StrategyResult =>
+      this.fail
+        ? { ok: false, reason: "stub failure" }
+        : {
+            ok: true,
+            strategy: {
+              version,
+              notes: `stub ${phase}${reason ? ` (${reason})` : ""}`,
+              params: { v: version },
+              executorTs: this.executorTs,
+            },
+            meta: {
+              phase,
+              latencyMs: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadInputTokens: 0,
+              cacheCreationInputTokens: 0,
+            },
+          };
     if (!this.defer) return Promise.resolve(make());
     return new Promise<StrategyResult>((resolve) => {
-      this.queue.push({ resolve: () => resolve(make()), phase, version, reason });
+      this.queue.push({
+        resolve: () => resolve(make()),
+        phase,
+        version,
+        reason,
+      });
     });
   }
   release(): void {
     const items = this.queue;
     this.queue = [];
-    for (const item of items) item.resolve(undefined as unknown as StrategyResult);
+    for (const item of items)
+      item.resolve(undefined as unknown as StrategyResult);
   }
 }
 
@@ -98,9 +161,14 @@ test("first observation returns noop and init runs in the background", async () 
     const state = createState("test-agent");
     const strategist = new StubStrategist();
     strategist.defer = true;
-    const action = await handleLine(JSON.stringify(makeObs(0)), state, strategist);
+    const action = await handleLine(
+      JSON.stringify(makeObs(0)),
+      state,
+      strategist,
+    );
     assert.equal(action.type, "noop");
-    if (action.type === "noop") assert.match(action.reason ?? "", /strategy init pending/);
+    if (action.type === "noop")
+      assert.match(action.reason ?? "", /strategy init pending/);
     // While deferred, pendingPhase is still "init" and strategy is unset.
     assert.equal(state.pendingPhase, "init");
     assert.equal(state.strategy === null, true);
@@ -114,10 +182,16 @@ test("first observation returns noop and init runs in the background", async () 
 test("after init, executor produces real actions on subsequent rounds", async () => {
   await withTmpReportDir(async () => {
     const state = createState("test-agent");
-    const strategist = new StubStrategist(`return { type: "swap", tokenIn: "WETH", amountIn: "1000000000" };`);
+    const strategist = new StubStrategist(
+      `return { type: "swap", tokenIn: "WETH", amountIn: "1000000000" };`,
+    );
     await handleLine(JSON.stringify(makeObs(0)), state, strategist);
     await state.pending;
-    const action = await handleLine(JSON.stringify(makeObs(1)), state, strategist);
+    const action = await handleLine(
+      JSON.stringify(makeObs(1)),
+      state,
+      strategist,
+    );
     assert.equal(action.type, "swap");
   });
 });
@@ -183,7 +257,11 @@ test("failed revise keeps the previous strategy", async () => {
     strategist.fail = true;
     await handleLine(JSON.stringify(makeObs(10)), state, strategist);
     await state.pending;
-    assert.equal(state.strategy?.version, 1, "old strategy retained when revise fails");
+    assert.equal(
+      state.strategy?.version,
+      1,
+      "old strategy retained when revise fails",
+    );
     assert.equal(strategist.reviseCount, 1);
   });
 });
@@ -205,7 +283,9 @@ test("strategy + decisions + claude-calls files land under REPORT_DIR/runId/agen
     assert.ok(files.includes("claude-calls.jsonl"));
     const md = readFileSync(join(dir, "strategy-v1.md"), "utf8");
     assert.match(md, /Strategy v1/);
-    const calls = readFileSync(join(dir, "claude-calls.jsonl"), "utf8").trim().split("\n");
+    const calls = readFileSync(join(dir, "claude-calls.jsonl"), "utf8")
+      .trim()
+      .split("\n");
     assert.equal(calls.length, 1);
     const callRow = JSON.parse(calls[0]);
     assert.equal(callRow.phase, "init");
@@ -218,9 +298,17 @@ test("whichReviseReason cadence and drawdown logic", () => {
   // Cadence: round % 10 == 0 and round > 0
   assert.equal(whichReviseReason(0, -1, 100, 100), null);
   assert.equal(whichReviseReason(10, -1, 100, 100), "scheduled");
-  assert.equal(whichReviseReason(10, 10, 100, 100), null, "no double-fire on the same round");
+  assert.equal(
+    whichReviseReason(10, 10, 100, 100),
+    null,
+    "no double-fire on the same round",
+  );
   // Drawdown -5%
-  assert.equal(whichReviseReason(3, -1, 95, 100), null, "boundary: -5% exactly is not triggered");
+  assert.equal(
+    whichReviseReason(3, -1, 95, 100),
+    null,
+    "boundary: -5% exactly is not triggered",
+  );
   assert.equal(whichReviseReason(3, -1, 94.9, 100), "pnl_drop");
   // Initial 0 → never trigger drawdown
   assert.equal(whichReviseReason(3, -1, -10, 0), null);

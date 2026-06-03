@@ -28,11 +28,18 @@ type AgentObservation = {
   round: number;
   blockNumber: string;
   agentAddress: string;
-  pool: { pair: "WETH/USDC"; fee: 500; priceUsdcPerWeth: number; tick: number; tickSpacing: number };
-  positions: Array<{ tokenId: string; tickLower: number; tickUpper: number; liquidity: string;
-                    tokensOwedWethWei: string; tokensOwedUsdcUnits: string;
-                    amountWethWei: string; amountUsdcUnits: string; valueUsdc: number }>;
   fairPriceUsdcPerWeth: number;
+  enabledProtocols: string[];
+  // Multi-protocol. Uniswap pool/positions live under obs.protocols.uniswap (may be undefined if disabled).
+  protocols: {
+    uniswap?: {
+      pool: { pair: "WETH/USDC"; fee: 500; priceUsdcPerWeth: number; tick: number; tickSpacing: number };
+      positions: Array<{ tokenId: string; tickLower: number; tickUpper: number; liquidity: string;
+                        tokensOwedWethWei: string; tokensOwedUsdcUnits: string;
+                        amountWethWei: string; amountUsdcUnits: string; valueUsdc: number }>;
+    };
+    // balancer/curve/gmx/aave may also be present depending on enabledProtocols
+  };
   balances: { ethWei: string; wethWei: string; usdcUnits: string };  // decimal integer strings
   inventory: { valueUsdc: number; weth: number; usdc: number; eth: number };
   history: Array<{ round: number; poolPriceUsdcPerWeth: number; fairPriceUsdcPerWeth: number }>; // last 20
@@ -43,6 +50,7 @@ type AgentObservation = {
     maxBundleActions: number;
     maxLpWethWei: string; maxLpUsdcUnits: string;
     maxOpenPositions: number;
+    maxGmxSizeUsd: string; maxAaveSupplyWethWei: string; maxAaveBorrowUsdcUnits: string;
   };
 };
 \`\`\`
@@ -69,11 +77,11 @@ type AgentAction =
 
 ## Validator constraints (return noop if violated; otherwise the round is wasted)
 - swap.amountIn must be > 0, <= limits.max{Weth|Usdc}In{Wei|Units}, AND <= current balance
-- mintLiquidity ticks must be multiples of obs.pool.tickSpacing (10) and tickLower < tickUpper
+- mintLiquidity ticks must be multiples of obs.protocols.uniswap.pool.tickSpacing (10) and tickLower < tickUpper
 - mintLiquidity desired amounts <= obs.limits.maxLp{...} AND <= current balance
 - bundle.actions.length <= obs.limits.maxBundleActions (typically 5)
 - priorityFee <= obs.limits.maxPriorityFeePerGasWei
-- removeLiquidity.tokenId must exist in obs.positions
+- removeLiquidity.tokenId must exist in obs.protocols.uniswap.positions
 
 ## Helpers (passed as third arg)
 \`\`\`ts
@@ -103,7 +111,7 @@ helpers.log(msg: string): void                // logged to decisions.jsonl
 ## Tokens
 - WETH: 18 decimals; balances.wethWei is the decimal integer string for wei.
 - USDC: 6 decimals; balances.usdcUnits is the decimal integer string for base units.
-- Price obs.pool.priceUsdcPerWeth is a float in USDC-per-WETH (no decimals).
+- Price obs.protocols.uniswap.pool.priceUsdcPerWeth is a float in USDC-per-WETH (no decimals).
 
 ## Strategy ideas (non-exhaustive — invent your own)
 - Spread arbitrage: when |fair/pool - 1| > threshold, swap into the underpriced side proportionally to the gap.
@@ -114,7 +122,9 @@ helpers.log(msg: string): void                // logged to decisions.jsonl
 ## What a good executor looks like
 \`\`\`ts
 // Body of (obs, params, helpers) => AgentAction
-const gap = obs.fairPriceUsdcPerWeth / obs.pool.priceUsdcPerWeth - 1;
+const uni = obs.protocols.uniswap;
+if (!uni) return { type: "noop", reason: "uniswap disabled" };
+const gap = obs.fairPriceUsdcPerWeth / uni.pool.priceUsdcPerWeth - 1;
 if (Math.abs(gap) < params.minGapBps / 10000) {
   return { type: "noop", reason: "gap below threshold" };
 }
@@ -135,13 +145,20 @@ export type Phase = "init" | "revise";
 export type ReviseReason = "scheduled" | "pnl_drop";
 
 export function buildInitMessage(obs: AgentObservation): string {
+  const pool = obs.protocols.uniswap?.pool;
+  const poolLine = pool
+    ? `${pool.priceUsdcPerWeth.toFixed(2)} USDC/WETH (tick=${pool.tick}, spacing=${pool.tickSpacing})`
+    : "n/a (uniswap disabled)";
+  const gapPct = pool
+    ? ((obs.fairPriceUsdcPerWeth / pool.priceUsdcPerWeth - 1) * 100).toFixed(3)
+    : "n/a";
   return `# Initial strategy request
 
 You are starting a fresh run. Design your strategy from scratch.
 
 ## Current observation (round ${obs.round})
-- Pool price: ${obs.pool.priceUsdcPerWeth.toFixed(2)} USDC/WETH (tick=${obs.pool.tick}, spacing=${obs.pool.tickSpacing})
-- Fair price: ${obs.fairPriceUsdcPerWeth.toFixed(2)} USDC/WETH (gap=${((obs.fairPriceUsdcPerWeth / obs.pool.priceUsdcPerWeth - 1) * 100).toFixed(3)}%)
+- Pool price: ${poolLine}
+- Fair price: ${obs.fairPriceUsdcPerWeth.toFixed(2)} USDC/WETH (gap=${gapPct}%)
 - Inventory: ${obs.inventory.valueUsdc.toFixed(2)} USDC total (WETH=${obs.inventory.weth.toFixed(4)}, USDC=${obs.inventory.usdc.toFixed(2)}, ETH=${obs.inventory.eth.toFixed(4)})
 - Limits: maxSwapIn WETH=${obs.limits.maxWethInWei}wei, USDC=${obs.limits.maxUsdcInUnits}units; bundle<=${obs.limits.maxBundleActions}; positions<=${obs.limits.maxOpenPositions}
 
@@ -154,13 +171,13 @@ export function buildReviseMessage(
   history: RoundRecord[],
   reason: ReviseReason,
   initialUsd: number,
-  currentUsd: number
+  currentUsd: number,
 ): string {
   const pnlPct = ((currentUsd - initialUsd) / initialUsd) * 100;
   const recent = history.slice(-12);
   const lines = recent.map(
     (r) =>
-      `  r${r.round}: pool=${r.poolPrice.toFixed(2)} fair=${r.fairPrice.toFixed(2)} usd=${r.inventoryUsd.toFixed(2)} action=${r.action.type}${r.action.summary ? ` (${r.action.summary})` : ""}${r.executorOk ? "" : ` [ERR: ${r.executorReason ?? ""}]`}`
+      `  r${r.round}: pool=${r.poolPrice.toFixed(2)} fair=${r.fairPrice.toFixed(2)} usd=${r.inventoryUsd.toFixed(2)} action=${r.action.type}${r.action.summary ? ` (${r.action.summary})` : ""}${r.executorOk ? "" : ` [ERR: ${r.executorReason ?? ""}]`}`,
   );
   return `# Strategy revision request
 

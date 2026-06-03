@@ -3,5 +3,7 @@
 agents.local.json
 runs/
 cache/
+out/
 node_modules/
 dist/
+probe_tmp.mts

@@ -36,14 +36,23 @@ const MIN_WETH_MINT_WEI = 10_000_000_000_000_000n;
 const MIN_USDC_MINT_UNITS = 25_000_000n;
 
 rl.on("line", (line) => {
-  const observation = JSON.parse(line) as Observation;
+  const parsed = JSON.parse(line);
+  // 新スキーマ(protocols.uniswap)を旧フラット形へ正規化して既存ロジックを再利用
+  const uni = parsed.protocols.uniswap;
+  const observation = {
+    ...parsed,
+    pool: uni.pool,
+    positions: uni.positions,
+  } as Observation;
   const action = decideAction(observation);
   process.stdout.write(`${JSON.stringify(action)}\n`);
 });
 
 function decideAction(observation: Observation) {
   const priorityFee = observation.limits.defaultPriorityFeePerGasWei;
-  const managedPosition = observation.positions.find((position) => BigInt(position.liquidity) > 0n);
+  const managedPosition = observation.positions.find(
+    (position) => BigInt(position.liquidity) > 0n,
+  );
   if (managedPosition) {
     if (shouldRebalance(observation, managedPosition)) {
       return {
@@ -53,13 +62,13 @@ function decideAction(observation: Observation) {
           {
             type: "removeLiquidity",
             tokenId: managedPosition.tokenId,
-            liquidity: managedPosition.liquidity
+            liquidity: managedPosition.liquidity,
           },
           {
             type: "collectFees",
-            tokenId: managedPosition.tokenId
-          }
-        ]
+            tokenId: managedPosition.tokenId,
+          },
+        ],
       };
     }
 
@@ -67,19 +76,21 @@ function decideAction(observation: Observation) {
       return {
         type: "collectFees",
         tokenId: managedPosition.tokenId,
-        maxPriorityFeePerGasWei: priorityFee
+        maxPriorityFeePerGasWei: priorityFee,
       };
     }
 
     return { type: "noop", reason: "LP position is in range" };
   }
 
-  const collectOnly = observation.positions.find((position) => hasCollectableFees(position));
+  const collectOnly = observation.positions.find((position) =>
+    hasCollectableFees(position),
+  );
   if (collectOnly) {
     return {
       type: "collectFees",
       tokenId: collectOnly.tokenId,
-      maxPriorityFeePerGasWei: priorityFee
+      maxPriorityFeePerGasWei: priorityFee,
     };
   }
 
@@ -87,9 +98,18 @@ function decideAction(observation: Observation) {
     return { type: "noop", reason: "max open LP positions reached" };
   }
 
-  const amountWethDesired = budgetAmount(BigInt(observation.balances.wethWei), BigInt(observation.limits.maxLpWethWei));
-  const amountUsdcDesired = budgetAmount(BigInt(observation.balances.usdcUnits), BigInt(observation.limits.maxLpUsdcUnits));
-  if (amountWethDesired < MIN_WETH_MINT_WEI || amountUsdcDesired < MIN_USDC_MINT_UNITS) {
+  const amountWethDesired = budgetAmount(
+    BigInt(observation.balances.wethWei),
+    BigInt(observation.limits.maxLpWethWei),
+  );
+  const amountUsdcDesired = budgetAmount(
+    BigInt(observation.balances.usdcUnits),
+    BigInt(observation.limits.maxLpUsdcUnits),
+  );
+  if (
+    amountWethDesired < MIN_WETH_MINT_WEI ||
+    amountUsdcDesired < MIN_USDC_MINT_UNITS
+  ) {
     return { type: "noop", reason: "insufficient LP budget" };
   }
 
@@ -101,17 +121,31 @@ function decideAction(observation: Observation) {
     amountWethDesired: amountWethDesired.toString(),
     amountUsdcDesired: amountUsdcDesired.toString(),
     maxPriorityFeePerGasWei: priorityFee,
-    slippageBps: 100
+    slippageBps: 100,
   };
 }
 
-function shouldRebalance(observation: Observation, position: Observation["positions"][number]): boolean {
+function shouldRebalance(
+  observation: Observation,
+  position: Observation["positions"][number],
+): boolean {
   const buffer = observation.pool.tickSpacing * EDGE_BUFFER_MULTIPLIER;
-  return observation.pool.tick <= position.tickLower + buffer || observation.pool.tick >= position.tickUpper - buffer;
+  return (
+    observation.pool.tick <= position.tickLower + buffer ||
+    observation.pool.tick >= position.tickUpper - buffer
+  );
 }
 
-function hasCollectableFees(position: Pick<Observation["positions"][number], "tokensOwedWethWei" | "tokensOwedUsdcUnits">): boolean {
-  return BigInt(position.tokensOwedWethWei) > 0n || BigInt(position.tokensOwedUsdcUnits) > 0n;
+function hasCollectableFees(
+  position: Pick<
+    Observation["positions"][number],
+    "tokensOwedWethWei" | "tokensOwedUsdcUnits"
+  >,
+): boolean {
+  return (
+    BigInt(position.tokensOwedWethWei) > 0n ||
+    BigInt(position.tokensOwedUsdcUnits) > 0n
+  );
 }
 
 function budgetAmount(balance: bigint, limit: bigint): bigint {
@@ -119,16 +153,24 @@ function budgetAmount(balance: bigint, limit: bigint): bigint {
   return (capped * BigInt(MINT_BUDGET_BPS)) / 10_000n;
 }
 
-function chooseRange(observation: Observation): { tickLower: number; tickUpper: number } {
+function chooseRange(observation: Observation): {
+  tickLower: number;
+  tickUpper: number;
+} {
   const spacing = observation.pool.tickSpacing;
   const halfWidth = spacing * RANGE_WIDTH_MULTIPLIER;
-  const fairGap = observation.fairPriceUsdcPerWeth / observation.pool.priceUsdcPerWeth - 1;
+  const fairGap =
+    observation.fairPriceUsdcPerWeth / observation.pool.priceUsdcPerWeth - 1;
   const rawShift = Math.trunc(fairGap * halfWidth * 4);
-  const boundedShift = clamp(rawShift, -Math.trunc(halfWidth / 2), Math.trunc(halfWidth / 2));
+  const boundedShift = clamp(
+    rawShift,
+    -Math.trunc(halfWidth / 2),
+    Math.trunc(halfWidth / 2),
+  );
   const center = alignTick(observation.pool.tick + boundedShift, spacing);
   return {
     tickLower: center - halfWidth,
-    tickUpper: center + halfWidth
+    tickUpper: center + halfWidth,
   };
 }
 

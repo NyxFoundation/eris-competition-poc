@@ -55,17 +55,32 @@ export class History {
  * Summarize an AgentAction down to a small, prompt-friendly string.
  * Keeps token usage low while preserving the decision shape.
  */
-export function summarizeAction(action: AgentAction): { type: string; summary?: string } {
+export function summarizeAction(action: AgentAction): {
+  type: string;
+  summary?: string;
+} {
   if (action.type === "noop") return { type: "noop", summary: action.reason };
-  if (action.type === "swap") return { type: "swap", summary: `${action.tokenIn} in=${action.amountIn}` };
+  if (action.type === "swap")
+    return { type: "swap", summary: `${action.tokenIn} in=${action.amountIn}` };
   if (action.type === "mintLiquidity") {
-    return { type: "mintLiquidity", summary: `ticks=[${action.tickLower},${action.tickUpper}] weth=${action.amountWethDesired} usdc=${action.amountUsdcDesired}` };
+    return {
+      type: "mintLiquidity",
+      summary: `ticks=[${action.tickLower},${action.tickUpper}] weth=${action.amountWethDesired} usdc=${action.amountUsdcDesired}`,
+    };
   }
-  if (action.type === "removeLiquidity") return { type: "removeLiquidity", summary: `id=${action.tokenId} liq=${action.liquidity}` };
-  if (action.type === "collectFees") return { type: "collectFees", summary: `id=${action.tokenId}` };
-  if (action.type === "bundle") return { type: "bundle", summary: `${action.actions.length} actions` };
-  if (action.type === "rawTx") return { type: "rawTx", summary: `to=${action.tx.to}` };
-  if (action.type === "rawBundle") return { type: "rawBundle", summary: `${action.txs.length} txs` };
+  if (action.type === "removeLiquidity")
+    return {
+      type: "removeLiquidity",
+      summary: `id=${action.tokenId} liq=${action.liquidity}`,
+    };
+  if (action.type === "collectFees")
+    return { type: "collectFees", summary: `id=${action.tokenId}` };
+  if (action.type === "bundle")
+    return { type: "bundle", summary: `${action.actions.length} actions` };
+  if (action.type === "rawTx")
+    return { type: "rawTx", summary: `to=${action.tx.to}` };
+  if (action.type === "rawBundle")
+    return { type: "rawBundle", summary: `${action.txs.length} txs` };
   return { type: "unknown" };
 }
 
@@ -77,20 +92,20 @@ export function buildRoundRecord(
   action: AgentAction,
   executorOk: boolean,
   executorReason: string | undefined,
-  executorLogs: string[]
+  executorLogs: string[],
 ): RoundRecord {
   return {
     round: obs.round,
-    poolPrice: obs.pool.priceUsdcPerWeth,
+    poolPrice: obs.protocols.uniswap?.pool.priceUsdcPerWeth ?? 0,
     fairPrice: obs.fairPriceUsdcPerWeth,
     inventoryUsd: obs.inventory.valueUsdc,
     weth: obs.inventory.weth,
     usdc: obs.inventory.usdc,
     eth: obs.inventory.eth,
-    openPositions: obs.positions.length,
+    openPositions: obs.protocols.uniswap?.positions.length ?? 0,
     action: summarizeAction(action),
     executorLogs,
     executorOk,
-    executorReason
+    executorReason,
   };
 }

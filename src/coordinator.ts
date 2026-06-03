@@ -1,18 +1,53 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { privateKeyToAccount } from "viem/accounts";
-import { formatEther, type Hex } from "viem";
-import { loadAgents, loadConfig, privateKeyForWalletName, type SimConfig } from "./config.js";
-import { ADDRESSES, WETH_USDC_FEE } from "./constants.js";
+import {
+  formatEther,
+  keccak256,
+  stringToBytes,
+  type Address,
+  type Hex,
+} from "viem";
+import {
+  loadAgents,
+  loadConfig,
+  privateKeyForWalletName,
+  type SimConfig,
+} from "./config.js";
 import { AgentProcess } from "./agentProcess.js";
 import { validateAction } from "./action.js";
-import { accountAddress, getBalances, makeClients, mine, resetFork, setupWallet, snapshotForLog } from "./chain.js";
+import {
+  accountAddress,
+  fundWallet,
+  getBalances,
+  increaseTime,
+  makeClients,
+  mine,
+  resetFork,
+  sendAndMine,
+  setActiveStables,
+  setEthBalance,
+  snapshotForLog,
+} from "./chain.js";
 import { RunLogger, safeStringify } from "./logger.js";
-import { balanceToInventory, positionsValueUsdc, valueUsdc, valueUsdcWithPositions } from "./pnl.js";
+import { balanceToInventory, valueUsdc } from "./pnl.js";
 import { nextFairPrice, Rng } from "./rng.js";
-import { sampleSimParams, type SimSampledParams } from "./simParams.js";
-import type { AgentAction, AgentObservation, BalanceSnapshot, RawTxIntent, SimWallet, TxIntent, WalletRole } from "./types.js";
-import { buildLpActionData, buildSwapData, getLpPositions, getPoolPriceUsdcPerWeth, getPoolState } from "./uniswap.js";
+import type {
+  AgentObservation,
+  BalanceSnapshot,
+  ProtocolId,
+  ProtocolObservations,
+  RawTxIntent,
+  TxIntent,
+  WalletRole,
+} from "./types.js";
+import { enabledAdapters, setEnabledProtocols } from "./protocols/registry.js";
+import type { FlowKind, FlowWallet, SimContext } from "./protocols/types.js";
+import { updateOracles } from "./protocols/oracles.js";
+import { GMX_MARKETS } from "./constants.js";
+import { FlowProcess } from "./flowProcess.js";
+import type { FlowContextWire } from "./flow/logic.js";
+import { readAaveFlowReserves } from "./protocols/aave.js";
 
 type AgentRuntime = {
   id: string;
@@ -35,6 +70,7 @@ type SubmittedTx = {
   role: WalletRole;
   priorityFeeWei: bigint;
   actionType: string;
+  protocol?: ProtocolId;
   bundleId?: string;
   bundleIndex?: number;
 };
@@ -46,84 +82,263 @@ type ReceiptResult = {
   gasCostWei: bigint;
 };
 
-const FLOW_SLIPPAGE_BPS = 100;
+const GAS_ONLY_WEI = 2_000_000_000_000_000_000_000_000n; // 2,000,000 ETH（admin/keeper: gas + Balancer seed の wrap 等）
 
 export async function runSimulation(): Promise<void> {
   const config = loadConfig();
+  setEnabledProtocols(config.enabledProtocols);
+  const adapters = enabledAdapters();
+  const enabledIds = adapters.map((a) => a.id);
+  // stable 統一会計: 有効 adapter が使う stable を残高合算対象に登録
+  setActiveStables(
+    adapters.map((a) => a.stableToken).filter((t): t is Address => Boolean(t)),
+  );
+
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   const logger = new RunLogger(config.runDirRoot, runId);
-  logger.event({ type: "run_started", runId, config: publicConfig(config) });
+  logger.event({
+    type: "run_started",
+    runId,
+    config: publicConfig(config),
+    enabledProtocols: enabledIds,
+  });
 
-  const { chain, publicClient, walletClient } = makeClients(config.rpcUrl, config.chainId);
+  const { chain, publicClient, walletClient } = makeClients(
+    config.rpcUrl,
+    config.chainId,
+  );
   await resetFork(publicClient);
   logger.event({ type: "fork_reset" });
+
   const agentSpecs = loadAgents(config.agentsConfigPath);
   const agentRuntimes: AgentRuntime[] = agentSpecs.map((spec) => {
     const privateKey = privateKeyForWalletName(config, spec.wallet, spec.id);
     return {
       id: spec.id,
       privateKey,
-      process: new AgentProcess(spec, config.rpcUrl, accountAddress(privateKey)),
-      initial: { ethWei: 0n, wethWei: 0n, usdcUnits: 0n }
+      process: new AgentProcess(
+        spec,
+        config.rpcUrl,
+        accountAddress(privateKey),
+        logger.runDir,
+      ),
+      initial: { ethWei: 0n, wethWei: 0n, usdcUnits: 0n },
     };
   });
-  const agentMetrics = new Map(agentRuntimes.map((agent) => [agent.id, emptyAgentMetrics()]));
-  const flowWallets: SimWallet[] = [
-    { id: "uninformed-flow", role: "uninformed-flow", privateKey: config.privateKeys.uninformedFlow },
-    { id: "informed-flow", role: "informed-flow", privateKey: config.privateKeys.informedFlow }
-  ];
+  const agentMetrics = new Map(
+    agentRuntimes.map((agent) => [agent.id, emptyAgentMetrics()]),
+  );
+
+  // orderflow bot（独立プロセス）。毎ラウンド FlowContext を渡し FlowOrder[] を受け取る。
+  // bot は RPC に触れず注文を決めるだけ。seeded RNG で決定論（同一 seed → 同一市場）。
+  const flowProcess = new FlowProcess(
+    config.flowBotCommand,
+    config.flowBotArgs,
+    config.flowSeed,
+    logger.runDir,
+  );
+
+  // protocol/kind ごとの flow ウォレットを導出
+  const flowWalletMap = new Map<string, FlowWallet>();
+  for (const id of enabledIds) {
+    for (const kind of ["informed", "uninformed"] as FlowKind[]) {
+      const key = `${id}:${kind}`;
+      const privateKey = keccak256(stringToBytes(`flow:${config.seed}:${key}`));
+      flowWalletMap.set(key, {
+        id: `flow-${key}`,
+        address: accountAddress(privateKey),
+        privateKey,
+      });
+    }
+  }
+  const adminPk = config.privateKeys.admin;
+  const keeperPk = config.privateKeys.keeper;
+  const rng = new Rng(config.seed);
+
+  const ctx: SimContext = {
+    publicClient,
+    walletClient,
+    chain,
+    config,
+    rng,
+    adminPk,
+    keeperPk,
+    oracle: { aaveAggregators: {} },
+    gmx: { market: GMX_MARKETS.ETH_USD },
+    pendingGmxOrders: [],
+    flowWallet(protocol: ProtocolId, kind: FlowKind): FlowWallet {
+      const w = flowWalletMap.get(`${protocol}:${kind}`);
+      if (!w) throw new Error(`flow wallet not found: ${protocol}:${kind}`);
+      return w;
+    },
+  };
 
   try {
-    const setupWallets = [
-      ...agentRuntimes.map((agent): SimWallet => ({ id: agent.id, role: "agent", privateKey: agent.privateKey })),
-      ...flowWallets
-    ];
-    for (const wallet of setupWallets) {
-      logger.event({ type: "wallet_setup_started", id: wallet.id, role: wallet.role, address: accountAddress(wallet.privateKey) });
-      await setupWallet(publicClient, walletClient, chain, wallet.privateKey, config.initialEthWei, config.initialWethWei, config.initialUsdcUnits);
-      logger.event({ type: "wallet_setup_completed", id: wallet.id, balances: snapshotForLog(await getBalances(publicClient, accountAddress(wallet.privateKey))) });
+    // ---- admin / keeper にガス用 ETH（setupGlobal の seed/deploy より前）----
+    await setEthBalance(publicClient, accountAddress(adminPk), GAS_ONLY_WEI);
+    await setEthBalance(publicClient, accountAddress(keeperPk), GAS_ONLY_WEI);
+
+    // ---- グローバル setup（mock deploy / role 付与 / oracle source 差替 / liquidity seed）----
+    for (const adapter of adapters) {
+      if (adapter.setupGlobal) {
+        logger.event({ type: "protocol_setup_started", protocol: adapter.id });
+        await adapter.setupGlobal(ctx);
+        logger.event({
+          type: "protocol_setup_completed",
+          protocol: adapter.id,
+        });
+      }
     }
 
-    let fairPrice = await getPoolPriceUsdcPerWeth(publicClient);
-    const rng = new Rng(config.seed);
-    const simParams = sampleSimParams(rng);
-    logger.event({ type: "sim_params_sampled", simParams });
+    // ---- 全ウォレットの資金調達 + approve ----
+    const fundTargets: Array<{
+      id: string;
+      role: WalletRole;
+      privateKey: Hex;
+    }> = [
+      ...agentRuntimes.map((a) => ({
+        id: a.id,
+        role: "agent" as WalletRole,
+        privateKey: a.privateKey,
+      })),
+      ...[...flowWalletMap.entries()].map(([key, w]) => ({
+        id: w.id,
+        role: (key.endsWith("informed") && !key.endsWith("uninformed")
+          ? "informed-flow"
+          : "uninformed-flow") as WalletRole,
+        privateKey: w.privateKey,
+      })),
+    ];
+    for (const target of fundTargets) {
+      logger.event({
+        type: "wallet_setup_started",
+        id: target.id,
+        role: target.role,
+        address: accountAddress(target.privateKey),
+      });
+      await fundWallet(
+        publicClient,
+        walletClient,
+        chain,
+        target.privateKey,
+        config.initialEthWei,
+        config.initialWethWei,
+        config.initialUsdcUnits,
+      );
+      for (const adapter of adapters) {
+        if (!adapter.setupWallet) continue;
+        const approvals = await adapter.setupWallet(
+          ctx,
+          accountAddress(target.privateKey),
+        );
+        for (const tx of approvals) {
+          await sendAndMine(
+            publicClient,
+            walletClient,
+            chain,
+            target.privateKey,
+            { to: tx.to, data: tx.data, value: tx.value },
+          );
+        }
+      }
+      logger.event({
+        type: "wallet_setup_completed",
+        id: target.id,
+        balances: snapshotForLog(
+          await getBalances(publicClient, accountAddress(target.privateKey)),
+        ),
+      });
+    }
+
+    let fairPrice = await initialFairPrice(ctx, enabledIds);
     const history: AgentObservation["history"] = [];
     for (const agent of agentRuntimes) {
-      agent.initial = await getBalances(publicClient, accountAddress(agent.privateKey));
+      agent.initial = await getBalances(
+        publicClient,
+        accountAddress(agent.privateKey),
+      );
     }
 
     for (let round = 1; round <= config.rounds; round++) {
-      const poolState = await getPoolState(publicClient);
-      const poolPrice = poolState.priceUsdcPerWeth;
-      fairPrice = nextFairPrice(fairPrice, rng, simParams.sigmaPerStep);
-      history.push({ round, poolPriceUsdcPerWeth: poolPrice, fairPriceUsdcPerWeth: fairPrice });
+      fairPrice = nextFairPrice(fairPrice, rng);
+
+      // ---- 0) EVM 時間を進める（Aave 変動金利・GMX funding が現実スケールで効くように）----
+      // evm_increaseTime は「次の mine 時点での timestamp」に効くので、
+      // 直後の updateOracles が +roundTimeSeconds 経過した timestamp で価格を書き込む。
+      if (config.roundTimeSeconds > 0) {
+        await increaseTime(publicClient, config.roundTimeSeconds);
+      }
+
+      // ---- 1) Oracle ブロック（GMX/Aave の mock 価格を fairPrice に追従）----
+      // updateOracles は内部で sendAndMine するため追加 mine は不要。
+      await updateOracles(ctx, fairPrice);
+
+      // ---- 2) 競争ブロック ----
+      const stateById = new Map<ProtocolId, unknown>();
+      for (const adapter of adapters)
+        stateById.set(adapter.id, await adapter.readState(ctx, fairPrice));
+
+      const poolPrice = uniswapPoolPrice(stateById) ?? fairPrice;
+      history.push({
+        round,
+        poolPriceUsdcPerWeth: poolPrice,
+        fairPriceUsdcPerWeth: fairPrice,
+      });
 
       const block = await publicClient.getBlock();
       const agentIntents: TxIntent[] = [];
       const rawTxIntents: RawTxIntent[] = [];
+
       for (const agent of agentRuntimes) {
         const address = accountAddress(agent.privateKey);
         const balances = await getBalances(publicClient, address);
-        const positions = await getLpPositions(publicClient, address, fairPrice);
-        const observation = observationFor(runId, round, block.number, address, poolState, fairPrice, balances, positions, history, config);
+        const observation = await observationFor(
+          ctx,
+          adapters,
+          stateById,
+          runId,
+          round,
+          block.number,
+          address,
+          fairPrice,
+          balances,
+          history,
+          config,
+          enabledIds,
+        );
         logger.event({ type: "observation", agentId: agent.id, observation });
-        const action = await agent.process.requestAction(observation, config.agentTimeoutMs);
+        const action = await agent.process.requestAction(
+          observation,
+          config.agentTimeoutMs,
+        );
         const validated = validateAction(action, observation, balances);
         if (!validated.ok) {
-          logger.event({ type: "action_rejected", agentId: agent.id, action, reason: validated.reason });
+          logger.event({
+            type: "action_rejected",
+            agentId: agent.id,
+            action,
+            reason: validated.reason,
+          });
           continue;
         }
-        logger.event({ type: "action_accepted", agentId: agent.id, action: validated.action, intents: validated.intents, rawIntents: validated.rawIntents });
+        logger.event({
+          type: "action_accepted",
+          agentId: agent.id,
+          action: validated.action,
+          intents: validated.intents,
+          rawIntents: validated.rawIntents,
+        });
         for (const intent of validated.intents) {
           agentIntents.push({
             ownerId: agent.id,
             role: "agent",
             privateKey: agent.privateKey,
+            protocol: intent.protocol,
             action: intent.action,
             priorityFeeWei: intent.priorityFeeWei,
             bundleId: intent.bundleId,
-            bundleIndex: intent.bundleIndex
+            bundleIndex: intent.bundleIndex,
+            gmxOrder: intent.protocol === "gmx",
           });
         }
         for (const rawIntent of validated.rawIntents) {
@@ -134,37 +349,51 @@ export async function runSimulation(): Promise<void> {
             rawTx: rawIntent.tx,
             priorityFeeWei: rawIntent.priorityFeeWei,
             bundleId: rawIntent.bundleId,
-            bundleIndex: rawIntent.bundleIndex
+            bundleIndex: rawIntent.bundleIndex,
           });
         }
       }
 
-      const flowIntents = await buildFlowIntents(publicClient, config, rng, simParams, poolPrice, fairPrice);
+      const flowIntents = await requestFlowIntents(
+        ctx,
+        flowProcess,
+        enabledIds,
+        stateById,
+        fairPrice,
+        round,
+        config.agentTimeoutMs,
+      );
+
       const submitted: SubmittedTx[] = [];
       for (const intent of [...flowIntents, ...agentIntents]) {
         try {
-          const hash = await submitIntent(publicClient, walletClient, chain, intent);
-          submitted.push({
-            hash,
-            ownerId: intent.ownerId,
-            role: intent.role,
-            priorityFeeWei: intent.priorityFeeWei,
-            actionType: intent.action.type,
-            bundleId: intent.bundleId,
-            bundleIndex: intent.bundleIndex
-          });
-          if (intent.role === "agent") agentMetrics.get(intent.ownerId)!.submittedTxCount++;
-          logger.event({
-            type: "tx_submitted",
-            round,
-            hash,
-            ownerId: intent.ownerId,
-            role: intent.role,
-            priorityFeeWei: intent.priorityFeeWei,
-            actionType: intent.action.type,
-            bundleId: intent.bundleId,
-            bundleIndex: intent.bundleIndex
-          });
+          const hashes = await submitIntent(ctx, intent, stateById);
+          for (const hash of hashes) {
+            submitted.push({
+              hash,
+              ownerId: intent.ownerId,
+              role: intent.role,
+              priorityFeeWei: intent.priorityFeeWei,
+              actionType: intent.action.type,
+              protocol: intent.protocol,
+              bundleId: intent.bundleId,
+              bundleIndex: intent.bundleIndex,
+            });
+            if (intent.role === "agent")
+              agentMetrics.get(intent.ownerId)!.submittedTxCount++;
+            logger.event({
+              type: "tx_submitted",
+              round,
+              hash,
+              ownerId: intent.ownerId,
+              role: intent.role,
+              priorityFeeWei: intent.priorityFeeWei,
+              actionType: intent.action.type,
+              protocol: intent.protocol,
+              bundleId: intent.bundleId,
+              bundleIndex: intent.bundleIndex,
+            });
+          }
         } catch (error) {
           logger.event({
             type: "tx_submit_failed",
@@ -173,15 +402,17 @@ export async function runSimulation(): Promise<void> {
             role: intent.role,
             priorityFeeWei: intent.priorityFeeWei,
             actionType: intent.action.type,
+            protocol: intent.protocol,
             bundleId: intent.bundleId,
             bundleIndex: intent.bundleIndex,
-            error: errorMessage(error)
+            error: errorMessage(error),
           });
         }
       }
+
       for (const intent of rawTxIntents) {
         try {
-          const hash = await submitRawTxIntent(publicClient, walletClient, chain, intent);
+          const hash = await submitRawTxIntent(ctx, intent);
           submitted.push({
             hash,
             ownerId: intent.ownerId,
@@ -189,7 +420,7 @@ export async function runSimulation(): Promise<void> {
             priorityFeeWei: intent.priorityFeeWei,
             actionType: "rawTx",
             bundleId: intent.bundleId,
-            bundleIndex: intent.bundleIndex
+            bundleIndex: intent.bundleIndex,
           });
           agentMetrics.get(intent.ownerId)!.submittedTxCount++;
           logger.event({
@@ -203,7 +434,7 @@ export async function runSimulation(): Promise<void> {
             targetAddress: intent.rawTx.to,
             dataLength: intent.rawTx.data.length,
             bundleId: intent.bundleId,
-            bundleIndex: intent.bundleIndex
+            bundleIndex: intent.bundleIndex,
           });
         } catch (error) {
           logger.event({
@@ -215,13 +446,18 @@ export async function runSimulation(): Promise<void> {
             actionType: "rawTx",
             bundleId: intent.bundleId,
             bundleIndex: intent.bundleIndex,
-            error: errorMessage(error)
+            error: errorMessage(error),
           });
         }
       }
 
       await mine(publicClient);
-      const receiptResults = await logReceiptsAndOrdering(publicClient, logger, round, submitted);
+      const receiptResults = await logReceiptsAndOrdering(
+        publicClient,
+        logger,
+        round,
+        submitted,
+      );
       for (const result of receiptResults) {
         if (result.tx.role !== "agent") continue;
         const metrics = agentMetrics.get(result.tx.ownerId)!;
@@ -230,6 +466,11 @@ export async function runSimulation(): Promise<void> {
         metrics.includedTxCount++;
         if (result.status !== "success") metrics.revertCount++;
       }
+
+      // ---- 3) Keeper ブロック（GMX 注文の実行など）----
+      for (const adapter of adapters) {
+        if (adapter.afterMine) await adapter.afterMine(ctx);
+      }
     }
 
     const finalFairPrice = history.at(-1)?.fairPriceUsdcPerWeth ?? fairPrice;
@@ -237,58 +478,87 @@ export async function runSimulation(): Promise<void> {
     for (const agent of agentRuntimes) {
       const address = accountAddress(agent.privateKey);
       const final = await getBalances(publicClient, address);
-      const positions = await getLpPositions(publicClient, address, finalFairPrice);
       const initialValue = valueUsdc(agent.initial, finalFairPrice);
-      const finalValue = valueUsdcWithPositions(final, positions, finalFairPrice);
+      let finalValue = valueUsdc(final, finalFairPrice);
+      const protocolValues: Record<string, number> = {};
+      for (const adapter of adapters) {
+        const v = await adapter.valueUsdc(ctx, address, null, finalFairPrice);
+        protocolValues[adapter.id] = v;
+        finalValue += v;
+      }
       agents.push({
         id: agent.id,
         address,
         initial: snapshotForLog(agent.initial),
         final: snapshotForLog(final),
-        positions,
-        openLpPositionCount: positions.length,
-        lpValueUsdc: positionsValueUsdc(positions),
+        protocolValuesUsdc: protocolValues,
         initialValueUsdc: initialValue,
         finalValueUsdc: finalValue,
         netPnlUsdc: finalValue - initialValue,
         ...agentMetricsForSummary(agentMetrics.get(agent.id)!),
-        stderrTail: agent.process.getStderr()
+        stderrTail: agent.process.getStderr(),
       });
     }
-    logger.summary({ runId, rounds: config.rounds, simParams, finalFairPriceUsdcPerWeth: finalFairPrice, agents });
-    writeFileSync(join(logger.runDir, "history.json"), `${safeStringify(history, 2)}\n`);
+    logger.summary({
+      runId,
+      rounds: config.rounds,
+      enabledProtocols: enabledIds,
+      finalFairPriceUsdcPerWeth: finalFairPrice,
+      agents,
+    });
+    writeFileSync(
+      join(logger.runDir, "history.json"),
+      `${safeStringify(history, 2)}\n`,
+    );
     logger.event({ type: "run_completed", runId, runDir: logger.runDir });
     console.log(`simulation completed: ${logger.runDir}`);
   } finally {
     for (const agent of agentRuntimes) agent.process.close();
+    flowProcess.close();
   }
 }
 
-function observationFor(
+// ---------------------------------------------------------------------------
+// 観測 / flow / submit
+// ---------------------------------------------------------------------------
+
+async function observationFor(
+  ctx: SimContext,
+  adapters: ReturnType<typeof enabledAdapters>,
+  stateById: Map<ProtocolId, unknown>,
   runId: string,
   round: number,
   blockNumber: bigint,
-  agentAddress: string,
-  poolState: { priceUsdcPerWeth: number; tick: number; tickSpacing: number },
+  agentAddress: Address,
   fairPrice: number,
   balances: BalanceSnapshot,
-  positions: AgentObservation["positions"],
   history: AgentObservation["history"],
-  config: SimConfig
-): AgentObservation {
+  config: SimConfig,
+  enabledIds: ProtocolId[],
+): Promise<AgentObservation> {
+  const protocols: ProtocolObservations = {};
+  for (const adapter of adapters) {
+    const obs = await adapter.observe(
+      ctx,
+      stateById.get(adapter.id),
+      agentAddress,
+      fairPrice,
+    );
+    (protocols as Record<string, unknown>)[adapter.id] = obs;
+  }
   return {
     kind: "observation",
     runId,
     round,
     blockNumber: blockNumber.toString(),
     agentAddress,
-    pool: { pair: "WETH/USDC", fee: WETH_USDC_FEE, priceUsdcPerWeth: poolState.priceUsdcPerWeth, tick: poolState.tick, tickSpacing: poolState.tickSpacing },
-    positions,
     fairPriceUsdcPerWeth: fairPrice,
+    oraclePrices: { wethUsd: fairPrice, usdcUsd: 1 },
+    enabledProtocols: enabledIds,
     balances: {
       ethWei: balances.ethWei.toString(),
       wethWei: balances.wethWei.toString(),
-      usdcUnits: balances.usdcUnits.toString()
+      usdcUnits: balances.usdcUnits.toString(),
     },
     inventory: balanceToInventory(balances, fairPrice),
     history: history.slice(-20),
@@ -301,129 +571,197 @@ function observationFor(
       maxBundleActions: config.maxBundleActions,
       maxLpWethWei: config.maxLpWethWei.toString(),
       maxLpUsdcUnits: config.maxLpUsdcUnits.toString(),
-      maxOpenPositions: config.maxOpenPositions
-    }
+      maxOpenPositions: config.maxOpenPositions,
+      maxGmxSizeUsd: config.maxGmxSizeUsd.toString(),
+      maxAaveSupplyWethWei: config.maxAaveSupplyWethWei.toString(),
+      maxAaveBorrowUsdcUnits: config.maxAaveBorrowUsdcUnits.toString(),
+    },
+    protocols,
   };
 }
 
-async function buildFlowIntents(
-  publicClient: ReturnType<typeof makeClients>["publicClient"],
-  config: SimConfig,
-  rng: Rng,
-  simParams: SimSampledParams,
-  poolPrice: number,
-  fairPrice: number
+// orderflow bot プロセスに FlowContext を渡して FlowOrder[] を受け取り、TxIntent に変換する。
+// flow ウォレットの選択と tx 提出は coordinator が所有（bot は注文を決めるだけ）。
+async function requestFlowIntents(
+  ctx: SimContext,
+  flowProcess: FlowProcess,
+  enabledIds: ProtocolId[],
+  stateById: Map<ProtocolId, unknown>,
+  fairPrice: number,
+  round: number,
+  timeoutMs: number,
 ): Promise<TxIntent[]> {
-  const intents: TxIntent[] = [];
-
-  const uninformedBalances = await getBalances(publicClient, accountAddress(config.privateKeys.uninformedFlow));
-  let runningUninformedWeth = uninformedBalances.wethWei;
-  let runningUninformedUsdc = uninformedBalances.usdcUnits;
-  const orderCount = rng.poisson(simParams.poissonLambda);
-  const meanUsdcPerOrder = simParams.lognormalMeanY * (poolPrice / 100) * config.uninformedFlowVolumeMultiplier;
-  for (let i = 0; i < orderCount; i++) {
-    const tokenIn: "WETH" | "USDC" = rng.bool() ? "WETH" : "USDC";
-    const sizeUsdc = rng.lognormal(meanUsdcPerOrder, simParams.lognormalSigma);
-    const desired =
-      tokenIn === "USDC"
-        ? BigInt(Math.max(1, Math.floor(sizeUsdc * 1_000_000)))
-        : BigInt(Math.max(1, Math.floor((sizeUsdc / poolPrice) * 1e18)));
-    const available = tokenIn === "WETH" ? runningUninformedWeth : runningUninformedUsdc;
-    const capped = desired > available ? available : desired;
-    if (capped <= 0n) continue;
-    if (tokenIn === "WETH") runningUninformedWeth -= capped;
-    else runningUninformedUsdc -= capped;
-    intents.push({
-      ownerId: "uninformed-flow",
-      role: "uninformed-flow",
-      privateKey: config.privateKeys.uninformedFlow,
-      action: { type: "swap", tokenIn, amountIn: capped.toString(), slippageBps: FLOW_SLIPPAGE_BPS },
-      priorityFeeWei: config.defaultPriorityFeeWei + BigInt(rng.int(1, 50)) * 1_000_000n
-    });
+  const poolPrices: Partial<Record<"uniswap" | "balancer" | "curve", number>> =
+    {};
+  for (const id of ["uniswap", "balancer", "curve"] as const) {
+    if (!enabledIds.includes(id)) continue;
+    const s = stateById.get(id) as { priceUsdcPerWeth?: number } | undefined;
+    if (s && typeof s.priceUsdcPerWeth === "number")
+      poolPrices[id] = s.priceUsdcPerWeth;
   }
 
-  const informedTokenIn = poolPrice < fairPrice ? "USDC" : "WETH";
-  const gap = Math.min(1, Math.abs(fairPrice / poolPrice - 1) * 20);
-  const informedAmount =
-    informedTokenIn === "WETH"
-      ? (config.informedFlowMaxWethWei * BigInt(Math.max(1, Math.floor(gap * 100)))) / 100n
-      : BigInt(Math.max(100_000_000, Math.floor(gap * 5_000_000_000)));
-  const informedBalances = await getBalances(publicClient, accountAddress(config.privateKeys.informedFlow));
-  const cappedInformedAmount = capToFlowBalance(informedTokenIn, informedAmount, informedBalances);
-  if (cappedInformedAmount > 0n) {
+  // aave flow は flow ウォレットの reserve に依存する。RPC 読取は coordinator 側で行い渡す。
+  let aaveReserves: FlowContextWire["aaveReserves"];
+  if (enabledIds.includes("aave")) {
+    const wallet = ctx.flowWallet("aave", "informed");
+    const r = await readAaveFlowReserves(ctx.publicClient, wallet.address);
+    aaveReserves = {
+      wethSupplied: r.wethSupplied.toString(),
+      usdcBorrowed: r.usdcBorrowed.toString(),
+    };
+  }
+
+  const context: FlowContextWire = {
+    round,
+    fairPriceUsdcPerWeth: fairPrice,
+    protocols: enabledIds,
+    poolPrices,
+    aaveReserves,
+    limits: {
+      uninformedFlowMaxWethWei: ctx.config.uninformedFlowMaxWethWei.toString(),
+      informedFlowMaxWethWei: ctx.config.informedFlowMaxWethWei.toString(),
+      balancerFlowMaxWethWei: ctx.config.balancerFlowMaxWethWei.toString(),
+      curveFlowMaxWethWei: ctx.config.curveFlowMaxWethWei.toString(),
+      gmxFlowMaxSizeUsd: ctx.config.gmxFlowMaxSizeUsd.toString(),
+      aaveFlowMaxWethWei: ctx.config.aaveFlowMaxWethWei.toString(),
+      maxAaveBorrowUsdcUnits: ctx.config.maxAaveBorrowUsdcUnits.toString(),
+      defaultPriorityFeeWei: ctx.config.defaultPriorityFeeWei.toString(),
+    },
+  };
+
+  const orders = await flowProcess.requestOrders(context, timeoutMs);
+  const intents: TxIntent[] = [];
+  for (const order of orders) {
+    const wallet = ctx.flowWallet(order.protocol, order.kind);
     intents.push({
-      ownerId: "informed-flow",
-      role: "informed-flow",
-      privateKey: config.privateKeys.informedFlow,
-      action: { type: "swap", tokenIn: informedTokenIn, amountIn: cappedInformedAmount.toString(), slippageBps: FLOW_SLIPPAGE_BPS },
-      priorityFeeWei: config.defaultPriorityFeeWei + BigInt(rng.int(50, 100)) * 1_000_000n
+      ownerId: wallet.id,
+      role: order.kind === "informed" ? "informed-flow" : "uninformed-flow",
+      privateKey: wallet.privateKey,
+      protocol: order.protocol,
+      action: order.action,
+      priorityFeeWei: BigInt(order.priorityFeeWei),
+      gmxOrder: order.protocol === "gmx",
     });
   }
   return intents;
 }
 
 async function submitIntent(
-  publicClient: ReturnType<typeof makeClients>["publicClient"],
-  walletClient: ReturnType<typeof makeClients>["walletClient"],
-  chain: ReturnType<typeof makeClients>["chain"],
-  intent: TxIntent
-): Promise<Hex> {
+  ctx: SimContext,
+  intent: TxIntent,
+  stateById: Map<ProtocolId, unknown>,
+): Promise<Hex[]> {
+  const adapter = enabledAdapters().find((a) => a.id === intent.protocol);
+  if (!adapter) throw new Error(`adapter not enabled: ${intent.protocol}`);
+  const owner = accountAddress(intent.privateKey);
+  const txs = await adapter.buildTxs(
+    ctx,
+    owner,
+    intent.action,
+    stateById.get(intent.protocol),
+  );
   const account = privateKeyToAccount(intent.privateKey);
-  const block = await publicClient.getBlock();
+  const block = await ctx.publicClient.getBlock();
   const baseFee = block.baseFeePerGas ?? 0n;
-  const data =
-    intent.action.type === "swap"
-      ? await buildSwapData(publicClient, account.address, intent.action, intent.action.slippageBps ?? 50)
-      : await buildLpActionData(publicClient, account.address, intent.action, intent.action.type === "mintLiquidity" ? intent.action.slippageBps ?? 50 : 0);
-  return walletClient.sendTransaction({
-    account,
-    chain,
-    to: intent.action.type === "swap" ? ADDRESSES.swapRouter : ADDRESSES.nonfungiblePositionManager,
-    data,
-    maxFeePerGas: baseFee + intent.priorityFeeWei,
-    maxPriorityFeePerGas: intent.priorityFeeWei
-  });
+  const hashes: Hex[] = [];
+  for (const tx of txs) {
+    const hash = await ctx.walletClient.sendTransaction({
+      account,
+      chain: ctx.chain,
+      to: tx.to,
+      data: tx.data,
+      value: tx.value ?? 0n,
+      maxFeePerGas: baseFee + intent.priorityFeeWei,
+      maxPriorityFeePerGas: intent.priorityFeeWei,
+    });
+    hashes.push(hash);
+  }
+  return hashes;
 }
 
 async function submitRawTxIntent(
-  publicClient: ReturnType<typeof makeClients>["publicClient"],
-  walletClient: ReturnType<typeof makeClients>["walletClient"],
-  chain: ReturnType<typeof makeClients>["chain"],
-  intent: RawTxIntent
+  ctx: SimContext,
+  intent: RawTxIntent,
 ): Promise<Hex> {
   const account = privateKeyToAccount(intent.privateKey);
-  const block = await publicClient.getBlock();
+  const block = await ctx.publicClient.getBlock();
   const baseFee = block.baseFeePerGas ?? 0n;
-  return walletClient.sendTransaction({
+  return ctx.walletClient.sendTransaction({
     account,
-    chain,
-    to: intent.rawTx.to as `0x${string}`,
-    data: intent.rawTx.data as `0x${string}`,
+    chain: ctx.chain,
+    to: intent.rawTx.to as Address,
+    data: intent.rawTx.data as Hex,
     value: intent.rawTx.value ? BigInt(intent.rawTx.value) : 0n,
     maxFeePerGas: baseFee + intent.priorityFeeWei,
-    maxPriorityFeePerGas: intent.priorityFeeWei
+    maxPriorityFeePerGas: intent.priorityFeeWei,
   });
 }
 
+async function initialFairPrice(
+  ctx: SimContext,
+  enabledIds: ProtocolId[],
+): Promise<number> {
+  if (enabledIds.includes("uniswap")) {
+    const { getPoolPriceUsdcPerWeth } = await import("./protocols/uniswap.js");
+    return getPoolPriceUsdcPerWeth(ctx.publicClient);
+  }
+  return 3000;
+}
+
+function uniswapPoolPrice(
+  stateById: Map<ProtocolId, unknown>,
+): number | undefined {
+  const s = stateById.get("uniswap") as
+    | { priceUsdcPerWeth: number }
+    | undefined;
+  return s?.priceUsdcPerWeth;
+}
+
+// ---------------------------------------------------------------------------
+// receipts / ordering
+// ---------------------------------------------------------------------------
+
 async function logReceiptsAndOrdering(
-  publicClient: ReturnType<typeof makeClients>["publicClient"],
+  publicClient: SimContext["publicClient"],
   logger: RunLogger,
   round: number,
-  submitted: SubmittedTx[]
+  submitted: SubmittedTx[],
 ): Promise<ReceiptResult[]> {
-  const submittedByHash = new Map(submitted.map((tx) => [tx.hash.toLowerCase(), tx]));
-  const receipts: Array<{ tx: SubmittedTx; receipt: Awaited<ReturnType<typeof publicClient.waitForTransactionReceipt>> }> = [];
+  const submittedByHash = new Map(
+    submitted.map((tx) => [tx.hash.toLowerCase(), tx]),
+  );
+  const receipts: Array<{
+    tx: SubmittedTx;
+    receipt: Awaited<ReturnType<typeof publicClient.waitForTransactionReceipt>>;
+  }> = [];
   for (const tx of submitted) {
     try {
-      receipts.push({ tx, receipt: await publicClient.waitForTransactionReceipt({ hash: tx.hash }) });
+      receipts.push({
+        tx,
+        receipt: await publicClient.waitForTransactionReceipt({
+          hash: tx.hash,
+        }),
+      });
     } catch (error) {
-      logger.event({ type: "tx_receipt_failed", round, hash: tx.hash, ownerId: tx.ownerId, role: tx.role, error: errorMessage(error) });
+      logger.event({
+        type: "tx_receipt_failed",
+        round,
+        hash: tx.hash,
+        ownerId: tx.ownerId,
+        role: tx.role,
+        error: errorMessage(error),
+      });
     }
   }
   const results: ReceiptResult[] = [];
   for (const { tx, receipt } of receipts) {
     const gasCostWei = receipt.gasUsed * receipt.effectiveGasPrice;
-    results.push({ tx, status: receipt.status, gasUsed: receipt.gasUsed, gasCostWei });
+    results.push({
+      tx,
+      status: receipt.status,
+      gasUsed: receipt.gasUsed,
+      gasCostWei,
+    });
     logger.event({
       type: "tx_receipt",
       round,
@@ -435,13 +773,17 @@ async function logReceiptsAndOrdering(
       effectiveGasPrice: receipt.effectiveGasPrice,
       gasCostWei,
       actionType: tx.actionType,
+      protocol: tx.protocol,
       bundleId: tx.bundleId,
-      bundleIndex: tx.bundleIndex
+      bundleIndex: tx.bundleIndex,
     });
   }
   const blockNumber = receipts[0]?.receipt.blockNumber;
   if (blockNumber === undefined) return results;
-  const block = await publicClient.getBlock({ blockNumber, includeTransactions: true });
+  const block = await publicClient.getBlock({
+    blockNumber,
+    includeTransactions: true,
+  });
   for (let i = 0; i < block.transactions.length; i++) {
     const tx = block.transactions[i];
     if (typeof tx === "string") continue;
@@ -460,16 +802,15 @@ async function logReceiptsAndOrdering(
       role: metadata.role,
       actionType: metadata.actionType,
       bundleId: metadata.bundleId,
-      bundleIndex: metadata.bundleIndex
+      bundleIndex: metadata.bundleIndex,
     });
   }
   return results;
 }
 
-function capToFlowBalance(tokenIn: "WETH" | "USDC", desired: bigint, balances: BalanceSnapshot): bigint {
-  const balance = tokenIn === "WETH" ? balances.wethWei : balances.usdcUnits;
-  return desired > balance ? balance : desired;
-}
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
 
 function publicConfig(config: SimConfig) {
   return {
@@ -478,7 +819,7 @@ function publicConfig(config: SimConfig) {
     rounds: config.rounds,
     seed: config.seed,
     runDirRoot: config.runDirRoot,
-    agentTimeoutMs: config.agentTimeoutMs
+    agentTimeoutMs: config.agentTimeoutMs,
   };
 }
 
@@ -488,7 +829,7 @@ function emptyAgentMetrics(): AgentMetrics {
     gasCostWei: 0n,
     revertCount: 0,
     submittedTxCount: 0,
-    includedTxCount: 0
+    includedTxCount: 0,
   };
 }
 
@@ -498,7 +839,7 @@ function agentMetricsForSummary(metrics: AgentMetrics) {
     gasCostEth: formatEther(metrics.gasCostWei),
     revertCount: metrics.revertCount,
     submittedTxCount: metrics.submittedTxCount,
-    includedTxCount: metrics.includedTxCount
+    includedTxCount: metrics.includedTxCount,
   };
 }
 

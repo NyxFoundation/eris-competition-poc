@@ -1,14 +1,22 @@
 import { formatUnits } from "viem";
-import type { BalanceSnapshot, LpPositionObservation } from "./types.js";
+import type { BalanceSnapshot } from "./types.js";
 
-export function valueUsdc(snapshot: BalanceSnapshot, fairPriceUsdcPerWeth: number): number {
+// ベース wallet 値：loose な ETH/WETH/USDC のみ。
+// プロトコル固有のポジション価値（LP, perp, aave net）は各 adapter.valueUsdc が加算する。
+export function valueUsdc(
+  snapshot: BalanceSnapshot,
+  fairPriceUsdcPerWeth: number,
+): number {
   const eth = Number(formatUnits(snapshot.ethWei, 18));
   const weth = Number(formatUnits(snapshot.wethWei, 18));
   const usdc = Number(formatUnits(snapshot.usdcUnits, 6));
   return usdc + (eth + weth) * fairPriceUsdcPerWeth;
 }
 
-export function balanceToInventory(snapshot: BalanceSnapshot, fairPriceUsdcPerWeth: number) {
+export function balanceToInventory(
+  snapshot: BalanceSnapshot,
+  fairPriceUsdcPerWeth: number,
+) {
   const eth = Number(formatUnits(snapshot.ethWei, 18));
   const weth = Number(formatUnits(snapshot.wethWei, 18));
   const usdc = Number(formatUnits(snapshot.usdcUnits, 6));
@@ -16,14 +24,6 @@ export function balanceToInventory(snapshot: BalanceSnapshot, fairPriceUsdcPerWe
     valueUsdc: usdc + (eth + weth) * fairPriceUsdcPerWeth,
     weth,
     usdc,
-    eth
+    eth,
   };
-}
-
-export function positionsValueUsdc(positions: LpPositionObservation[]): number {
-  return positions.reduce((sum, position) => sum + position.valueUsdc, 0);
-}
-
-export function valueUsdcWithPositions(snapshot: BalanceSnapshot, positions: LpPositionObservation[], fairPriceUsdcPerWeth: number): number {
-  return valueUsdc(snapshot, fairPriceUsdcPerWeth) + positionsValueUsdc(positions);
 }

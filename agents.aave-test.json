@@ -1,0 +1,18 @@
+{
+  "agents": [
+    {
+      "id": "aave-lev",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/aave-leverage.ts"],
+      "wallet": "AGENT0_PRIVATE_KEY",
+      "description": "WETH supply -> USDC borrow の Aave レバレッジ"
+    },
+    {
+      "id": "simple",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/simple-rule.ts"],
+      "wallet": "AGENT1_PRIVATE_KEY",
+      "description": "Uniswap gap arb"
+    }
+  ]
+}

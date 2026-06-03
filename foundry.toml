@@ -1,0 +1,11 @@
+[profile.default]
+src = "contracts"
+out = "out"
+libs = ["lib"]
+solc = "0.8.20"
+optimizer = true
+optimizer_runs = 200
+evm_version = "paris"
+
+# このプロジェクトは mock オラクルコントラクト(MockAggregator / MockOracleProvider)の
+# コンパイルにのみ Foundry を使う。実行系はすべて TypeScript + viem 側で行う。

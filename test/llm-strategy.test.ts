@@ -7,7 +7,7 @@ import {
   parseStrategyFromToolInput,
   runExecutor,
   type ExecutorHelpers,
-  type Strategy
+  type Strategy,
 } from "../src/llm/strategy.js";
 import type { AgentObservation } from "../src/types.js";
 
@@ -15,7 +15,7 @@ const helpersBase: Omit<ExecutorHelpers, "log"> = {
   parseUnits,
   formatUnits,
   encodeFunctionData,
-  ADDRESSES: DEFAULT_ADDRESSES
+  ADDRESSES: DEFAULT_ADDRESSES,
 };
 
 const obs: AgentObservation = {
@@ -24,10 +24,26 @@ const obs: AgentObservation = {
   round: 1,
   blockNumber: "1",
   agentAddress: "0x0000000000000000000000000000000000000001",
-  pool: { pair: "WETH/USDC", fee: 500, priceUsdcPerWeth: 3000, tick: 0, tickSpacing: 10 },
-  positions: [],
   fairPriceUsdcPerWeth: 3030, // +1% gap
-  balances: { ethWei: "1000000000000000000", wethWei: "10000000000000000000", usdcUnits: "25000000000" },
+  oraclePrices: { wethUsd: 3000, usdcUsd: 1 },
+  enabledProtocols: ["uniswap"],
+  protocols: {
+    uniswap: {
+      pool: {
+        pair: "WETH/USDC",
+        fee: 500,
+        priceUsdcPerWeth: 3000,
+        tick: 0,
+        tickSpacing: 10,
+      },
+      positions: [],
+    },
+  },
+  balances: {
+    ethWei: "1000000000000000000",
+    wethWei: "10000000000000000000",
+    usdcUnits: "25000000000",
+  },
   inventory: { valueUsdc: 55000, weth: 10, usdc: 25000, eth: 1 },
   history: [],
   limits: {
@@ -39,8 +55,11 @@ const obs: AgentObservation = {
     maxBundleActions: 5,
     maxLpWethWei: "1000000000000000000",
     maxLpUsdcUnits: "5000000000",
-    maxOpenPositions: 10
-  }
+    maxOpenPositions: 10,
+    maxGmxSizeUsd: "0",
+    maxAaveSupplyWethWei: "0",
+    maxAaveBorrowUsdcUnits: "0",
+  },
 };
 
 test("parseStrategyFromToolInput accepts a valid payload", () => {
@@ -48,9 +67,9 @@ test("parseStrategyFromToolInput accepts a valid payload", () => {
     {
       notes: "Spread arb threshold strategy",
       params: { minGapBps: 15 },
-      executor_ts: `return { type: "noop", reason: "n/a" };`
+      executor_ts: `return { type: "noop", reason: "n/a" };`,
     },
-    1
+    1,
   );
   assert.equal(result.ok, true);
   if (result.ok) {
@@ -60,12 +79,18 @@ test("parseStrategyFromToolInput accepts a valid payload", () => {
 });
 
 test("parseStrategyFromToolInput rejects empty notes", () => {
-  const result = parseStrategyFromToolInput({ notes: "", params: {}, executor_ts: "return { type: \"noop\" };" }, 1);
+  const result = parseStrategyFromToolInput(
+    { notes: "", params: {}, executor_ts: 'return { type: "noop" };' },
+    1,
+  );
   assert.equal(result.ok, false);
 });
 
 test("parseStrategyFromToolInput rejects non-object params", () => {
-  const result = parseStrategyFromToolInput({ notes: "x", params: [1, 2], executor_ts: "return { type: \"noop\" };" }, 1);
+  const result = parseStrategyFromToolInput(
+    { notes: "x", params: [1, 2], executor_ts: 'return { type: "noop" };' },
+    1,
+  );
   assert.equal(result.ok, false);
 });
 
@@ -82,14 +107,14 @@ test("runExecutor returns a valid swap AgentAction", () => {
     notes: "swap on positive gap",
     params: { minGapBps: 50, sizeBps: 1000 },
     executorTs: `
-      const gap = obs.fairPriceUsdcPerWeth / obs.pool.priceUsdcPerWeth - 1;
+      const gap = obs.fairPriceUsdcPerWeth / obs.protocols.uniswap.pool.priceUsdcPerWeth - 1;
       if (Math.abs(gap) < params.minGapBps / 10000) return { type: "noop", reason: "tight" };
       const tokenIn = gap > 0 ? "USDC" : "WETH";
       const cap = BigInt(tokenIn === "WETH" ? obs.limits.maxWethInWei : obs.limits.maxUsdcInUnits);
       const amountIn = (cap * BigInt(params.sizeBps)) / 10000n;
       helpers.log("placed swap");
       return { type: "swap", tokenIn, amountIn: amountIn.toString(), slippageBps: 50 };
-    `
+    `,
   };
   const result = runExecutor(strategy, obs, helpersBase);
   assert.equal(result.ok, true);
@@ -108,7 +133,7 @@ test("runExecutor surfaces a noop fallback when executor throws", () => {
     version: 1,
     notes: "buggy",
     params: {},
-    executorTs: `throw new Error("boom");`
+    executorTs: `throw new Error("boom");`,
   };
   const result = runExecutor(strategy, obs, helpersBase);
   assert.equal(result.ok, false);
@@ -120,7 +145,7 @@ test("runExecutor rejects invalid AgentAction returned by executor", () => {
     version: 1,
     notes: "wrong",
     params: {},
-    executorTs: `return { type: "swap", tokenIn: "FOO", amountIn: "1" };`
+    executorTs: `return { type: "swap", tokenIn: "FOO", amountIn: "1" };`,
   };
   const result = runExecutor(strategy, obs, helpersBase);
   assert.equal(result.ok, false);
@@ -132,7 +157,7 @@ test("runExecutor rejects undefined return", () => {
     version: 1,
     notes: "no return",
     params: {},
-    executorTs: `helpers.log("no return");`
+    executorTs: `helpers.log("no return");`,
   };
   const result = runExecutor(strategy, obs, helpersBase);
   assert.equal(result.ok, false);
@@ -144,7 +169,7 @@ test("runExecutor enforces timeout on infinite loop", () => {
     version: 1,
     notes: "spinner",
     params: {},
-    executorTs: `while (true) {}`
+    executorTs: `while (true) {}`,
   };
   const result = runExecutor(strategy, obs, helpersBase, 50);
   assert.equal(result.ok, false);
@@ -159,7 +184,7 @@ test("runExecutor sandbox does not expose process or require", () => {
       const hasProcess = typeof process !== "undefined";
       const hasRequire = typeof require !== "undefined";
       return { type: "noop", reason: "process=" + hasProcess + " require=" + hasRequire };
-    `
+    `,
   };
   const result = runExecutor(strategy, obs, helpersBase);
   assert.equal(result.ok, true);

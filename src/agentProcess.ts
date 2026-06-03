@@ -9,7 +9,12 @@ export class AgentProcess {
   private pending: Array<(line: string) => void> = [];
   private stderr = "";
 
-  constructor(readonly spec: AgentSpec, rpcUrl: string, agentAddress: string) {
+  constructor(
+    readonly spec: AgentSpec,
+    rpcUrl: string,
+    agentAddress: string,
+    runDir: string,
+  ) {
     const childEnv: NodeJS.ProcessEnv = { ...process.env };
     // Strip parent Claude Code session vars so SDK-spawned claude
     // subprocesses authenticate via their own OAuth rather than inheriting
@@ -23,10 +28,12 @@ export class AgentProcess {
     childEnv.ERIS_RPC_URL = rpcUrl;
     childEnv.ERIS_AGENT_ADDRESS = agentAddress;
     childEnv.REPORT_DIR = process.env.REPORT_DIR ?? "./runs";
+    // エージェントが行動ログを runs/<runId>/agents/<id>.jsonl に残すための出力先。
+    childEnv.ERIS_RUN_DIR = runDir;
 
     this.child = spawn(spec.command, spec.args ?? [], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: childEnv
+      env: childEnv,
     });
 
     const stdout = createInterface({ input: this.child.stdout });
@@ -40,9 +47,15 @@ export class AgentProcess {
     });
   }
 
-  async requestAction(observation: AgentObservation, timeoutMs: number): Promise<AgentAction> {
-    if (this.child.killed) return { type: "noop", reason: "agent process killed" };
-    const linePromise = new Promise<string>((resolve) => this.pending.push(resolve));
+  async requestAction(
+    observation: AgentObservation,
+    timeoutMs: number,
+  ): Promise<AgentAction> {
+    if (this.child.killed)
+      return { type: "noop", reason: "agent process killed" };
+    const linePromise = new Promise<string>((resolve) =>
+      this.pending.push(resolve),
+    );
     this.child.stdin.write(`${safeStringify(observation)}\n`);
     const timeout = new Promise<never>((_, reject) => {
       setTimeout(() => reject(new Error("agent timeout")), timeoutMs).unref();
@@ -51,7 +64,10 @@ export class AgentProcess {
       const line = await Promise.race([linePromise, timeout]);
       return parseAction(JSON.parse(line));
     } catch (error) {
-      return { type: "noop", reason: `${this.spec.id}: ${error instanceof Error ? error.message : String(error)}` };
+      return {
+        type: "noop",
+        reason: `${this.spec.id}: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
   }
 
@@ -63,4 +79,3 @@ export class AgentProcess {
     return this.stderr;
   }
 }
-
