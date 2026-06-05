@@ -7,7 +7,7 @@
       "wallet": "AGENT0_PRIVATE_KEY",
       "env": {
         "ERIS_BASE_STRATEGY": "arb",
-        "ERIS_LLM_AUTH": "subscription",
+        "ERIS_LLM_AUTH": "cli",
         "ERIS_LLM_REVIEW_EVERY": "20"
       },
       "description": "arb ベースから出発し 20 ラウンド毎/PnL低下で自己改善（要 Claude OAuth）"
@@ -19,7 +19,7 @@
       "wallet": "AGENT1_PRIVATE_KEY",
       "env": {
         "ERIS_BASE_STRATEGY": "lp",
-        "ERIS_LLM_AUTH": "subscription",
+        "ERIS_LLM_AUTH": "cli",
         "ERIS_LLM_REVIEW_EVERY": "20"
       },
       "description": "lp ベースから出発し自己改善（要 Claude OAuth）"

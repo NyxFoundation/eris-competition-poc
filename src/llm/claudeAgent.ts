@@ -20,6 +20,7 @@ import {
   type StrategyResult,
 } from "./claudeStrategist.js";
 import { ClaudeSubscriptionStrategist } from "./claudeSubscriptionStrategist.js";
+import { ClaudeCliStrategist } from "./claudeCliStrategist.js";
 import type { ReviseReason } from "./prompts.js";
 
 const REVIEW_EVERY_N_ROUNDS = intEnv("ERIS_LLM_REVIEW_EVERY", 10);
@@ -74,9 +75,11 @@ const helpersBase: Omit<ExecutorHelpers, "log"> = {
  * controls the choice:
  *   mock          – offline, no network. Default when nothing else is available.
  *   apikey        – ClaudeStrategist using ANTHROPIC_API_KEY.
- *   subscription  – ClaudeSubscriptionStrategist via Claude Code OAuth (Pro/Max).
- *   auto (default)– subscription if `claude` is reachable, else apikey if a key
- *                   is set, else mock. Never throws on unavailability.
+ *   cli           – ClaudeCliStrategist via `claude -p` (Claude Code OAuth/サブスク).
+ *                   推奨のサブスク経路。SDK と違い nested でもハングしない。
+ *   subscription  – ClaudeSubscriptionStrategist via Agent SDK query()。注意: Claude Code
+ *                   セッション内(別ターミナル含む)では nested 検出でハングしうる。
+ *   auto (default)– cli if `claude` is reachable, else apikey if a key is set, else mock.
  */
 export function selectStrategist(): Strategist {
   const auth = (process.env.ERIS_LLM_AUTH ?? "auto").toLowerCase();
@@ -96,16 +99,18 @@ export function selectStrategist(): Strategist {
     emitStderr("[claude-llm] strategist=apikey\n");
     return new ClaudeStrategist();
   }
+  if (auth === "cli") {
+    emitStderr("[claude-llm] strategist=cli (claude -p, Claude Code OAuth)\n");
+    return new ClaudeCliStrategist();
+  }
   if (auth === "subscription") {
-    emitStderr("[claude-llm] strategist=subscription (Claude Code OAuth)\n");
+    emitStderr("[claude-llm] strategist=subscription (Agent SDK query)\n");
     return new ClaudeSubscriptionStrategist();
   }
-  // auto
+  // auto: 信頼できるサブスク経路(cli)を優先。SDK query は nested でハングするため使わない。
   if (canUseSubscription()) {
-    emitStderr(
-      "[claude-llm] strategist=subscription (auto-detected Claude Code OAuth)\n",
-    );
-    return new ClaudeSubscriptionStrategist();
+    emitStderr("[claude-llm] strategist=cli (auto-detected claude binary)\n");
+    return new ClaudeCliStrategist();
   }
   if (process.env.ANTHROPIC_API_KEY) {
     emitStderr(
