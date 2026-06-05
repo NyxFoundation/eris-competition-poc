@@ -1,18 +1,27 @@
 // 競争環境の「識別力(discrimination power)」の集計と判定。
 //
-// ADR 0001 P1: 環境が、戦略の実力差を結果(PnL/Sharpe)の差として安定に表せるか。
+// ADR 0001 P1: 環境が、戦略の実力差を結果(PnL/リスク調整リターン)の差として安定に表せるか。
 // 多様な戦略 + ベースライン(noop/random)を多 seed で実走した結果から 3 条件を判定する:
 //   C1 実力報酬   — 賢い戦略の median が baseline を明確に上回る
 //   C2 順位安定   — 上位↔下位の gap が seed をまたいで安定(総入れ替えなら不合格)
-//   C3 Sharpe 非潰れ — 全 agent が同一 Sharpe レンジに潰れていない
+//   C3 risk 非潰れ — 全 agent が同一リスク調整リターンに潰れていない
+//
+// リスク調整リターンは「総リターン Sharpe」ではなく **information ratio(noop 比の超過リターン
+// Sharpe)** を優先する。全員が WETH を保有すると総リターン Sharpe は共有 ETH ベータに支配され
+// 全員同値に潰れる(実力でなくベータを測る)。noop は「初期保有を持つだけ」= ベータ基準なので、
+// 各ラウンドの超過リターン(agent - noop)の Sharpe を取るとベータが剥がれ実力(alpha)が出る。
+// ベンチマークが無い場合(infoRatio 未計算)は従来の総リターン Sharpe にフォールバックする。
 //
 // このモジュールは **純関数のみ**(coordinator/fs に依存しない)→ ユニットテスト可能。
 // 多 seed の実走ループは src/multiSeedRun.ts、CLI は scripts/discrimination.ts。
 // 集計(aggregateAgents)は evaluate.ts(過学習ゲート)とも共有し、Sharpe/PnL の基準を一致させる。
 
+export type RiskMetric = "infoRatio" | "sharpe";
+
 export type AgentAcc = {
   netPnl: number[]; // seed 順の net PnL(USDC)
-  sharpe: number[]; // seed 順の Sharpe(計算不能 seed は欠落しうる)
+  sharpe: number[]; // seed 順の総リターン Sharpe(計算不能 seed は欠落しうる)
+  infoRatio: number[]; // seed 順の information ratio(noop 比。ベンチマーク無しなら空)
   revert: number[];
   included: number[];
 };
@@ -28,6 +37,7 @@ export type AgentAggregate = {
     winRate: number;
   };
   sharpe: { perSeed: number[]; median: number | null; mean: number | null };
+  infoRatio: { perSeed: number[]; median: number | null; mean: number | null };
   revertTotal: number;
   includedTotal: number;
 };
@@ -53,7 +63,41 @@ export function stdev(xs: number[]): number {
   return Math.sqrt(sum(xs.map((x) => (x - m) ** 2)) / (xs.length - 1));
 }
 
-// seed 横断アキュムレータ → 集計済み agent 配列。Sharpe median 降順 → PnL median 降順。
+// information ratio: ベンチマーク(noop)に対する超過リターンの Sharpe。
+// 各ラウンドの単純リターン rv,rb を取り excess = rv - rb の mean/std。スケール不変。
+export function informationRatio(
+  values: number[],
+  benchmark: number[],
+): number | null {
+  const n = Math.min(values.length, benchmark.length);
+  if (n < 3) return null;
+  const excess: number[] = [];
+  for (let i = 1; i < n; i++) {
+    const pv = values[i - 1];
+    const pb = benchmark[i - 1];
+    if (pv === 0 || pb === 0 || !Number.isFinite(pv) || !Number.isFinite(pb))
+      continue;
+    const rv = (values[i] - values[i - 1]) / pv;
+    const rb = (benchmark[i] - benchmark[i - 1]) / pb;
+    excess.push(rv - rb);
+  }
+  if (excess.length < 2) return null;
+  const m = mean(excess);
+  const sd = stdev(excess);
+  if (!Number.isFinite(sd) || sd === 0) return null;
+  return m / sd;
+}
+
+// 判定に使うリスク調整 metric の median。infoRatio があればそれ、無ければ総リターン Sharpe。
+function riskMedianOf(a: AgentAggregate, useInfoRatio: boolean): number | null {
+  return useInfoRatio ? a.infoRatio.median : a.sharpe.median;
+}
+// ロスター内に有効な infoRatio が 1 つでもあれば infoRatio を採用。
+function useInfoRatioFor(agents: AgentAggregate[]): boolean {
+  return agents.some((a) => a.infoRatio.median !== null);
+}
+
+// seed 横断アキュムレータ → 集計済み agent 配列。リスク調整 metric 降順 → PnL median 降順。
 // evaluate.ts の出力もこれを使うので、両者の数値基準が一致する。
 export function aggregateAgents(
   byAgent: Map<string, AgentAcc>,
@@ -76,14 +120,19 @@ export function aggregateAgents(
         median: acc.sharpe.length ? median(acc.sharpe) : null,
         mean: acc.sharpe.length ? mean(acc.sharpe) : null,
       },
+      infoRatio: {
+        perSeed: acc.infoRatio,
+        median: acc.infoRatio.length ? median(acc.infoRatio) : null,
+        mean: acc.infoRatio.length ? mean(acc.infoRatio) : null,
+      },
       revertTotal: sum(acc.revert),
       includedTotal: sum(acc.included),
     }))
-    .sort(
-      (a, b) =>
-        (b.sharpe.median ?? -Infinity) - (a.sharpe.median ?? -Infinity) ||
-        b.netPnl.median - a.netPnl.median,
-    );
+    .sort((a, b) => {
+      const ra = a.infoRatio.median ?? a.sharpe.median ?? -Infinity;
+      const rb = b.infoRatio.median ?? b.sharpe.median ?? -Infinity;
+      return rb - ra || b.netPnl.median - a.netPnl.median;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -92,13 +141,14 @@ export function aggregateAgents(
 
 // しきい値は ADR「決めていないこと」: P1 実走データを見て確定する。ここでは暫定既定を置き、
 // scripts/discrimination.ts が env(DISC_*)で上書きできるようにする。
+// sharpeMargin / minSharpeSpread は「判定に使うリスク調整 metric(infoRatio 優先)」に適用される。
 export type DiscriminationThresholds = {
   pnlMargin: number; // C1: 戦略が最強 baseline を上回る最小 PnL gap(USDC)
-  sharpeMargin: number; // C1: 同 Sharpe gap
+  sharpeMargin: number; // C1: 同 リスク調整 metric の gap
   minBeatFraction: number; // C1: baseline を上回るべき戦略の割合(0..1)
   minSpearman: number; // C2: seed 間順位相関(平均)の下限
   maxGapCv: number; // C2: top-bottom gap の変動係数(CV)上限
-  minSharpeSpread: number; // C3: median Sharpe の (max-min) 下限
+  minSharpeSpread: number; // C3: リスク調整 metric の median (max-min) 下限
 };
 
 export const DEFAULT_THRESHOLDS: DiscriminationThresholds = {
@@ -123,21 +173,23 @@ export function classifyRoles(
 export type C1StrategyRow = {
   id: string;
   pnlMedian: number;
-  sharpeMedian: number | null;
   pnlGap: number; // 戦略 median - 最強 baseline median(PnL)
-  sharpeGap: number | null;
+  sharpeMedian: number | null; // 総リターン Sharpe(参考)
+  infoRatioMedian: number | null; // 超過(noop 比) = information ratio(参考)
+  riskGap: number | null; // 判定に使う metric の gap
   beats: boolean;
 };
 
 export type C1Result = {
   pass: boolean;
+  riskMetric: RiskMetric; // 判定に使ったリスク調整 metric
   bestBaselinePnlMedian: number | null;
-  bestBaselineSharpeMedian: number | null;
+  bestBaselineRiskMedian: number | null;
   beatFraction: number;
   strategies: C1StrategyRow[];
 };
 
-// C1: 賢い戦略の median(PnL & Sharpe)が「最強 baseline」を margin 以上上回るか。
+// C1: 賢い戦略の median(PnL & リスク調整リターン)が「最強 baseline」を margin 以上上回るか。
 // 最強 baseline(= median が最も高い baseline)を超えられない戦略は実力を報酬されていない。
 export function evaluateC1(
   agents: AgentAggregate[],
@@ -145,33 +197,38 @@ export function evaluateC1(
   t: DiscriminationThresholds,
 ): C1Result {
   const { baselines, strategies } = classifyRoles(agents, baselineIds);
+  const useIR = useInfoRatioFor(agents);
+  const risk = (a: AgentAggregate) => riskMedianOf(a, useIR);
+
   const bestBaselinePnl = baselines.length
     ? Math.max(...baselines.map((b) => b.netPnl.median))
     : null;
-  const baselineSharpes = baselines
-    .map((b) => b.sharpe.median)
+  const baselineRisks = baselines
+    .map(risk)
     .filter((x): x is number => x !== null);
-  const bestBaselineSharpe = baselineSharpes.length
-    ? Math.max(...baselineSharpes)
+  const bestBaselineRisk = baselineRisks.length
+    ? Math.max(...baselineRisks)
     : null;
 
   const rows: C1StrategyRow[] = strategies.map((s) => {
     const pnlGap =
       bestBaselinePnl === null ? 0 : s.netPnl.median - bestBaselinePnl;
-    const sharpeGap =
-      s.sharpe.median !== null && bestBaselineSharpe !== null
-        ? s.sharpe.median - bestBaselineSharpe
+    const sRisk = risk(s);
+    const riskGap =
+      sRisk !== null && bestBaselineRisk !== null
+        ? sRisk - bestBaselineRisk
         : null;
     const beatsPnl = bestBaselinePnl !== null && pnlGap >= t.pnlMargin;
-    // Sharpe は計算不能 seed があり得るので、欠落時は PnL のみで判定(true 扱い)。
-    const beatsSharpe = sharpeGap === null ? true : sharpeGap >= t.sharpeMargin;
+    // リスク調整 metric は計算不能 seed があり得るので、欠落時は PnL のみで判定(true 扱い)。
+    const beatsRisk = riskGap === null ? true : riskGap >= t.sharpeMargin;
     return {
       id: s.id,
       pnlMedian: s.netPnl.median,
-      sharpeMedian: s.sharpe.median,
       pnlGap,
-      sharpeGap,
-      beats: beatsPnl && beatsSharpe,
+      sharpeMedian: s.sharpe.median,
+      infoRatioMedian: s.infoRatio.median,
+      riskGap,
+      beats: beatsPnl && beatsRisk,
     };
   });
 
@@ -185,8 +242,9 @@ export function evaluateC1(
 
   return {
     pass,
+    riskMetric: useIR ? "infoRatio" : "sharpe",
     bestBaselinePnlMedian: bestBaselinePnl,
-    bestBaselineSharpeMedian: bestBaselineSharpe,
+    bestBaselineRiskMedian: bestBaselineRisk,
     beatFraction,
     strategies: rows,
   };
@@ -281,32 +339,38 @@ export function evaluateC2(
 
 export type C3Result = {
   pass: boolean;
-  sharpeSpread: number | null; // median Sharpe の max-min
+  riskMetric: RiskMetric;
+  sharpeSpread: number | null; // 判定に使う metric の median の max-min
   maxSharpe: number | null;
   minSharpe: number | null;
 };
 
-// C3: 全 agent の median Sharpe が同一レンジに潰れていないか。spread が小さい=戦略差が出ていない。
+// C3: 全 agent のリスク調整 metric の median が同一レンジに潰れていないか。
+// spread が小さい = 戦略差が出ていない。
 export function evaluateC3(
   agents: AgentAggregate[],
   t: DiscriminationThresholds,
 ): C3Result {
-  const sharpes = agents
-    .map((a) => a.sharpe.median)
+  const useIR = useInfoRatioFor(agents);
+  const vals = agents
+    .map((a) => riskMedianOf(a, useIR))
     .filter((x): x is number => x !== null);
-  if (sharpes.length < 2) {
+  const riskMetric: RiskMetric = useIR ? "infoRatio" : "sharpe";
+  if (vals.length < 2) {
     return {
       pass: false,
+      riskMetric,
       sharpeSpread: null,
-      maxSharpe: sharpes[0] ?? null,
-      minSharpe: sharpes[0] ?? null,
+      maxSharpe: vals[0] ?? null,
+      minSharpe: vals[0] ?? null,
     };
   }
-  const mx = Math.max(...sharpes);
-  const mn = Math.min(...sharpes);
+  const mx = Math.max(...vals);
+  const mn = Math.min(...vals);
   const spread = mx - mn;
   return {
     pass: spread > t.minSharpeSpread,
+    riskMetric,
     sharpeSpread: spread,
     maxSharpe: mx,
     minSharpe: mn,
@@ -315,6 +379,7 @@ export function evaluateC3(
 
 export type DiscriminationVerdict = {
   pass: boolean;
+  riskMetric: RiskMetric; // C1/C3 が使ったリスク調整 metric
   thresholds: DiscriminationThresholds;
   baselineIds: string[];
   c1: C1Result;
@@ -344,11 +409,12 @@ export function computeVerdict(
   }
   if (!c3.pass) {
     hints.push(
-      "C3 不合格: 全 agent が同一 Sharpe レンジに潰れている → 戦略差が出る機会が無い。arb 機会サイズ↑・戦略多様性↑。",
+      "C3 不合格: 全 agent が同一のリスク調整リターンに潰れている → 戦略差が出る機会が無い。arb 機会サイズ↑・戦略多様性↑。",
     );
   }
   return {
     pass: c1.pass && c2.pass && c3.pass,
+    riskMetric: c1.riskMetric,
     thresholds: t,
     baselineIds: [...baselineIds],
     c1,

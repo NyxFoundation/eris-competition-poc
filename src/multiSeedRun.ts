@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { runSimulation } from "./coordinator.js";
 import type { AgentAcc } from "./discrimination.js";
+import { informationRatio } from "./discrimination.js";
 import {
   latestRunDir,
   readPerRoundValues,
@@ -37,8 +38,44 @@ type Summary = {
   agents: SummaryAgent[];
 };
 
+function emptyAcc(): AgentAcc {
+  return { netPnl: [], sharpe: [], infoRatio: [], revert: [], included: [] };
+}
+
+// 1 つの run ディレクトリ(summary.json + events.jsonl)を読み、byAgent に寄与させる。
+// benchmarkId が渡されたら、その agent の per-round 系列を基準に information ratio も計算する。
+// 戻り値は run の runId(perSeedRuns 構築用)。
+export function accumulateRun(
+  byAgent: Map<string, AgentAcc>,
+  runDir: string,
+  benchmarkId?: string,
+): string {
+  const summary = JSON.parse(
+    readFileSync(join(runDir, "summary.json"), "utf8"),
+  ) as Summary;
+  const values = readPerRoundValues(join(runDir, "events.jsonl"));
+  const benchmark = benchmarkId ? values.get(benchmarkId) : undefined;
+  for (const a of summary.agents) {
+    const acc = byAgent.get(a.id) ?? emptyAcc();
+    const series = values.get(a.id) ?? [];
+    acc.netPnl.push(a.netPnlUsdc);
+    const s = sharpeRatio(series);
+    if (s !== null) acc.sharpe.push(s);
+    if (benchmark) {
+      const ir = informationRatio(series, benchmark);
+      if (ir !== null) acc.infoRatio.push(ir);
+    }
+    acc.revert.push(a.revertCount);
+    acc.included.push(a.includedTxCount);
+    byAgent.set(a.id, acc);
+  }
+  return summary.runId;
+}
+
+// 複数 SEED で実走し、各 run を accumulateRun で集計する。
 export async function collectMultiSeedStats(
   seeds: number[],
+  benchmarkId?: string,
 ): Promise<MultiSeedStats> {
   const runDirRoot = loadConfig().runDirRoot;
   const byAgent = new Map<string, AgentAcc>();
@@ -49,27 +86,25 @@ export async function collectMultiSeedStats(
     console.error(`[multiSeed] seed=${seed} running simulation...`);
     await runSimulation();
     const runDir = latestRunDir(runDirRoot, true);
-    const summary = JSON.parse(
-      readFileSync(join(runDir, "summary.json"), "utf8"),
-    ) as Summary;
-    perSeedRuns.push({ seed, runId: summary.runId, runDir });
-    const values = readPerRoundValues(join(runDir, "events.jsonl"));
-    for (const a of summary.agents) {
-      const acc = byAgent.get(a.id) ?? {
-        netPnl: [],
-        sharpe: [],
-        revert: [],
-        included: [],
-      };
-      acc.netPnl.push(a.netPnlUsdc);
-      const s = sharpeRatio(values.get(a.id) ?? []);
-      if (s !== null) acc.sharpe.push(s);
-      acc.revert.push(a.revertCount);
-      acc.included.push(a.includedTxCount);
-      byAgent.set(a.id, acc);
-    }
+    const runId = accumulateRun(byAgent, runDir, benchmarkId);
+    perSeedRuns.push({ seed, runId, runDir });
   }
 
+  return { byAgent, perSeedRuns };
+}
+
+// 既存の run ディレクトリ群を再シミュレーション無しで集計する(オフライン再判定用)。
+// しきい値や metric を変えて判定し直すときに、長い sim を回さず使える。
+export function statsFromRunDirs(
+  runDirs: string[],
+  benchmarkId?: string,
+): MultiSeedStats {
+  const byAgent = new Map<string, AgentAcc>();
+  const perSeedRuns: SeedRun[] = [];
+  runDirs.forEach((runDir, i) => {
+    const runId = accumulateRun(byAgent, runDir, benchmarkId);
+    perSeedRuns.push({ seed: i + 1, runId, runDir });
+  });
   return { byAgent, perSeedRuns };
 }
 

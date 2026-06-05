@@ -7,16 +7,22 @@ import {
   evaluateC1,
   evaluateC2,
   evaluateC3,
+  informationRatio,
   spearman,
   type AgentAcc,
   type DiscriminationThresholds,
 } from "../src/discrimination.js";
 
-// seed 横断アキュムレータを手早く組むヘルパ。
-function acc(netPnl: number[], sharpe: number[]): AgentAcc {
+// seed 横断アキュムレータを手早く組むヘルパ。infoRatio 省略時は空(=総リターン Sharpe へフォールバック)。
+function acc(
+  netPnl: number[],
+  sharpe: number[],
+  infoRatio: number[] = [],
+): AgentAcc {
   return {
     netPnl,
     sharpe,
+    infoRatio,
     revert: netPnl.map(() => 0),
     included: netPnl.map(() => 1),
   };
@@ -121,4 +127,38 @@ test("しきい値は上書きできる（margin を上げると C1 が厳しく
     pnlMargin: 50,
   };
   assert.equal(evaluateC1(agents, baselineIds, strict).pass, false);
+});
+
+test("informationRatio: 超過リターンの Sharpe（同一系列は null）", () => {
+  // 同一系列 → excess 全 0 → std 0 → null
+  assert.equal(
+    informationRatio([100, 101, 102, 101], [100, 101, 102, 101]),
+    null,
+  );
+  // ベンチマークより毎ラウンド上振れ → 正の IR
+  const ir = informationRatio([100, 102, 105, 109], [100, 101, 102, 103]);
+  assert.ok(ir !== null && ir > 0);
+});
+
+test("C1 は infoRatio を優先（総 Sharpe がタイでも超過リターンで勝てば合格）", () => {
+  const baselineIds = new Set(["random"]);
+  // 総リターン Sharpe は両者 0.025 でタイ。だが strat は noop 比の超過リターン(infoRatio)で勝つ。
+  const agents = aggregateAgents(
+    byAgent({
+      strat: acc([300, 320, 290], [0.025, 0.025, 0.025], [0.4, 0.45, 0.4]),
+      random: acc([60, 70, 65], [0.025, 0.025, 0.025], [0.0, 0.01, 0.0]),
+    }),
+  );
+  const c1 = evaluateC1(agents, baselineIds, DEFAULT_THRESHOLDS);
+  assert.equal(c1.riskMetric, "infoRatio");
+  assert.equal(c1.pass, true);
+  assert.equal(c1.beatFraction, 1);
+});
+
+test("infoRatio が無ければ総リターン Sharpe にフォールバック", () => {
+  const agents = aggregateAgents(
+    byAgent({ a: acc([10, 20], [0.1, 0.2]), b: acc([5, 6], [0.05, 0.06]) }),
+  );
+  const c3 = evaluateC3(agents, DEFAULT_THRESHOLDS);
+  assert.equal(c3.riskMetric, "sharpe");
 });

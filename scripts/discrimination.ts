@@ -1,12 +1,19 @@
 // 識別力(discrimination power)判定 CLI（ADR 0001 P1）。
 // 多様な戦略 + ベースライン(noop/random)を多 seed で実走し、3 条件を判定する:
-//   C1 実力報酬 / C2 順位安定 / C3 Sharpe 非潰れ
+//   C1 実力報酬 / C2 順位安定 / C3 risk 非潰れ
 // evaluate.ts(過学習ゲート)とは別物: こちらは「環境に識別力があるか」を見る。
+//
+// リスク調整リターンは information ratio(noop 比の超過リターン Sharpe)を優先する
+// （総リターン Sharpe は共有 ETH ベータに支配され全員潰れるため）。
 //
 // 使い方（要 npm run anvil）:
 //   SEEDS=1,2,3 ROUNDS=128 AGENTS_CONFIG=agents.p1.json npm run discrimination
 //
+// 既存 run の再判定(再シミュレーション無し。しきい値や metric を変えて試すとき):
+//   DISC_FROM_RUNS=runs/<dir1>,runs/<dir2>,... npm run discrimination
+//
 // baseline の解決: ロスターの "baseline": true、無ければ env BASELINE_IDS=noop,random。
+// benchmark(超過リターンの基準): env DISC_BENCHMARK_ID、無ければ noop、無ければ最初の baseline。
 // しきい値は env で上書き可（既定は暫定。ADR: しきい値は P1 データを見て確定）:
 //   DISC_PNL_MARGIN / DISC_SHARPE_MARGIN / DISC_MIN_BEAT_FRACTION
 //   DISC_MIN_SPEARMAN / DISC_MAX_GAP_CV / DISC_MIN_SHARPE_SPREAD
@@ -23,7 +30,11 @@ import {
   type DiscriminationThresholds,
   type DiscriminationVerdict,
 } from "../src/discrimination.js";
-import { collectMultiSeedStats, parseSeeds } from "../src/multiSeedRun.js";
+import {
+  collectMultiSeedStats,
+  parseSeeds,
+  statsFromRunDirs,
+} from "../src/multiSeedRun.js";
 
 process.env.ROUNDS ??= "128";
 process.env.AGENTS_CONFIG ??= "agents.p1.json";
@@ -76,17 +87,48 @@ function resolveBaselineIds(configPath: string): Set<string> {
   );
 }
 
+// 超過リターンの基準 agent。env DISC_BENCHMARK_ID > noop > 最初の baseline。
+function resolveBenchmarkId(baselineIds: Set<string>): string | undefined {
+  const env = process.env.DISC_BENCHMARK_ID?.trim();
+  if (env) return env;
+  if (baselineIds.has("noop")) return "noop";
+  return [...baselineIds][0];
+}
+
+function splitEnvList(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 async function main(): Promise<void> {
-  const seeds = parseSeeds(process.env.SEEDS, "1,2,3");
   const configPath = process.env.AGENTS_CONFIG as string;
   const baselineIds = resolveBaselineIds(configPath);
+  const benchmarkId = resolveBenchmarkId(baselineIds);
   if (baselineIds.size === 0) {
     console.error(
       '[discrimination] warning: baseline agent が無い（ロスターで "baseline": true か env BASELINE_IDS を指定）。C1 は評価不能。',
     );
   }
+  if (!benchmarkId) {
+    console.error(
+      "[discrimination] warning: benchmark agent が無い → 総リターン Sharpe にフォールバック（ベータ汚染あり）。",
+    );
+  }
 
-  const { byAgent, perSeedRuns } = await collectMultiSeedStats(seeds);
+  const fromRuns = splitEnvList(process.env.DISC_FROM_RUNS);
+  const { byAgent, perSeedRuns } = fromRuns.length
+    ? (console.error(
+        `[discrimination] offline: 既存 ${fromRuns.length} run を再判定（benchmark=${benchmarkId ?? "none"}）`,
+      ),
+      statsFromRunDirs(fromRuns, benchmarkId))
+    : await collectMultiSeedStats(
+        parseSeeds(process.env.SEEDS, "1,2,3"),
+        benchmarkId,
+      );
+
+  const seeds = perSeedRuns.map((r) => r.seed);
   const agents = aggregateAgents(byAgent);
   const thresholds = thresholdsFromEnv();
   const verdict = computeVerdict(agents, baselineIds, thresholds);
@@ -99,13 +141,14 @@ async function main(): Promise<void> {
     console.error(`[discrimination] wrote ${outPath}`);
   }
   console.error(
-    `[discrimination] verdict: ${verdict.pass ? "PASS" : "FAIL"} (C1=${ok(verdict.c1.pass)} C2=${ok(verdict.c2.pass)} C3=${ok(verdict.c3.pass)})`,
+    `[discrimination] verdict: ${verdict.pass ? "PASS" : "FAIL"} (C1=${ok(verdict.c1.pass)} C2=${ok(verdict.c2.pass)} C3=${ok(verdict.c3.pass)}) metric=${verdict.riskMetric}`,
   );
 
   const out = {
     seeds,
     rounds: Number(process.env.ROUNDS),
     agentsConfig: configPath,
+    benchmarkId: benchmarkId ?? null,
     forkBlock: process.env.FORK_BLOCK_NUMBER ?? null,
     enabledProtocols: process.env.ENABLED_PROTOCOLS ?? null,
     perSeedRuns,
@@ -123,6 +166,11 @@ function ok(pass: boolean): string {
 function num(n: number | null, digits = 2): string {
   return n === null ? "N/A" : n.toFixed(digits);
 }
+function metricLabel(m: DiscriminationVerdict["riskMetric"]): string {
+  return m === "infoRatio"
+    ? "information ratio（noop 比の超過リターン Sharpe）"
+    : "総リターン Sharpe（ベータ汚染あり）";
+}
 
 function renderMarkdown(
   v: DiscriminationVerdict,
@@ -139,22 +187,24 @@ function renderMarkdown(
     `**判定: ${v.pass ? "✅ PASS" : "❌ FAIL"}**  (seeds=${seeds.join(",")}, rounds=${process.env.ROUNDS})`,
   );
   lines.push("");
+  lines.push(`リスク調整 metric: **${metricLabel(v.riskMetric)}**`);
+  lines.push("");
   lines.push(
-    `| 条件 | 結果 |\n|---|---|\n| C1 実力報酬 | ${ok(v.c1.pass)} |\n| C2 順位安定 | ${ok(v.c2.pass)} |\n| C3 Sharpe 非潰れ | ${ok(v.c3.pass)} |`,
+    `| 条件 | 結果 |\n|---|---|\n| C1 実力報酬 | ${ok(v.c1.pass)} |\n| C2 順位安定 | ${ok(v.c2.pass)} |\n| C3 risk 非潰れ | ${ok(v.c3.pass)} |`,
   );
   lines.push("");
 
-  // ロスター
-  lines.push("## ロスター（Sharpe median 降順）");
+  // ロスター（Sharpe(total) と IR(excess) を併記）
+  lines.push("## ロスター（リスク調整 metric 降順）");
   lines.push("");
   lines.push(
-    "| # | agent | 役割 | PnL median | PnL min | winRate | Sharpe median |",
+    "| # | agent | 役割 | PnL median | PnL min | winRate | Sharpe(total) | IR(excess) |",
   );
-  lines.push("|---:|---|---|---:|---:|---:|---:|");
+  lines.push("|---:|---|---|---:|---:|---:|---:|---:|");
   agents.forEach((a, i) => {
     const role = baselineIds.has(a.id) ? "baseline" : "strategy";
     lines.push(
-      `| ${i + 1} | ${a.id} | ${role} | ${a.netPnl.median.toFixed(2)} | ${a.netPnl.min.toFixed(2)} | ${(a.netPnl.winRate * 100).toFixed(0)}% | ${num(a.sharpe.median, 3)} |`,
+      `| ${i + 1} | ${a.id} | ${role} | ${a.netPnl.median.toFixed(2)} | ${a.netPnl.min.toFixed(2)} | ${(a.netPnl.winRate * 100).toFixed(0)}% | ${num(a.sharpe.median, 3)} | ${num(a.infoRatio.median, 3)} |`,
     );
   });
   lines.push("");
@@ -163,16 +213,16 @@ function renderMarkdown(
   lines.push(`## C1 実力報酬 — ${ok(v.c1.pass)}`);
   lines.push("");
   lines.push(
-    `最強 baseline: PnL median=${num(v.c1.bestBaselinePnlMedian)}, Sharpe median=${num(v.c1.bestBaselineSharpeMedian, 3)} / margin: pnl≥${t.pnlMargin}, sharpe≥${t.sharpeMargin}, beatFraction≥${t.minBeatFraction}（実測 ${(v.c1.beatFraction * 100).toFixed(0)}%）`,
+    `最強 baseline: PnL median=${num(v.c1.bestBaselinePnlMedian)}, ${v.riskMetric} median=${num(v.c1.bestBaselineRiskMedian, 3)} / margin: pnl≥${t.pnlMargin}, risk≥${t.sharpeMargin}, beatFraction≥${t.minBeatFraction}（実測 ${(v.c1.beatFraction * 100).toFixed(0)}%）`,
   );
   lines.push("");
   lines.push(
-    "| 戦略 | PnL median | PnL gap | Sharpe median | Sharpe gap | baseline 超え |",
+    "| 戦略 | PnL median | PnL gap | Sharpe(total) | IR(excess) | risk gap | baseline 超え |",
   );
-  lines.push("|---|---:|---:|---:|---:|:---:|");
+  lines.push("|---|---:|---:|---:|---:|---:|:---:|");
   for (const r of v.c1.strategies) {
     lines.push(
-      `| ${r.id} | ${r.pnlMedian.toFixed(2)} | ${r.pnlGap.toFixed(2)} | ${num(r.sharpeMedian, 3)} | ${num(r.sharpeGap, 3)} | ${r.beats ? "✓" : "✗"} |`,
+      `| ${r.id} | ${r.pnlMedian.toFixed(2)} | ${r.pnlGap.toFixed(2)} | ${num(r.sharpeMedian, 3)} | ${num(r.infoRatioMedian, 3)} | ${num(r.riskGap, 3)} | ${r.beats ? "✓" : "✗"} |`,
     );
   }
   lines.push("");
@@ -190,10 +240,10 @@ function renderMarkdown(
   lines.push("");
 
   // C3
-  lines.push(`## C3 Sharpe 非潰れ — ${ok(v.c3.pass)}`);
+  lines.push(`## C3 risk 非潰れ — ${ok(v.c3.pass)}`);
   lines.push("");
   lines.push(
-    `Sharpe spread (max-min)=${num(v.c3.sharpeSpread, 3)}（>${t.minSharpeSpread} で合格） / max=${num(v.c3.maxSharpe, 3)}, min=${num(v.c3.minSharpe, 3)}`,
+    `${v.c3.riskMetric} spread (max-min)=${num(v.c3.sharpeSpread, 3)}（>${t.minSharpeSpread} で合格） / max=${num(v.c3.maxSharpe, 3)}, min=${num(v.c3.minSharpe, 3)}`,
   );
   lines.push("");
 
