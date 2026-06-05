@@ -1,0 +1,55 @@
+{
+  "agents": [
+    {
+      "id": "arb-evolver",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AGENT0_PRIVATE_KEY",
+      "env": {
+        "ERIS_BASE_STRATEGY": "arb",
+        "ERIS_LLM_AUTH": "subscription",
+        "ERIS_LLM_REVIEW_EVERY": "20"
+      },
+      "description": "arb ベースから出発し 20 ラウンド毎/PnL低下で自己改善（要 Claude OAuth）"
+    },
+    {
+      "id": "lp-evolver",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AGENT1_PRIVATE_KEY",
+      "env": {
+        "ERIS_BASE_STRATEGY": "lp",
+        "ERIS_LLM_AUTH": "subscription",
+        "ERIS_LLM_REVIEW_EVERY": "20"
+      },
+      "description": "lp ベースから出発し自己改善（要 Claude OAuth）"
+    },
+    {
+      "id": "arb-frozen",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AGENT2_PRIVATE_KEY",
+      "env": {
+        "ERIS_BASE_STRATEGY": "arb",
+        "ERIS_FREEZE_STRATEGY": "1"
+      },
+      "description": "arb ベースを凍結（決定論・API 不要）。改善前の対照群"
+    },
+    {
+      "id": "noop",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/noop.ts"],
+      "wallet": "AGENT3_PRIVATE_KEY",
+      "baseline": true,
+      "description": "ベースライン: 何もしない"
+    },
+    {
+      "id": "random",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/random.ts"],
+      "wallet": "AGENT4_PRIVATE_KEY",
+      "baseline": true,
+      "description": "ベースライン: でたらめ売買（決定論シード）"
+    }
+  ]
+}
