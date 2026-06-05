@@ -294,6 +294,45 @@ test("strategy + decisions + claude-calls files land under REPORT_DIR/runId/agen
   });
 });
 
+test("シード付き: ベース戦略を v1 にし、改訂で v2 へ磨く(LLM init は呼ばない)", async () => {
+  const prev = process.env.ERIS_BASE_STRATEGY;
+  process.env.ERIS_BASE_STRATEGY = "arb";
+  try {
+    await withTmpReportDir(async () => {
+      const state = createState("seeded-agent");
+      const strategist = new StubStrategist(
+        `return { type: "noop", reason: "revised v" + params.v };`,
+      );
+      // round 0: ベース arb を v1 として決定論シード。strategist.init は呼ばれない。
+      await handleLine(JSON.stringify(makeObs(0)), state, strategist);
+      await state.pending;
+      assert.equal(state.strategy?.version, 1);
+      assert.equal(
+        strategist.initCount,
+        0,
+        "seeded のとき LLM init はスキップ",
+      );
+      assert.ok(
+        state.strategy?.executorTs.includes("gap"),
+        "v1 は arb ベースの executor",
+      );
+
+      // round 10: スケジュール改訂 → stub が v2 を返し、ベースが磨かれる。
+      strategist.defer = true;
+      await handleLine(JSON.stringify(makeObs(10)), state, strategist);
+      assert.equal(state.pendingPhase, "revise");
+      strategist.release();
+      await state.pending;
+      assert.equal(state.strategy?.version, 2, "ベースが v2 に改訂される");
+      assert.equal(strategist.reviseCount, 1);
+      assert.equal(strategist.lastReviseReason, "scheduled");
+    });
+  } finally {
+    if (prev === undefined) delete process.env.ERIS_BASE_STRATEGY;
+    else process.env.ERIS_BASE_STRATEGY = prev;
+  }
+});
+
 test("whichReviseReason cadence and drawdown logic", () => {
   // Cadence: round % 10 == 0 and round > 0
   assert.equal(whichReviseReason(0, -1, 100, 100), null);

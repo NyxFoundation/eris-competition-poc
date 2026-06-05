@@ -202,8 +202,10 @@ ${prev.executorTs}
 ${lines.join("\n")}
 
 ## Your task
-Call set_strategy with an updated version. You can:
-- Keep executor the same and only tune params.
-- Rewrite executor entirely if the thesis was wrong.
+Call set_strategy with an updated version. This strategy may have started from a hand-tuned base
+(see the notes above); treat it as a working baseline to **refine incrementally**, not replace by default:
+- Prefer tuning params (thresholds, sizes, fractions) in the direction the recent rounds justify.
+- Keep the executor and the core thesis unless the evidence shows it is clearly wrong; then rewrite.
+- Preserve what already works (do not discard a profitable edge to chase a new idea).
 Briefly explain in notes what changed vs v${prev.version} and why.`;
 }
