@@ -303,6 +303,9 @@ function validateAgentsFile(parsed: unknown, path: string): AgentSpec[] {
     ) {
       throw new Error(`${label}.description must be a string when present`);
     }
+    if (agent.baseline !== undefined && typeof agent.baseline !== "boolean") {
+      throw new Error(`${label}.baseline must be a boolean when present`);
+    }
     if (agent.env !== undefined) {
       if (
         !agent.env ||
@@ -326,6 +329,7 @@ function validateAgentsFile(parsed: unknown, path: string): AgentSpec[] {
       wallet: agent.wallet,
       description: agent.description,
       env: agent.env,
+      baseline: agent.baseline,
     };
   });
 }

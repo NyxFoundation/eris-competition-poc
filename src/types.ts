@@ -266,6 +266,8 @@ export type AgentSpec = {
   wallet: string;
   description?: string;
   env?: Record<string, string>;
+  // 識別力判定(scripts/discrimination.ts)の物差し。true なら noop/random 等のベースライン。
+  baseline?: boolean;
 };
 
 export type AgentsFile = {

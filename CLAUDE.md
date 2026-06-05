@@ -8,6 +8,7 @@ eris-competition-poc は Anvil で Arbitrum をフォークする DeFi トレー
 - `npm run sim` — 1 回シミュレーション（`AGENTS_CONFIG` / `ROUNDS` / `SEED` / `ENABLED_PROTOCOLS` を env で指定）
 - `npm run leaderboard` — sim を回して Sharpe→PnL でランキング（`runs/<id>/leaderboard.md`）
 - `npm run evaluate` — **複数 SEED** で sim を回し agent ごとの集計統計を JSON 出力（過学習ゲート）
+- `npm run discrimination` — 多様な戦略＋ベースラインを多 SEED で回し**識別力**（C1 実力報酬 / C2 順位安定 / C3 Sharpe 非潰れ）を判定（`runs/<id>/discrimination.md` + JSON。ADR 0001 P1）
 - `npm run typecheck` / `npm run test` — 型チェック / ユニットテスト
 
 ## アーキテクチャ（プロセス分離）
