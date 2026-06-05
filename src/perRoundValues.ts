@@ -1,17 +1,60 @@
 // per-round ポートフォリオ価値の集計と Sharpe 計算、run dir 探索。
-// leaderboard.ts と evaluate.ts の両方が同じ基準を使うための共有モジュール。
+// leaderboard.ts と evaluate.ts / discrimination.ts が同じ基準を使うための共有モジュール。
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
+// events.jsonl の observation イベント。observation は AgentObservation 形(protocols ネスト)。
 export type ObservationEvent = {
   type: "observation";
   agentId: string;
-  observation: {
-    round: number;
-    inventory: { valueUsdc: number };
-    positions: Array<{ valueUsdc: number }>;
-  };
+  observation: Record<string, unknown>;
 };
+
+function num(v: unknown): number {
+  const n = typeof v === "string" ? Number(v) : (v as number);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// 1 ラウンドの総ポートフォリオ価値(USDC)を observation から再構成する。
+// = spot inventory + 各プロトコルのポジション価値。summary が使う adapter.valueUsdc と同じ式:
+//   uniswap: Σ positions[].valueUsdc
+//   gmx:     collateral(WETH なら ×price, USDC なら /1e6) + pnlUsd
+//   aave:    (totalCollateralBase - totalDebtBase) / 1e8
+// inventory は spot のみ(担保や LP は spot から抜ける)なので、ポジション価値を足し戻して総額にする。
+// 旧実装は存在しない observation.positions 配列を要求し、全 agent で空 → Sharpe が常に N/A だった。
+export function perRoundValueUsdc(
+  observation: Record<string, unknown>,
+): number {
+  // biome-ignore lint/suspicious/noExplicitAny: ログ済み JSON を防御的に読む
+  const obs = observation as any;
+  let value = num(obs?.inventory?.valueUsdc);
+
+  // 後方互換: 旧イベントのフラットな positions 配列
+  if (Array.isArray(obs?.positions)) {
+    for (const p of obs.positions) value += num(p?.valueUsdc);
+  }
+
+  const protocols = obs?.protocols ?? {};
+  if (Array.isArray(protocols?.uniswap?.positions)) {
+    for (const pos of protocols.uniswap.positions) value += num(pos?.valueUsdc);
+  }
+  const gmxPos = protocols?.gmx?.position;
+  if (gmxPos) {
+    const mkt = num(protocols.gmx.marketPriceUsd);
+    const collateralUsd =
+      gmxPos.collateral === "WETH"
+        ? (num(gmxPos.collateralAmount) / 1e18) * mkt
+        : num(gmxPos.collateralAmount) / 1e6;
+    value += collateralUsd + num(gmxPos.pnlUsd);
+  }
+  if (protocols?.aave) {
+    value +=
+      (num(protocols.aave.totalCollateralBase) -
+        num(protocols.aave.totalDebtBase)) /
+      1e8;
+  }
+  return value;
+}
 
 // events.jsonl から agent ごとの per-round 総価値系列(round 昇順)を作る。
 export function readPerRoundValues(eventsPath: string): Map<string, number[]> {
@@ -28,10 +71,8 @@ export function readPerRoundValues(eventsPath: string): Map<string, number[]> {
     }
     if (!isObservationEvent(parsed)) continue;
     const evt = parsed as ObservationEvent;
-    const round = evt.observation.round;
-    const value =
-      evt.observation.inventory.valueUsdc +
-      evt.observation.positions.reduce((s, p) => s + (p.valueUsdc ?? 0), 0);
+    const round = num((evt.observation as Record<string, unknown>).round);
+    const value = perRoundValueUsdc(evt.observation);
     const series = byAgent.get(evt.agentId) ?? new Map<number, number>();
     series.set(round, value);
     byAgent.set(evt.agentId, series);
@@ -53,9 +94,7 @@ export function isObservationEvent(value: unknown): boolean {
   const obs = v.observation as Record<string, unknown> | undefined;
   if (!obs || typeof obs !== "object") return false;
   const inv = obs.inventory as Record<string, unknown> | undefined;
-  return (
-    !!inv && typeof inv.valueUsdc === "number" && Array.isArray(obs.positions)
-  );
+  return !!inv && typeof inv.valueUsdc === "number";
 }
 
 // per-round リターンの平均/標準偏差比(Sharpe)。系列が短い/分散0なら null。
