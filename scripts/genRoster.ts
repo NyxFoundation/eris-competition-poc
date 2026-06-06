@@ -52,6 +52,28 @@ const PARAMETRIC: StratDef[] = [
     script: "examples/agents/gmx-trend.ts",
     sweep: { TREND_BPS: [30, 60], TREND_LOOKBACK: [8, 16] },
   },
+  // main から取り込んだ新戦略(observation 正規化を入れて実動作させた)。
+  {
+    base: "statarb",
+    script: "examples/agents/stat-arb.ts",
+    // Z_AGGRESSIVE 既定 2.5 を超えない範囲で entry 閾値を sweep。
+    sweep: { STAT_ARB_Z_ENTER: [1.0, 1.5, 2.0] },
+  },
+  {
+    base: "fairmm",
+    script: "examples/agents/fair-mm.ts",
+    sweep: { FAIR_MM_RANGE_TICK_MULTIPLIER: [4, 8] },
+  },
+  {
+    base: "jitlp",
+    script: "examples/agents/jit-lp.ts",
+    sweep: { JIT_VOL_QUANTILE: [0.8, 0.9] },
+  },
+  {
+    base: "ladder",
+    script: "examples/agents/ladder-mm.ts",
+    sweep: { LADDER_STEPS: [3, 5] },
+  },
 ];
 
 // 固定挙動(env パラメータ無し)。1 インスタンスずつ。
