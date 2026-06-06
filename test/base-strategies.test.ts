@@ -241,6 +241,186 @@ test("statarb ベース: 窓が貯まり |z| が大きければ swap、burn-in �
   }
 });
 
+test("cvbal ベース: balancer↔curve のスプレッド超で両建て bundle", () => {
+  const s = getBaseStrategy("cvbal");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.protocols.balancer = { priceUsdcPerWeth: 1650 }; // 割安
+  obs.protocols.curve = { priceUsdcPerWeth: 1700 }; // 割高 → spread ~3%
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "bundle");
+    if (r.action.type === "bundle") {
+      assert.equal(r.action.actions.length, 2);
+      assert.equal(r.action.actions[0].type, "balancerSwap"); // 割安側で買い
+      assert.equal(r.action.actions[1].type, "curveSwap"); // 割高側で売り
+    }
+  }
+});
+
+test("cvbal ベース: スプレッドが小さければ noop", () => {
+  const s = getBaseStrategy("cvbal");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.protocols.balancer = { priceUsdcPerWeth: 1700 };
+  obs.protocols.curve = { priceUsdcPerWeth: 1700 };
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.action.type, "noop");
+});
+
+test("dnlp ベース: LP 無→mint、LP 有/short 無→GMX short ヘッジ", () => {
+  const s = getBaseStrategy("dnlp");
+  assert.ok(s);
+  // State A: LP 無し → mint
+  const a = syntheticObs();
+  a.protocols.gmx = { marketPriceUsd: 1700 };
+  const ra = runExecutor(s, a, helpers);
+  assert.equal(ra.ok, true);
+  if (ra.ok) assert.equal(ra.action.type, "mintLiquidity");
+
+  // State B: LP 有り(WETH エクスポージャ)/ short 無し → gmxIncrease short
+  const b = syntheticObs();
+  b.limits.maxGmxSizeUsd = "100000000000000000000000000000000000"; // 1e35
+  b.protocols.gmx = { marketPriceUsd: 1700 };
+  b.protocols.uniswap!.positions = [
+    {
+      tokenId: "1",
+      tickLower: 199900,
+      tickUpper: 200100,
+      liquidity: "1000",
+      tokensOwedWethWei: "0",
+      tokensOwedUsdcUnits: "0",
+      amountWethWei: "1000000000000000000", // 1 WETH エクスポージャ
+      amountUsdcUnits: "0",
+      valueUsdc: 1700,
+    },
+  ];
+  const rb = runExecutor(s, b, helpers);
+  assert.equal(rb.ok, true);
+  if (rb.ok) {
+    assert.equal(rb.action.type, "gmxIncrease");
+    if (rb.action.type === "gmxIncrease") assert.equal(rb.action.isLong, false);
+  }
+});
+
+test("gmxperp ベース: ポジション無しなら ETH long を open", () => {
+  const s = getBaseStrategy("gmxperp");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.limits.maxGmxSizeUsd = "100000000000000000000000000000000000"; // 1e35
+  obs.protocols.gmx = { marketPriceUsd: 1700 };
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "gmxIncrease");
+    if (r.action.type === "gmxIncrease") assert.equal(r.action.isLong, true);
+  }
+});
+
+test("gmxrev ベース: 価格が MA より高ければ short を open", () => {
+  const s = getBaseStrategy("gmxrev");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.limits.maxGmxSizeUsd = "100000000000000000000000000000000000";
+  obs.protocols.gmx = { marketPriceUsd: 1700 };
+  obs.fairPriceUsdcPerWeth = 1700;
+  obs.history = Array.from({ length: 12 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: 1690,
+    fairPriceUsdcPerWeth: 1690, // MA=1690 < price 1700 → dev +0.59% > 40bps
+  }));
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "gmxIncrease");
+    if (r.action.type === "gmxIncrease") assert.equal(r.action.isLong, false); // 割高→short
+  }
+});
+
+test("gmxtrend ベース: 上昇トレンドなら long を open", () => {
+  const s = getBaseStrategy("gmxtrend");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.limits.maxGmxSizeUsd = "100000000000000000000000000000000000";
+  obs.protocols.gmx = { marketPriceUsd: 1700 };
+  obs.history = Array.from({ length: 8 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: 1680 + i * 8,
+    fairPriceUsdcPerWeth: 1680 + i * 8, // 単調増加 → up-trend
+  }));
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "gmxIncrease");
+    if (r.action.type === "gmxIncrease") assert.equal(r.action.isLong, true);
+  }
+});
+
+test("fairmm ベース: ポジション無しなら fair 含意 tick 中心に mint", () => {
+  const s = getBaseStrategy("fairmm");
+  assert.ok(s);
+  const r = runExecutor(s, syntheticObs(), helpers); // pool 1690 < fair 1700
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "mintLiquidity");
+    if (r.action.type === "mintLiquidity") {
+      assert.equal(r.action.tickLower % 10, 0);
+      assert.equal(r.action.tickUpper % 10, 0);
+      assert.ok(r.action.tickLower < r.action.tickUpper);
+    }
+  }
+});
+
+test("jitlp ベース: 高ボラで mint、低ボラ/履歴不足で noop", () => {
+  const s = getBaseStrategy("jitlp");
+  assert.ok(s);
+  const flat = syntheticObs();
+  flat.history = Array.from({ length: 14 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: 1700,
+    fairPriceUsdcPerWeth: 1700, // vol 0
+  }));
+  const r0 = runExecutor(s, flat, helpers);
+  assert.equal(r0.ok, true);
+  if (r0.ok) assert.equal(r0.action.type, "noop");
+
+  const vol = syntheticObs();
+  vol.history = Array.from({ length: 14 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: i % 2 === 0 ? 1700 : 1785,
+    fairPriceUsdcPerWeth: i % 2 === 0 ? 1700 : 1785, // ~5% スイング
+  }));
+  const r1 = runExecutor(s, vol, helpers);
+  assert.equal(r1.ok, true);
+  if (r1.ok) assert.equal(r1.action.type, "mintLiquidity");
+});
+
+test("ladder ベース: 空なら次段を mint、満杯なら noop", () => {
+  const s = getBaseStrategy("ladder");
+  assert.ok(s);
+  const empty = runExecutor(s, syntheticObs(), helpers);
+  assert.equal(empty.ok, true);
+  if (empty.ok) assert.equal(empty.action.type, "mintLiquidity");
+
+  const full = syntheticObs();
+  full.protocols.uniswap!.positions = [1, 2, 3].map((id) => ({
+    tokenId: String(id),
+    tickLower: 199900,
+    tickUpper: 200100,
+    liquidity: "1000",
+    tokensOwedWethWei: "0",
+    tokensOwedUsdcUnits: "0",
+    amountWethWei: "0",
+    amountUsdcUnits: "0",
+    valueUsdc: 1,
+  }));
+  const rf = runExecutor(s, full, helpers); // steps 既定 3 → 満杯
+  assert.equal(rf.ok, true);
+  if (rf.ok) assert.equal(rf.action.type, "noop");
+});
+
 test("getBaseStrategy: 未知 id / undefined は null", () => {
   assert.equal(getBaseStrategy("nope"), null);
   assert.equal(getBaseStrategy(undefined), null);

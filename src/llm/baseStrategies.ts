@@ -147,6 +147,236 @@ helpers.log("z=" + z.toFixed(2) + " size=" + sizeBps);
 return { type: "swap", tokenIn: tokenIn, amountIn: amountIn.toString(), maxPriorityFeePerGasWei: obs.limits.defaultPriorityFeePerGasWei, slippageBps: params.slippageBps };
 `.trim();
 
+// cvbal: Balancer↔Curve の WETH 価格差(スプレッド)を取りに行くペア裁定。割安 venue で買い・
+// 割高 venue で売りの両建てを 1 bundle で。状態を持たず obs の 2 価格だけで判断。
+// (examples/agents/cv-bal-arb.ts の移植)
+const CVBAL_EXECUTOR = `
+const p = obs.protocols || {};
+const bal = p.balancer && p.balancer.priceUsdcPerWeth;
+const curve = p.curve && p.curve.priceUsdcPerWeth;
+const fee = obs.limits.defaultPriorityFeePerGasWei;
+if (!(bal > 0) || !(curve > 0)) return { type: "noop", reason: "balancer/curve unavailable" };
+const spread = Math.abs(bal / curve - 1);
+if (spread < params.spreadBps / 10000) return { type: "noop", reason: "spread too small" };
+const balCheaper = bal < curve;
+const buyVenue = balCheaper ? "balancerSwap" : "curveSwap";
+const sellVenue = balCheaper ? "curveSwap" : "balancerSwap";
+const sizeBps = Math.min(params.maxSizeBps, Math.max(params.minSizeBps, Math.floor(spread * params.sizeGain)));
+const usdcIn = (BigInt(obs.limits.maxUsdcInUnits) * BigInt(sizeBps)) / 10000n;
+const wethIn = (BigInt(obs.limits.maxWethInWei) * BigInt(sizeBps)) / 10000n;
+if (usdcIn <= 0n || wethIn <= 0n) return { type: "noop", reason: "computed size zero" };
+helpers.log("spread=" + (spread * 10000).toFixed(1) + "bps buy=" + buyVenue);
+return { type: "bundle", actions: [ { type: buyVenue, tokenIn: "USDC", amountIn: usdcIn.toString(), slippageBps: params.slippageBps }, { type: sellVenue, tokenIn: "WETH", amountIn: wethIn.toString(), slippageBps: params.slippageBps } ], maxPriorityFeePerGasWei: fee };
+`.trim();
+
+// dnlp: Uniswap V3 LP を mint し、その WETH エクスポージャを GMX short でヘッジするデルタニュートラル。
+// ラウンドをまたぐ状態は obs.protocols.uniswap.positions / obs.protocols.gmx.position から毎ラウンド
+// 判定する(A:LP無→mint, B:LP有/short無→hedge, C:両方→hold)。(examples/agents/dn-lp.ts の移植)
+const DNLP_EXECUTOR = `
+const uni = obs.protocols && obs.protocols.uniswap;
+const gmx = obs.protocols && obs.protocols.gmx;
+const fee = obs.limits.defaultPriorityFeePerGasWei;
+if (!uni || !uni.pool) return { type: "noop", reason: "uniswap disabled" };
+const positions = uni.positions || [];
+if (positions.length === 0) {
+  const spacing = uni.pool.tickSpacing;
+  const center = Math.floor(uni.pool.tick / spacing) * spacing;
+  const w = Math.max(1, Math.floor(params.rangeSpacings)) * spacing;
+  return { type: "mintLiquidity", tickLower: center - w, tickUpper: center + w, amountWethDesired: (BigInt(obs.limits.maxLpWethWei) / 2n).toString(), amountUsdcDesired: (BigInt(obs.limits.maxLpUsdcUnits) / 2n).toString(), maxPriorityFeePerGasWei: fee, slippageBps: 100 };
+}
+if (!gmx) return { type: "noop", reason: "lp held (gmx disabled, no hedge)" };
+if (!gmx.position) {
+  let totalWethWei = 0n;
+  for (let i = 0; i < positions.length; i++) totalWethWei += BigInt(positions[i].amountWethWei || "0");
+  const wethEth = Number(totalWethWei) / 1e18;
+  const mkt = gmx.marketPriceUsd;
+  if (!(wethEth > 0) || !(mkt > 0)) return { type: "noop", reason: "no exposure to hedge" };
+  const notionalUsd = wethEth * mkt * params.hedgeFraction;
+  const sizeRaw = BigInt(Math.max(0, Math.round(notionalUsd))) * (10n ** 30n);
+  const maxSize = BigInt(obs.limits.maxGmxSizeUsd);
+  const sizeUsd = sizeRaw < maxSize ? sizeRaw : maxSize;
+  const collRaw = BigInt(Math.max(0, Math.round((notionalUsd / 2) * 1e6)));
+  const maxColl = BigInt(obs.limits.maxUsdcInUnits);
+  const collateral = collRaw < maxColl ? collRaw : maxColl;
+  if (sizeUsd <= 0n) return { type: "noop", reason: "hedge size zero" };
+  helpers.log("hedge short notional=" + Math.round(notionalUsd) + "usd");
+  return { type: "gmxIncrease", isLong: false, collateral: "USDC", collateralAmount: collateral.toString(), sizeDeltaUsd: sizeUsd.toString(), maxPriorityFeePerGasWei: fee };
+}
+return { type: "noop", reason: "delta-neutral established" };
+`.trim();
+
+// gmxperp: ポジションが無ければ ETH long を open、あれば hold。(examples/agents/gmx-perp.ts の移植)
+const GMXPERP_EXECUTOR = `
+const gmx = obs.protocols && obs.protocols.gmx;
+const fee = obs.limits.defaultPriorityFeePerGasWei;
+if (!gmx) return { type: "noop", reason: "gmx disabled" };
+if (gmx.position) return { type: "noop", reason: "position open" };
+const collWei = BigInt(Math.max(0, Math.round(params.collateralWeth * 1000))) * (10n ** 15n);
+const sizeRaw = BigInt(Math.max(0, Math.round(params.sizeUsd))) * (10n ** 30n);
+const maxSize = BigInt(obs.limits.maxGmxSizeUsd);
+const sizeUsd = sizeRaw < maxSize ? sizeRaw : maxSize;
+if (collWei <= 0n || sizeUsd <= 0n) return { type: "noop", reason: "computed size zero" };
+return { type: "gmxIncrease", isLong: params.isLong !== false, collateral: "WETH", collateralAmount: collWei.toString(), sizeDeltaUsd: sizeUsd.toString(), maxPriorityFeePerGasWei: fee };
+`.trim();
+
+// gmxrev: history の MA からの乖離で逆張り。割高→short / 割安→long を open、MA 近傍復帰 or
+// 含み損 stop でクローズ。(examples/agents/gmx-reversion.ts の移植)
+const GMXREV_EXECUTOR = `
+const gmx = obs.protocols && obs.protocols.gmx;
+const fee = obs.limits.defaultPriorityFeePerGasWei;
+if (!gmx) return { type: "noop", reason: "gmx disabled" };
+const h = obs.history || [];
+const hist = [];
+for (let i = 0; i < h.length; i++) { const p = h[i] && h[i].fairPriceUsdcPerWeth; if (p > 0) hist.push(p); }
+const look = Math.max(2, Math.floor(params.maLookback));
+if (hist.length < look) return { type: "noop", reason: "warming up" };
+const win = hist.slice(-look);
+let ma = 0; for (let i = 0; i < win.length; i++) ma += win[i]; ma /= win.length;
+const price = obs.fairPriceUsdcPerWeth;
+if (!(price > 0) || !(ma > 0)) return { type: "noop", reason: "invalid prices" };
+const dev = price / ma - 1;
+const pos = gmx.position;
+if (pos) {
+  const pnl = Number(pos.pnlUsd || 0);
+  const reverted = Math.abs(dev) < params.exitBps / 10000;
+  const stopped = pnl < -params.stopUsd;
+  if (reverted || stopped) return { type: "gmxDecrease", isLong: pos.isLong, collateral: pos.collateral, collateralDeltaAmount: pos.collateralAmount, sizeDeltaUsd: pos.sizeUsd, maxPriorityFeePerGasWei: fee };
+  return { type: "noop", reason: "hold (awaiting reversion)" };
+}
+if (Math.abs(dev) < params.entryBps / 10000) return { type: "noop", reason: "near MA" };
+const mkt = gmx.marketPriceUsd;
+if (!(mkt > 0)) return { type: "noop", reason: "invalid gmx price" };
+const sizeRaw = BigInt(Math.max(0, Math.round(mkt * params.leverage))) * (10n ** 30n);
+const maxSize = BigInt(obs.limits.maxGmxSizeUsd);
+const sizeUsd = sizeRaw < maxSize ? sizeRaw : maxSize;
+const collWei = BigInt(Math.max(0, Math.round(params.collateralWeth * 1000))) * (10n ** 15n);
+if (sizeUsd <= 0n) return { type: "noop", reason: "computed size zero" };
+helpers.log("dev=" + (dev * 10000).toFixed(1) + "bps long=" + (dev < 0));
+return { type: "gmxIncrease", isLong: dev < 0, collateral: "WETH", collateralAmount: collWei.toString(), sizeDeltaUsd: sizeUsd.toString(), maxPriorityFeePerGasWei: fee };
+`.trim();
+
+// gmxtrend: history の傾き(前半/後半平均の変化率)で順張り。トレンド方向に open、反転で close。
+// (examples/agents/gmx-trend.ts の移植)
+const GMXTREND_EXECUTOR = `
+const gmx = obs.protocols && obs.protocols.gmx;
+const fee = obs.limits.defaultPriorityFeePerGasWei;
+if (!gmx) return { type: "noop", reason: "gmx disabled" };
+const h = obs.history || [];
+const hist = [];
+for (let i = 0; i < h.length; i++) { const p = h[i] && h[i].fairPriceUsdcPerWeth; if (p > 0) hist.push(p); }
+const look = Math.max(4, Math.floor(params.lookback));
+if (hist.length < look) return { type: "noop", reason: "warming up" };
+const win = hist.slice(-look);
+const half = Math.floor(look / 2);
+let oa = 0; for (let i = 0; i < half; i++) oa += win[i]; oa /= Math.max(1, half);
+let ra = 0; for (let i = half; i < win.length; i++) ra += win[i]; ra /= Math.max(1, win.length - half);
+if (!(oa > 0)) return { type: "noop", reason: "invalid window" };
+const trend = ra / oa - 1;
+const upTrend = trend > 0;
+const pos = gmx.position;
+if (pos) {
+  const reversed = pos.isLong !== upTrend;
+  if (reversed && Math.abs(trend) > params.trendBps / 10000) return { type: "gmxDecrease", isLong: pos.isLong, collateral: pos.collateral, collateralDeltaAmount: pos.collateralAmount, sizeDeltaUsd: pos.sizeUsd, maxPriorityFeePerGasWei: fee };
+  return { type: "noop", reason: "hold (trend intact)" };
+}
+if (Math.abs(trend) < params.trendBps / 10000) return { type: "noop", reason: "no trend" };
+const mkt = gmx.marketPriceUsd;
+if (!(mkt > 0)) return { type: "noop", reason: "invalid gmx price" };
+const sizeRaw = BigInt(Math.max(0, Math.round(mkt * params.leverage))) * (10n ** 30n);
+const maxSize = BigInt(obs.limits.maxGmxSizeUsd);
+const sizeUsd = sizeRaw < maxSize ? sizeRaw : maxSize;
+const collWei = BigInt(Math.max(0, Math.round(params.collateralWeth * 1000))) * (10n ** 15n);
+if (sizeUsd <= 0n) return { type: "noop", reason: "computed size zero" };
+helpers.log("trend=" + (trend * 10000).toFixed(1) + "bps up=" + upTrend);
+return { type: "gmxIncrease", isLong: upTrend, collateral: "WETH", collateralAmount: collWei.toString(), sizeDeltaUsd: sizeUsd.toString(), maxPriorityFeePerGasWei: fee };
+`.trim();
+
+// fairmm: pool tick ではなく fairPrice の含意 tick を中心に集中流動性を供給する MM。
+// 状態は obs.positions(liquidity>0 があれば hold)から判定。offset は ln(fair/pool)/ln(1.0001)。
+// (examples/agents/fair-mm.ts の簡約シード。レンジ再調整等の高度化は revise に委ねる)
+const FAIRMM_EXECUTOR = `
+const uni = obs.protocols && obs.protocols.uniswap;
+if (!uni || !uni.pool) return { type: "noop", reason: "uniswap disabled" };
+const fee = obs.limits.defaultPriorityFeePerGasWei;
+const positions = uni.positions || [];
+let live = 0; for (let i = 0; i < positions.length; i++) if (BigInt(positions[i].liquidity) > 0n) live++;
+if (live > 0) return { type: "noop", reason: "holding fair-anchored LP" };
+const pool = uni.pool.priceUsdcPerWeth;
+const fair = obs.fairPriceUsdcPerWeth;
+if (!(pool > 0) || !(fair > 0)) return { type: "noop", reason: "invalid prices" };
+const spacing = uni.pool.tickSpacing;
+const offset = Math.round(Math.log(fair / pool) / Math.log(1.0001));
+const center = Math.round((uni.pool.tick + offset) / spacing) * spacing;
+const w = Math.max(1, Math.floor(params.rangeSpacings)) * spacing;
+const frac = BigInt(Math.max(0, Math.min(10000, Math.floor(params.depositFraction * 10000))));
+const wethWei = BigInt(obs.balances.wethWei); const usdcUnits = BigInt(obs.balances.usdcUnits);
+const maxW = BigInt(obs.limits.maxLpWethWei); const maxU = BigInt(obs.limits.maxLpUsdcUnits);
+const wethDesired = ((wethWei < maxW ? wethWei : maxW) * frac) / 10000n;
+const usdcDesired = ((usdcUnits < maxU ? usdcUnits : maxU) * frac) / 10000n;
+if (wethDesired <= 0n && usdcDesired <= 0n) return { type: "noop", reason: "no inventory to LP" };
+helpers.log("fair-anchored mint center=" + center + " offset=" + offset);
+return { type: "mintLiquidity", tickLower: center - w, tickUpper: center + w, amountWethDesired: wethDesired.toString(), amountUsdcDesired: usdcDesired.toString(), maxPriorityFeePerGasWei: fee, slippageBps: params.slippageBps };
+`.trim();
+
+// jitlp: history の直近リターンの実現ボラが閾値超のときだけ集中レンジを mint する Just-In-Time LP。
+// (examples/agents/jit-lp.ts の簡約シード。窓ボラ stddev で発火判定。分位ベースの高度化は revise)
+const JITLP_EXECUTOR = `
+const uni = obs.protocols && obs.protocols.uniswap;
+if (!uni || !uni.pool) return { type: "noop", reason: "uniswap disabled" };
+const fee = obs.limits.defaultPriorityFeePerGasWei;
+const positions = uni.positions || [];
+let live = 0; for (let i = 0; i < positions.length; i++) if (BigInt(positions[i].liquidity) > 0n) live++;
+if (live > 0) return { type: "noop", reason: "holding JIT LP" };
+const h = obs.history || [];
+const rets = [];
+for (let i = 1; i < h.length; i++) { const a = h[i-1] && h[i-1].fairPriceUsdcPerWeth; const b = h[i] && h[i].fairPriceUsdcPerWeth; if (a > 0 && b > 0) rets.push(b / a - 1); }
+if (rets.length < params.minHistory) return { type: "noop", reason: "insufficient vol samples" };
+let m = 0; for (let i = 0; i < rets.length; i++) m += rets[i]; m /= rets.length;
+let v = 0; for (let i = 0; i < rets.length; i++) { const d = rets[i] - m; v += d * d; }
+const vol = Math.sqrt(v / Math.max(1, rets.length - 1));
+if (vol < params.volThreshold) return { type: "noop", reason: "low-vol round" };
+const spacing = uni.pool.tickSpacing;
+const center = Math.round(uni.pool.tick / spacing) * spacing;
+const w = Math.max(1, Math.floor(params.rangeTicks)) * spacing;
+const frac = BigInt(Math.max(0, Math.min(10000, Math.floor(params.mintBudgetBps))));
+const wethWei = BigInt(obs.balances.wethWei); const usdcUnits = BigInt(obs.balances.usdcUnits);
+const maxW = BigInt(obs.limits.maxLpWethWei); const maxU = BigInt(obs.limits.maxLpUsdcUnits);
+const wethDesired = ((wethWei < maxW ? wethWei : maxW) * frac) / 10000n;
+const usdcDesired = ((usdcUnits < maxU ? usdcUnits : maxU) * frac) / 10000n;
+if (wethDesired <= 0n && usdcDesired <= 0n) return { type: "noop", reason: "no inventory to LP" };
+helpers.log("JIT mint vol=" + (vol * 10000).toFixed(1) + "bps");
+return { type: "mintLiquidity", tickLower: center - w, tickUpper: center + w, amountWethDesired: wethDesired.toString(), amountUsdcDesired: usdcDesired.toString(), maxPriorityFeePerGasWei: fee, slippageBps: params.slippageBps };
+`.trim();
+
+// ladder: 現在 tick の周りに steps 段の集中レンジを外側へ広げて張るラダー型 MM。1 ラウンド 1 段ずつ
+// 構築(owned 数で次段を決定)。(examples/agents/ladder-mm.ts の簡約シード。在庫スキュー等は revise)
+const LADDER_EXECUTOR = `
+const uni = obs.protocols && obs.protocols.uniswap;
+if (!uni || !uni.pool) return { type: "noop", reason: "uniswap disabled" };
+const fee = obs.limits.defaultPriorityFeePerGasWei;
+const positions = uni.positions || [];
+let owned = 0; for (let i = 0; i < positions.length; i++) if (BigInt(positions[i].liquidity) > 0n) owned++;
+const steps = Math.max(1, Math.floor(params.steps));
+if (owned >= steps) return { type: "noop", reason: "ladder full" };
+const maxOpen = obs.limits.maxOpenPositions;
+if (positions.length >= maxOpen) return { type: "noop", reason: "no position slots" };
+const spacing = uni.pool.tickSpacing;
+const center = Math.round(uni.pool.tick / spacing) * spacing;
+const halfWidth = Math.max(1, Math.floor(params.stepWidthSpacings)) * spacing;
+const step = owned;
+const dir = step % 2 === 0 ? 1 : -1;
+const segCenter = center + dir * Math.ceil(step / 2) * halfWidth * 2;
+const totalFrac = Math.max(0, Math.min(10000, Math.floor(params.mintBudgetBps)));
+const perStep = BigInt(Math.floor(totalFrac / steps));
+const wethWei = BigInt(obs.balances.wethWei); const usdcUnits = BigInt(obs.balances.usdcUnits);
+const maxW = BigInt(obs.limits.maxLpWethWei); const maxU = BigInt(obs.limits.maxLpUsdcUnits);
+const wethDesired = ((wethWei < maxW ? wethWei : maxW) * perStep) / 10000n;
+const usdcDesired = ((usdcUnits < maxU ? usdcUnits : maxU) * perStep) / 10000n;
+if (wethDesired <= 0n && usdcDesired <= 0n) return { type: "noop", reason: "no inventory to LP" };
+helpers.log("ladder step " + (step + 1) + "/" + steps + " center=" + segCenter);
+return { type: "mintLiquidity", tickLower: segCenter - halfWidth, tickUpper: segCenter + halfWidth, amountWethDesired: wethDesired.toString(), amountUsdcDesired: usdcDesired.toString(), maxPriorityFeePerGasWei: fee, slippageBps: params.slippageBps };
+`.trim();
+
 // id → ベース戦略(version を除いた雛形)。
 const BASE_STRATEGIES: Record<string, Omit<Strategy, "version">> = {
   arb: {
@@ -205,6 +435,94 @@ const BASE_STRATEGIES: Record<string, Omit<Strategy, "version">> = {
       slippageBps: 75,
     },
     executorTs: STATARB_EXECUTOR,
+  },
+  cvbal: {
+    notes:
+      "Base strategy **cvbal**: Balancer↔Curve のスプレッドが閾値超なら割安 venue 買い+割高 venue 売りの両建て bundle。revise で spreadBps / サイズを磨く。balancer+curve 有効時のみ。",
+    params: {
+      spreadBps: 15,
+      minSizeBps: 250,
+      maxSizeBps: 5000,
+      sizeGain: 200000,
+      slippageBps: 75,
+    },
+    executorTs: CVBAL_EXECUTOR,
+  },
+  dnlp: {
+    notes:
+      "Base strategy **dnlp**: Uniswap LP を mint し WETH エクスポージャを GMX short でヘッジするデルタニュートラル(LP→hedge→hold の状態機械)。revise で hedgeFraction / レンジ幅を磨く。uniswap+gmx 有効時のみ。",
+    params: {
+      hedgeFraction: 1.0,
+      rangeSpacings: 20,
+    },
+    executorTs: DNLP_EXECUTOR,
+  },
+  gmxperp: {
+    notes:
+      "Base strategy **gmxperp**: GMX でポジション無しなら ETH long を open、あれば hold。revise で size / leverage / 方向を磨く。gmx 有効時のみ。",
+    params: {
+      collateralWeth: 1,
+      sizeUsd: 4000,
+      isLong: true,
+    },
+    executorTs: GMXPERP_EXECUTOR,
+  },
+  gmxrev: {
+    notes:
+      "Base strategy **gmxrev**: history MA からの乖離で逆張り(割高 short / 割安 long)。MA 近傍復帰 or 含み損 stop でクローズ。revise で entry/exit/stop/lookback を磨く。gmx 有効時のみ。",
+    params: {
+      maLookback: 12,
+      entryBps: 40,
+      exitBps: 10,
+      stopUsd: 150,
+      leverage: 2,
+      collateralWeth: 1,
+    },
+    executorTs: GMXREV_EXECUTOR,
+  },
+  gmxtrend: {
+    notes:
+      "Base strategy **gmxtrend**: history の傾きで順張り。トレンド方向に open、反転で close。revise で lookback / trendBps / leverage を磨く。gmx 有効時のみ。",
+    params: {
+      lookback: 8,
+      trendBps: 30,
+      leverage: 2,
+      collateralWeth: 1,
+    },
+    executorTs: GMXTREND_EXECUTOR,
+  },
+  fairmm: {
+    notes:
+      "Base strategy **fairmm**: fairPrice の含意 tick を中心に集中流動性を供給(pool tick ではなく fair 基準)。revise でレンジ幅 / 預入率 / 再調整条件を磨く。",
+    params: {
+      rangeSpacings: 4,
+      depositFraction: 0.35,
+      slippageBps: 75,
+    },
+    executorTs: FAIRMM_EXECUTOR,
+  },
+  jitlp: {
+    notes:
+      "Base strategy **jitlp**: history 窓の実現ボラが閾値超のときだけ集中レンジを mint する JIT LP。revise で volThreshold / レンジ幅 / 予算を磨く。",
+    params: {
+      minHistory: 12,
+      volThreshold: 0.003,
+      rangeTicks: 4,
+      mintBudgetBps: 4500,
+      slippageBps: 75,
+    },
+    executorTs: JITLP_EXECUTOR,
+  },
+  ladder: {
+    notes:
+      "Base strategy **ladder**: 現在 tick の周りに steps 段の集中レンジを外側へ広げて 1 ラウンド 1 段ずつ張るラダー型 MM。revise で段数 / 段幅 / 在庫スキューを磨く。",
+    params: {
+      steps: 3,
+      stepWidthSpacings: 60,
+      mintBudgetBps: 5000,
+      slippageBps: 75,
+    },
+    executorTs: LADDER_EXECUTOR,
   },
 };
 
