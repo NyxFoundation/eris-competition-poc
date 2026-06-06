@@ -142,6 +142,105 @@ test("lp ベース: 既にポジションがあれば hold(noop)", () => {
   if (r.ok) assert.equal(r.action.type, "noop");
 });
 
+test("venue ベース: 最も乖離した venue で fair に寄せる swap", () => {
+  const s = getBaseStrategy("venue");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.protocols.uniswap!.pool.priceUsdcPerWeth = 1695; // gap ~29bps
+  obs.protocols.balancer = { priceUsdcPerWeth: 1650 }; // gap ~294bps（最大）
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "balancerSwap"); // balancer が最大乖離
+    if (r.action.type === "balancerSwap") {
+      assert.equal(r.action.tokenIn, "USDC"); // pool<fair → WETH 割安 → USDC in
+      assert.ok(BigInt(r.action.amountIn) > 0n);
+    }
+  }
+});
+
+test("venue ベース: どの venue も乖離が小さければ noop", () => {
+  const s = getBaseStrategy("venue");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.protocols.uniswap!.pool.priceUsdcPerWeth = 1700; // gap 0
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.action.type, "noop");
+});
+
+test("aave ベース: 担保未供給なら WETH を supply", () => {
+  const s = getBaseStrategy("aave");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.limits.maxAaveSupplyWethWei = "5000000000000000000";
+  obs.limits.maxAaveBorrowUsdcUnits = "5000000000";
+  obs.protocols.aave = {
+    healthFactor: "0",
+    totalCollateralBase: "0",
+    totalDebtBase: "0",
+    availableBorrowsBase: "0",
+    supplied: {},
+    borrowed: {},
+  };
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "aaveSupply");
+    if (r.action.type === "aaveSupply") {
+      assert.equal(r.action.asset, "WETH");
+      assert.ok(BigInt(r.action.amount) > 0n);
+    }
+  }
+});
+
+test("aave ベース: 担保あり借入無しなら USDC を borrow", () => {
+  const s = getBaseStrategy("aave");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.limits.maxAaveBorrowUsdcUnits = "5000000000";
+  obs.protocols.aave = {
+    healthFactor: "0",
+    totalCollateralBase: "0",
+    totalDebtBase: "0",
+    availableBorrowsBase: "0",
+    supplied: { WETH: "2500000000000000000" },
+    borrowed: {},
+  };
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "aaveBorrow");
+    if (r.action.type === "aaveBorrow") assert.equal(r.action.asset, "USDC");
+  }
+});
+
+test("statarb ベース: 窓が貯まり |z| が大きければ swap、burn-in 中は noop", () => {
+  const s = getBaseStrategy("statarb");
+  assert.ok(s);
+  // 履歴不足 → burn-in noop
+  const cold = syntheticObs();
+  cold.history = [];
+  const r0 = runExecutor(s, cold, helpers);
+  assert.equal(r0.ok, true);
+  if (r0.ok) assert.equal(r0.action.type, "noop");
+
+  // 12 点の小ノイズ履歴(平均~0, std>0)+ 現在 pool=1600(gap +6.25% → |z| 大)
+  const hot = syntheticObs();
+  hot.history = Array.from({ length: 12 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: i % 2 === 0 ? 1699 : 1701,
+    fairPriceUsdcPerWeth: 1700,
+  }));
+  hot.protocols.uniswap!.pool.priceUsdcPerWeth = 1600;
+  const r = runExecutor(s, hot, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "swap");
+    if (r.action.type === "swap") assert.equal(r.action.tokenIn, "USDC");
+  }
+});
+
 test("getBaseStrategy: 未知 id / undefined は null", () => {
   assert.equal(getBaseStrategy("nope"), null);
   assert.equal(getBaseStrategy(undefined), null);

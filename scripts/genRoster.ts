@@ -11,6 +11,7 @@
 //   ENABLED_PROTOCOLS=uniswap,balancer,curve,gmx ROUNDS=128 \
 //     AGENTS_CONFIG=agents.swarm-big.json npm run leaderboard
 import { writeFileSync } from "node:fs";
+import { BASE_STRATEGY_IDS } from "../src/llm/baseStrategies.js";
 import type { AgentSpec } from "../src/types.js";
 
 type Sweep = Record<string, Array<string | number>>;
@@ -147,9 +148,12 @@ function build(): AgentSpec[] {
     });
   }
 
-  // 任意: 自己改善する LLM agent(ベース戦略から進化)。INCLUDE_LLM=1 で混ぜる。
+  // 任意: 自己改善する LLM agent。INCLUDE_LLM=1 で**全ベース戦略**(src/llm/baseStrategies.ts)を
+  // それぞれ LLM seed して混ぜる。ベース戦略を増やすほど自動で対象が増える。
+  // 注意: 各 agent が背景で `claude -p`(1回 ~1-3分)を revise ごとに呼ぶため、数が増えると
+  // run 時間とサブスク/API コストが大きくなる。小さく試すなら ERIS_LLM_REVIEW_EVERY を大きく。
   if (process.env.INCLUDE_LLM === "1") {
-    for (const base of ["arb", "lp"]) {
+    for (const base of BASE_STRATEGY_IDS) {
       agents.push({
         ...agentScript("examples/agents/claude-llm.ts"),
         id: `llm-${base}`,
