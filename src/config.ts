@@ -29,6 +29,14 @@ const SUPPORTED_AGENT_WALLETS = [...NAMED_AGENT_WALLETS, "AUTO"] as const;
 export type SimConfig = {
   rpcUrl: string;
   chainId: number;
+  // フォーク元の上流 RPC（ARB_RPC_URL）。設定時は resetFork が anvil_reset を
+  // forking 設定付きで呼び、フォーク状態を毎回クリーンに再構築する（run/seed 間で
+  // Aave 等のポジションが残留する anvil_reset [] の問題を回避）。未設定なら従来の
+  // anvil_reset [] にフォールバック。
+  forkUrl?: string;
+  // 再フォーク先ブロック（FORK_BLOCK_NUMBER）。固定すると再実行が完全再現可能になる。
+  // 未設定なら最初の resetFork で latest を捕捉し、以降のリセットで再利用する。
+  forkBlockNumber?: number;
   rounds: number;
   roundTimeSeconds: number;
   seed: number;
@@ -81,6 +89,14 @@ export function loadConfig(env = process.env): SimConfig {
   return {
     rpcUrl: env.ANVIL_RPC_URL ?? `http://127.0.0.1:${anvilPort}`,
     chainId: intEnv(env.CHAIN_ID, CHAIN_ID),
+    forkUrl:
+      env.ARB_RPC_URL && env.ARB_RPC_URL.trim() !== ""
+        ? env.ARB_RPC_URL.trim()
+        : undefined,
+    forkBlockNumber:
+      env.FORK_BLOCK_NUMBER && env.FORK_BLOCK_NUMBER.trim() !== ""
+        ? intEnv(env.FORK_BLOCK_NUMBER, 0)
+        : undefined,
     rounds: intEnv(env.ROUNDS, 50),
     // 1 ラウンドあたりに進める EVM 時間（秒）。Aave 変動金利の累積や GMX funding
     // を現実的なスケールで発生させるためにラウンドループで evm_increaseTime に渡す。

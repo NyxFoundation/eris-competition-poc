@@ -165,11 +165,50 @@ export async function mine(
   } as AnvilRequest);
 }
 
-export async function resetFork(publicClient: PublicClient): Promise<void> {
+export type ResetForkOptions = {
+  // 上流フォーク RPC（ARB_RPC_URL）。指定時は forking 付き anvil_reset でフォークを
+  // 丸ごと作り直し、前 run/seed のローカル変更（Aave ポジション・reserve タイムスタンプ等）を
+  // 完全に破棄する。未指定なら anvil_reset [] にフォールバック（状態が残留する点に注意）。
+  forkUrl?: string;
+  // 再フォーク先ブロック（FORK_BLOCK_NUMBER）。固定すると再実行が完全再現可能。
+  forkBlockNumber?: number;
+};
+
+// 同一プロセス内で一度捕捉した再フォーク先ブロック。multiSeedRun は 1 プロセスで全 SEED を
+// 回すため、ここで固定して全 seed が同一フォークブロック（=同一の DeFi 流動性基準）を共有する。
+let capturedForkBlock: number | undefined;
+
+export async function resetFork(
+  publicClient: PublicClient,
+  options: ResetForkOptions = {},
+): Promise<void> {
+  const { forkUrl, forkBlockNumber } = options;
+  if (!forkUrl) {
+    // 上流 RPC 不明 → soft reset。状態が完全にはクリアされないため、複数 run/seed を
+    // 同一 anvil で回す場合は anvil を都度再起動するか forkUrl を設定すること。
+    await publicClient.request({
+      method: "anvil_reset",
+      params: [],
+    } as AnvilRequest);
+    return;
+  }
+  // 再現性のためブロックを固定。優先順: 明示指定 > プロセス内で捕捉済み > これから捕捉。
+  const blockNumber = forkBlockNumber ?? capturedForkBlock;
   await publicClient.request({
     method: "anvil_reset",
-    params: [],
+    params: [
+      {
+        forking:
+          blockNumber !== undefined
+            ? { jsonRpcUrl: forkUrl, blockNumber }
+            : { jsonRpcUrl: forkUrl },
+      },
+    ],
   } as AnvilRequest);
+  if (blockNumber === undefined) {
+    // latest を捕捉し、以降の resetFork で再利用（同プロセス内の決定論を確保）。
+    capturedForkBlock = Number((await publicClient.getBlock()).number);
+  }
 }
 
 async function setStorageAt(

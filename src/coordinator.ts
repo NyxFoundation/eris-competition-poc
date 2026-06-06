@@ -107,8 +107,19 @@ export async function runSimulation(): Promise<void> {
     config.rpcUrl,
     config.chainId,
   );
-  await resetFork(publicClient);
-  logger.event({ type: "fork_reset" });
+  await resetFork(publicClient, {
+    forkUrl: config.forkUrl,
+    forkBlockNumber: config.forkBlockNumber,
+  });
+  if (!config.forkUrl) {
+    // 上流 RPC 未設定だと soft reset になり、run/seed 間で Aave 等の状態が残留する。
+    console.warn(
+      "[coordinator] ARB_RPC_URL 未設定: anvil_reset [] フォールバック。複数 run/seed を" +
+        "同一 anvil で回すと Aave ポジションが残留し PnL が汚染されます。ARB_RPC_URL を設定するか" +
+        " anvil を都度再起動してください。",
+    );
+  }
+  logger.event({ type: "fork_reset", forked: Boolean(config.forkUrl) });
 
   const agentSpecs = loadAgents(config.agentsConfigPath);
   const agentRuntimes: AgentRuntime[] = agentSpecs.map((spec) => {
