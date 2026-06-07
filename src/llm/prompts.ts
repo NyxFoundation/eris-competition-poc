@@ -1,4 +1,5 @@
 import type { AgentObservation } from "../types.js";
+import { computeAttribution, formatAttribution } from "./attribution.js";
 import type { RoundRecord } from "./history.js";
 import type { Strategy } from "./strategy.js";
 
@@ -11,7 +12,13 @@ Your job has two phases:
    - params: a JSON object of numeric parameters your executor reads (thresholds, tick widths, fractions). Keep keys descriptive.
    - executor_ts: a TypeScript function BODY (no signature, no enclosing braces) that takes (obs, params, helpers) and returns an AgentAction. This runs every round in a sandbox with a 200ms timeout.
 
-2. REVISION: When given the previous strategy plus the last N round records and a reason ("scheduled" or "pnl_drop"), produce a new strategy version. You may keep the executor the same and only tune params, or rewrite the executor entirely. Explain in notes what you changed and why.
+2. REVISION: When given the previous strategy plus the last N round records and a reason ("scheduled" or "pnl_drop"), produce a new strategy version.
+
+## Revision discipline (read carefully)
+- DEFAULT to params-only changes. Tune thresholds/sizes/fractions in the direction the recent attribution justifies; keep the executor and the core thesis.
+- Only rewrite the executor (change_type: "executor_logic") when the recent round log shows a CONCRETE failure you can cite (e.g. repeated executor errors, validator rejections, or an action that is provably wrong). When you do, set why_executor_change quoting that evidence.
+- ANTI-HALLUCINATION: do NOT assume a bug that the observation/logs do not show. balancerSwap / curveSwap / aaveSupply / aaveBorrow / gmxIncrease / gmxDecrease ARE valid AgentAction types (see SIM_RULES). If you are unsure, return a params-only change or keep the strategy unchanged — never invent a fix.
+- Preserve a working edge: do not discard a profitable action (positive netUsd in the attribution) to chase a new idea.
 
 Be opinionated. Start simple. Iterate.`;
 
@@ -174,6 +181,7 @@ export function buildReviseMessage(
   currentUsd: number,
 ): string {
   const pnlPct = ((currentUsd - initialUsd) / initialUsd) * 100;
+  const attribution = formatAttribution(computeAttribution(history));
   const recent = history.slice(-12);
   const lines = recent.map(
     (r) =>
@@ -198,14 +206,22 @@ ${JSON.stringify(prev.params, null, 2)}
 ${prev.executorTs}
 \`\`\`
 
+## PnL attribution (which actions earned/lost; use this to decide what to change)
+${attribution}
+
 ## Recent ${recent.length} rounds
 ${lines.join("\n")}
 
 ## Your task
-Call set_strategy with an updated version. This strategy may have started from a hand-tuned base
-(see the notes above); treat it as a working baseline to **refine incrementally**, not replace by default:
-- Prefer tuning params (thresholds, sizes, fractions) in the direction the recent rounds justify.
-- Keep the executor and the core thesis unless the evidence shows it is clearly wrong; then rewrite.
-- Preserve what already works (do not discard a profitable edge to chase a new idea).
-Briefly explain in notes what changed vs v${prev.version} and why.`;
+Produce an updated strategy. This strategy may have started from a hand-tuned base (see notes above);
+treat it as a working baseline to **refine incrementally**, not replace by default.
+
+Include a "change contract" alongside notes/params/executor_ts:
+- change_type: "params_only" (DEFAULT) or "executor_logic"
+- hypothesis: what you expect the change to improve and why, grounded in the attribution above
+- rollback_condition: what evidence would mean this change failed
+- why_executor_change: REQUIRED only if change_type is "executor_logic" — quote the concrete failure in the round log that forces a rewrite
+
+Rules: default to params_only. Only set executor_logic with cited evidence. Do not invent bugs (see Revision discipline).
+Keep a profitable action (positive netUsd) alive. Briefly note what changed vs v${prev.version} and why.`;
 }

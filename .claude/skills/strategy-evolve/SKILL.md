@@ -48,6 +48,10 @@ SEEDS=1,2,3,4,5 ROUNDS=128 AGENTS_CONFIG=agents.evolve.json npm run evaluate --s
 前 `runs/strategy-iterations/iter-*.md` を読み、**直前イテレーションで触った agent は選ばない**。
 
 選んだ agent について、以下を計算して根本原因を 1 つ特定する。
+**PnL 帰属は共有モジュール `src/llm/attribution.ts`（`computeAttribution`）を一次の物差しにする**
+（live revise の `buildReviseMessage` と同じ指標 = 単一ソース。ADR 0002）。対象 agent の per-round
+価値系列・行動から `byAction[].netUsd`（どの行動が稼ぎ/損したか）・`turnover`・`drawdownUsd`・
+`topNoopReasons` を出し、「**負の netUsd を出している行動**」か「**機会を逃している noop 理由**」を起点にする。
 **診断は worst seed の run を開く**: `perSeedRuns` から、対象 agent の `netPnl.perSeed` が最小だった seed の `runDir` を `<worstRunDir>` とする（中央値挙動も見たいなら median seed の `runDir` も併読）。以降の成果物パスはこの `<worstRunDir>` 配下。
 **最重要の一次情報は `<worstRunDir>/agents/<target>.jsonl`（agent 自身の行動ログ）**:
 
@@ -141,6 +145,24 @@ typecheck: pass/fail · test: pass/fail · 他 agent 影響: <Σ median Δ>
 短く: 何を直したか / median before→after / 過学習チェック結果(min・win-rate) / 次候補 1-2 個。
 「次回まわす？」とは聞かない。
 
+## 9. (ADR 0002) LLM seed の昇格と A↔B 連携
+
+ロスターに `claude-llm`（`ERIS_BASE_STRATEGY=<id>`）の自己改善 agent が含まれる場合、**live(A) が run 中に
+生み出した改良版を offline(B) のゲートで選別し、勝者をベース戦略へ恒久昇格**できる（ADR 0002 の A↔B ループ）。
+
+1. **収穫**: 直近 run の `runs/<runDir>/agent-llm-<id>/strategy-v*.{md,params.json,executor.ts}` と
+   `claude-calls.jsonl`（`ok:true` の版）から、最終版や PnL 改善の大きい版を候補に集める。
+2. **ゲート**: 候補 `executorTs`/`params` を `src/llm/baseStrategies.ts` の当該 `<id>` に**一時差し替え**し、
+   `ERIS_FREEZE_STRATEGY=1`（v1 固定・LLM 呼び出し無し・決定論）で §1/§5 と同じ **マルチシード paired 評価**を回す。
+   旧ベース vs 候補で §6 の受理ルール（median 改善 + paired 非劣化 + win-rate）を適用。
+3. **恒久昇格**: 受理なら候補を `src/llm/baseStrategies.ts` の `<id>` に正式反映して commit（= A が次回 seed する v1 が良くなる）。
+   不受理なら差し戻し（`git checkout -- src/llm/baseStrategies.ts`）。
+4. **change→result メモリ**: 採用/却下を理由つきで `runs/strategy-iterations/iter-NN.md` に記録（A の `buildReviseMessage`
+   が将来このメモリを参照して同じ失敗の反復を避ける）。
+
+> 注意: live(A) は params-only 既定 + sanity ゲートで run 内の劣化を抑えるだけで、**恒久化はしない**。
+> 恒久ベース(`baseStrategies.ts`)を書き換えるのは常に B のこのゲートを通す（ADR 0002 の受け渡し点）。
+
 ---
 
 ## Notes
@@ -150,3 +172,6 @@ typecheck: pass/fail · test: pass/fail · 他 agent 影響: <Σ median Δ>
 - 全 agent が改善余地なし（全 metric グリーン）なら「進化完了」と報告して終了
 - 同じ agent で連続失敗（受理不可）3 回でアラートを上げユーザー判断を仰ぐ
 - ログ・run は git に commit しない
+- **設計の全体像は ADR 0002（LLM 戦略自己改善の2層アーキテクチャ）**。本スキル = offline(B) 層。
+  共有コア（`prompts.ts` / `strategy.ts` / `attribution.ts` / `multiSeedRun.ts` / `baseStrategies.ts` / メモリ）を
+  live(A) 層と共用する。§9 が A↔B の昇格ループ

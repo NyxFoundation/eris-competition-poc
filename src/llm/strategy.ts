@@ -33,7 +33,7 @@ export const DEFAULT_ADDRESSES: ExecutorHelpers["ADDRESSES"] = {
   SWAP_ROUTER: "0xE592427A0AEce92De3Edee1F18E0157C05861564",
   QUOTER_V2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
   NFT_POSITION_MANAGER: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-  AAVE_POOL: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
+  AAVE_POOL: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
 };
 
 export type StrategyParseError = { ok: false; reason: string };
@@ -46,32 +46,64 @@ export type StrategyParseResult = StrategyParseOk | StrategyParseError;
  * - params: object (JSON-serializable)
  * - executor_ts: string, must parse as a function body without syntax errors
  */
-export function parseStrategyFromToolInput(input: unknown, version: number): StrategyParseResult {
-  if (!input || typeof input !== "object") return { ok: false, reason: "tool input must be an object" };
+/**
+ * Validate a strategist payload against the Strategy schema.
+ *
+ * Change-contract / params-only enforcement (ADR 0002): when `prev` is given and
+ * the payload's `change_type` is not "executor_logic", the previous executor is
+ * kept and the model's executor_ts is ignored. This structurally prevents
+ * hallucinated executor rewrites (the model can still tune params). Callers that
+ * omit `prev` (e.g. init, unit tests) get the legacy behavior: executor_ts required.
+ */
+export function parseStrategyFromToolInput(
+  input: unknown,
+  version: number,
+  prev?: Strategy,
+): StrategyParseResult {
+  if (!input || typeof input !== "object")
+    return { ok: false, reason: "tool input must be an object" };
   const obj = input as Record<string, unknown>;
-  if (typeof obj.notes !== "string" || obj.notes.trim() === "") return { ok: false, reason: "notes must be a non-empty string" };
-  if (!obj.params || typeof obj.params !== "object" || Array.isArray(obj.params)) {
+  if (typeof obj.notes !== "string" || obj.notes.trim() === "")
+    return { ok: false, reason: "notes must be a non-empty string" };
+  if (
+    !obj.params ||
+    typeof obj.params !== "object" ||
+    Array.isArray(obj.params)
+  ) {
     return { ok: false, reason: "params must be a plain object" };
   }
-  if (typeof obj.executor_ts !== "string" || obj.executor_ts.trim() === "") {
-    return { ok: false, reason: "executor_ts must be a non-empty string" };
-  }
-  const syntaxCheck = checkExecutorSyntax(obj.executor_ts);
-  if (!syntaxCheck.ok) return syntaxCheck;
   // params must be JSON-serializable
   try {
     JSON.parse(JSON.stringify(obj.params));
   } catch {
     return { ok: false, reason: "params must be JSON-serializable" };
   }
+
+  const changeType: "params_only" | "executor_logic" =
+    obj.change_type === "executor_logic" ? "executor_logic" : "params_only";
+  const provided = typeof obj.executor_ts === "string" ? obj.executor_ts : "";
+
+  let executorTs: string;
+  if (changeType === "params_only" && prev) {
+    // params-only: 前版の executor を保持し、モデルの executor_ts は無視する。
+    executorTs = prev.executorTs;
+  } else {
+    if (provided.trim() === "") {
+      return { ok: false, reason: "executor_ts must be a non-empty string" };
+    }
+    const syntaxCheck = checkExecutorSyntax(provided);
+    if (!syntaxCheck.ok) return syntaxCheck;
+    executorTs = provided;
+  }
+
   return {
     ok: true,
     strategy: {
       version,
       notes: obj.notes,
       params: obj.params as Record<string, unknown>,
-      executorTs: obj.executor_ts
-    }
+      executorTs,
+    },
   };
 }
 
@@ -79,13 +111,18 @@ export function parseStrategyFromToolInput(input: unknown, version: number): Str
  * Verify the executor source compiles. We wrap it in a function and try to construct it.
  * `new Function` throws on syntax errors but does not execute the body.
  */
-export function checkExecutorSyntax(source: string): { ok: true } | StrategyParseError {
+export function checkExecutorSyntax(
+  source: string,
+): { ok: true } | StrategyParseError {
   try {
     // Wrap exactly the way runExecutor wraps it so the parser sees the same shape.
     new Function("obs", "params", "helpers", source);
     return { ok: true };
   } catch (error) {
-    return { ok: false, reason: `executor_ts syntax error: ${errorMessage(error)}` };
+    return {
+      ok: false,
+      reason: `executor_ts syntax error: ${errorMessage(error)}`,
+    };
   }
 }
 
@@ -103,39 +140,54 @@ export function runExecutor(
   strategy: Strategy,
   obs: AgentObservation,
   helpersBase: Omit<ExecutorHelpers, "log">,
-  timeoutMs = 200
+  timeoutMs = 200,
 ): ExecutorRunResult {
   const logs: string[] = [];
   const helpers: ExecutorHelpers = {
     ...helpersBase,
     log: (msg: string) => {
-      if (typeof msg === "string" && logs.length < 32) logs.push(msg.slice(0, 500));
-    }
+      if (typeof msg === "string" && logs.length < 32)
+        logs.push(msg.slice(0, 500));
+    },
   };
   const ctx = createContext({
     obs,
     params: strategy.params,
     helpers,
     __result: undefined,
-    console: { log: helpers.log }
+    console: { log: helpers.log },
   });
   const wrapped = `__result = ((obs, params, helpers) => { ${strategy.executorTs} })(obs, params, helpers);`;
   try {
-    new Script(wrapped, { filename: `strategy-v${strategy.version}.executor.js` }).runInContext(ctx, {
+    new Script(wrapped, {
+      filename: `strategy-v${strategy.version}.executor.js`,
+    }).runInContext(ctx, {
       timeout: timeoutMs,
-      displayErrors: true
+      displayErrors: true,
     });
   } catch (error) {
-    return { ok: false, reason: `executor threw: ${errorMessage(error)}`, logs };
+    return {
+      ok: false,
+      reason: `executor threw: ${errorMessage(error)}`,
+      logs,
+    };
   }
   if ((ctx as { __result: unknown }).__result === undefined) {
-    return { ok: false, reason: "executor returned undefined (must return AgentAction)", logs };
+    return {
+      ok: false,
+      reason: "executor returned undefined (must return AgentAction)",
+      logs,
+    };
   }
   let action: AgentAction;
   try {
     action = parseAction((ctx as { __result: unknown }).__result);
   } catch (error) {
-    return { ok: false, reason: `invalid AgentAction: ${errorMessage(error)}`, logs };
+    return {
+      ok: false,
+      reason: `invalid AgentAction: ${errorMessage(error)}`,
+      logs,
+    };
   }
   return { ok: true, action, logs };
 }

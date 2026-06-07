@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   createState,
   handleLine,
+  passesSanityGate,
   whichReviseReason,
 } from "../src/llm/claudeAgent.js";
 import type {
@@ -351,4 +352,26 @@ test("whichReviseReason cadence and drawdown logic", () => {
   assert.equal(whichReviseReason(3, -1, 94.9, 100), "pnl_drop");
   // Initial 0 → never trigger drawdown
   assert.equal(whichReviseReason(3, -1, -10, 0), null);
+});
+
+function gateStrat(executorTs: string): Strategy {
+  return { version: 1, notes: "t", params: {}, executorTs };
+}
+const GATE_CLEAN = gateStrat(`return { type: "noop", reason: "ok" };`);
+const GATE_BROKEN = gateStrat(`throw new Error("boom");`);
+
+test("passesSanityGate: 観測が無ければ常に通過", () => {
+  assert.equal(passesSanityGate(GATE_BROKEN, GATE_CLEAN, []).ok, true);
+});
+
+test("passesSanityGate: 候補が前版よりエラーを増やすなら却下", () => {
+  const obs = [makeObs(1), makeObs(2)];
+  const r = passesSanityGate(GATE_BROKEN, GATE_CLEAN, obs);
+  assert.equal(r.ok, false);
+});
+
+test("passesSanityGate: 候補がクリーンなら前版が壊れていても通過", () => {
+  const obs = [makeObs(1)];
+  assert.equal(passesSanityGate(GATE_CLEAN, GATE_BROKEN, obs).ok, true);
+  assert.equal(passesSanityGate(GATE_CLEAN, GATE_CLEAN, obs).ok, true);
 });

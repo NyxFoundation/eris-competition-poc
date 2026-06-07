@@ -29,6 +29,10 @@ const HISTORY_CAPACITY = intEnv("ERIS_LLM_HISTORY_CAPACITY", 30);
 const EXECUTOR_TIMEOUT_MS = intEnv("ERIS_LLM_EXECUTOR_TIMEOUT_MS", 200);
 // 改訂凍結フラグ。1 なら init/seed 後に revise を一切行わない(決定論・ベース保護)。
 const FREEZE_STRATEGY = process.env.ERIS_FREEZE_STRATEGY === "1";
+// live sanity ゲート(ADR 0002 A-3)。直近 N 観測で revise 候補が前版より実行時エラーを
+// 増やすなら採用しない。ERIS_LLM_SANITY_GATE=0 で無効化(決定論測定など)。
+const SANITY_OBS_WINDOW = intEnv("ERIS_LLM_SANITY_WINDOW", 8);
+const SANITY_GATE_ENABLED = process.env.ERIS_LLM_SANITY_GATE !== "0";
 
 function reportDirRoot(): string {
   return process.env.REPORT_DIR ?? "./runs";
@@ -44,6 +48,8 @@ export type State = {
   agentDir: string | null;
   decisionsPath: string | null;
   callsPath: string | null;
+  // sanity ゲート用の直近観測リング(最大 SANITY_OBS_WINDOW)。
+  recentObs: AgentObservation[];
 };
 
 export function createState(
@@ -60,6 +66,7 @@ export function createState(
     agentDir: null,
     decisionsPath: null,
     callsPath: null,
+    recentObs: [],
   };
 }
 
@@ -182,6 +189,8 @@ export async function handleLine(
 
   ensureRunDirs(state, obs);
   state.history.setInitialUsd(obs.inventory.valueUsdc);
+  state.recentObs.push(obs);
+  if (state.recentObs.length > SANITY_OBS_WINDOW) state.recentObs.shift();
 
   // Kick off background strategy calls if needed. These do not block the response.
   scheduleStrategyWorkIfNeeded(state, strategist, obs);
@@ -366,11 +375,20 @@ async function runStrategistRevise(
   );
   logClaudeCall(state, result, "revise");
   if (result.ok) {
-    state.strategy = result.strategy;
-    persistStrategy(state, result.strategy);
-    emitStderr(
-      `[claude-llm] strategy v${result.strategy.version} adopted (reason=${reason}, pnl=${currentUsd.toFixed(2)}/${initialUsd.toFixed(2)})\n`,
-    );
+    const gate = SANITY_GATE_ENABLED
+      ? passesSanityGate(result.strategy, state.strategy, state.recentObs)
+      : null;
+    if (!gate || gate.ok) {
+      state.strategy = result.strategy;
+      persistStrategy(state, result.strategy);
+      emitStderr(
+        `[claude-llm] strategy v${result.strategy.version} adopted (reason=${reason}, pnl=${currentUsd.toFixed(2)}/${initialUsd.toFixed(2)})\n`,
+      );
+    } else {
+      emitStderr(
+        `[claude-llm] revise v${result.strategy.version} rejected by sanity gate: ${gate.reason} — keeping v${state.strategy.version}\n`,
+      );
+    }
   } else {
     emitStderr(
       `[claude-llm] revise failed: ${result.reason} — keeping v${state.strategy.version}\n`,
@@ -379,6 +397,34 @@ async function runStrategistRevise(
   state.pendingPhase = null;
   state.pending = null;
   void obs;
+}
+
+/**
+ * live sanity ゲート(ADR 0002 A-3): revise 候補を直近観測で実行し、前版より実行時エラーを
+ * 増やす場合のみ却下する。noop は valid なので「正気だが弱い」変更は通す(真の PnL ゲートは
+ * offline /strategy-evolve の責務)。観測が無ければ常に通過。
+ */
+export function passesSanityGate(
+  candidate: Strategy,
+  prev: Strategy | null,
+  recentObs: AgentObservation[],
+): { ok: true } | { ok: false; reason: string } {
+  if (recentObs.length === 0) return { ok: true };
+  let candErr = 0;
+  let prevErr = 0;
+  for (const obs of recentObs) {
+    if (!runExecutor(candidate, obs, helpersBase, EXECUTOR_TIMEOUT_MS).ok)
+      candErr++;
+    if (prev && !runExecutor(prev, obs, helpersBase, EXECUTOR_TIMEOUT_MS).ok)
+      prevErr++;
+  }
+  if (candErr > prevErr) {
+    return {
+      ok: false,
+      reason: `candidate errors on ${candErr}/${recentObs.length} recent obs (prev ${prevErr})`,
+    };
+  }
+  return { ok: true };
 }
 
 function nextVersion(state: State): number {
