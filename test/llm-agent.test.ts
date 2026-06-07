@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   createState,
   handleLine,
+  maybeRollback,
   passesSanityGate,
   whichReviseReason,
 } from "../src/llm/claudeAgent.js";
@@ -374,4 +375,41 @@ test("passesSanityGate: 候補がクリーンなら前版が壊れていても�
   const obs = [makeObs(1)];
   assert.equal(passesSanityGate(GATE_CLEAN, GATE_BROKEN, obs).ok, true);
   assert.equal(passesSanityGate(GATE_CLEAN, GATE_CLEAN, obs).ok, true);
+});
+
+function rbStrat(v: number): Strategy {
+  return { version: v, notes: "t", params: {}, executorTs: `return { type: "noop" };` };
+}
+
+test("maybeRollback: 採用後の下落で前版へ巻き戻す(window 経過後)", () => {
+  const s = createState("rb");
+  s.strategy = rbStrat(2);
+  s.prevStrategy = rbStrat(1);
+  s.adoptUsd = 100;
+  s.adoptRound = 10;
+  s.pendingAdoption = false;
+  // window(5)未満 → 戻さない
+  maybeRollback(s, makeObs(12, 90));
+  assert.equal(s.strategy?.version, 2);
+  // window 経過 & drop 5% >= 4% → 前版へ
+  maybeRollback(s, makeObs(15, 95));
+  assert.equal(s.strategy?.version, 1);
+  assert.equal(s.prevStrategy, null);
+});
+
+test("maybeRollback: pendingAdoption で基準化、軽微下落は維持し graduate で監視解除", () => {
+  const s = createState("rb");
+  s.strategy = rbStrat(2);
+  s.prevStrategy = rbStrat(1);
+  s.pendingAdoption = true;
+  maybeRollback(s, makeObs(10, 100)); // 基準化
+  assert.equal(s.adoptUsd, 100);
+  assert.equal(s.adoptRound, 10);
+  // 下落 2% < 4% → 維持(graduate 前は監視継続)
+  maybeRollback(s, makeObs(20, 98));
+  assert.equal(s.strategy?.version, 2);
+  assert.notEqual(s.prevStrategy, null);
+  // graduate(24)経過 & 健全 → 監視解除
+  maybeRollback(s, makeObs(40, 101));
+  assert.equal(s.prevStrategy, null);
 });
