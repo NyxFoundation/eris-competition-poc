@@ -48,6 +48,13 @@ import { GMX_MARKETS } from "./constants.js";
 import { FlowProcess } from "./flowProcess.js";
 import type { FlowContextWire } from "./flow/logic.js";
 import { readAaveFlowReserves } from "./protocols/aave.js";
+import {
+  applyOracleShock,
+  openVictimPosition,
+  setupVictim,
+  VICTIM_ADDRESS,
+  victimHealthFactor,
+} from "./liquidationDemo.js";
 
 type AgentRuntime = {
   id: string;
@@ -261,6 +268,17 @@ export async function runSimulation(): Promise<void> {
       });
     }
 
+    // ---- 清算デモ(GitHub #1, env gate): victim を資金調達+approve ----
+    const liquidationDemo =
+      config.liquidationDemo && enabledIds.includes("aave");
+    if (liquidationDemo) {
+      await setupVictim(ctx);
+      logger.event({
+        type: "liquidation_victim_setup",
+        address: VICTIM_ADDRESS,
+      });
+    }
+
     let fairPrice = await initialFairPrice(ctx, enabledIds);
     const history: AgentObservation["history"] = [];
     for (const agent of agentRuntimes) {
@@ -283,6 +301,20 @@ export async function runSimulation(): Promise<void> {
       // ---- 1) Oracle ブロック（GMX/Aave の mock 価格を fairPrice に追従）----
       // updateOracles は内部で sendAndMine するため追加 mine は不要。
       await updateOracles(ctx, fairPrice);
+
+      // ---- 1b) 清算デモ(env gate): round 1 で victim を開き、shockRound 以降は
+      //         WETH オラクルを引き下げて victim を HF<1 にする ----
+      if (liquidationDemo) {
+        if (round === 1) await openVictimPosition(ctx);
+        if (round >= config.liquidationShockRound) {
+          await applyOracleShock(ctx, fairPrice);
+          logger.event({
+            type: "liquidation_victim_hf",
+            round,
+            healthFactor: (await victimHealthFactor(ctx)).toString(),
+          });
+        }
+      }
 
       // ---- 2) 競争ブロック ----
       const stateById = new Map<ProtocolId, unknown>();
