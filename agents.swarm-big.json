@@ -543,6 +543,39 @@
       "args": [
         "--import",
         "tsx",
+        "examples/agents/aave-loop.ts"
+      ],
+      "id": "aaveloop",
+      "wallet": "AUTO",
+      "description": "aaveloop (fixed)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/cross-venue-arb.ts"
+      ],
+      "id": "crossvenue",
+      "wallet": "AUTO",
+      "description": "crossvenue (fixed)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/lp-yield.ts"
+      ],
+      "id": "lpyield",
+      "wallet": "AUTO",
+      "description": "lpyield (fixed)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
         "examples/agents/noop.ts"
       ],
       "id": "noop",

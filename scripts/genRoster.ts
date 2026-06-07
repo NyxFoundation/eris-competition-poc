@@ -87,6 +87,10 @@ const FIXED: StratDef[] = [
   { base: "venue", script: "examples/agents/venue-arb.ts" },
   { base: "simple", script: "examples/agents/simple-rule.ts" },
   { base: "rawswap", script: "examples/agents/raw-swap.ts" },
+  // GitHub [strategy] issues #6 / #4 / #11
+  { base: "aaveloop", script: "examples/agents/aave-loop.ts" },
+  { base: "crossvenue", script: "examples/agents/cross-venue-arb.ts" },
+  { base: "lpyield", script: "examples/agents/lp-yield.ts" },
 ];
 
 // env パラメータの直積。{A:[1,2],B:[9]} → [{A:1,B:9},{A:2,B:9}]

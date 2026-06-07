@@ -421,6 +421,116 @@ test("ladder ベース: 空なら次段を mint、満杯なら noop", () => {
   if (rf.ok) assert.equal(rf.action.type, "noop");
 });
 
+function emptyAave() {
+  return {
+    healthFactor: "0",
+    totalCollateralBase: "0",
+    totalDebtBase: "0",
+    availableBorrowsBase: "0",
+    supplied: {} as Record<string, string>,
+    borrowed: {} as Record<string, string>,
+  };
+}
+
+test("aaveloop ベース: 担保未供給・遊休USDC無しなら WETH を supply", () => {
+  const s = getBaseStrategy("aaveloop");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.usdcUnits = "0";
+  obs.limits.maxAaveSupplyWethWei = "5000000000000000000";
+  obs.limits.maxAaveBorrowUsdcUnits = "5000000000";
+  obs.protocols.aave = emptyAave();
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "aaveSupply");
+    if (r.action.type === "aaveSupply") assert.equal(r.action.asset, "WETH");
+  }
+});
+
+test("aaveloop ベース: 担保あり・LTV 未達・借入余力ありなら USDC を borrow", () => {
+  const s = getBaseStrategy("aaveloop");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.usdcUnits = "0";
+  obs.balances.wethWei = "0";
+  obs.limits.maxAaveBorrowUsdcUnits = "5000000000";
+  obs.protocols.aave = {
+    ...emptyAave(),
+    totalCollateralBase: String(5000n * 10n ** 8n), // $5000
+    availableBorrowsBase: String(3000n * 10n ** 8n), // $3000
+    supplied: { WETH: "3000000000000000000" },
+  };
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "aaveBorrow");
+    if (r.action.type === "aaveBorrow") assert.equal(r.action.asset, "USDC");
+  }
+});
+
+test("crossvenue ベース: 最安 venue で買い最高 venue で売る 2-leg bundle", () => {
+  const s = getBaseStrategy("crossvenue");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.protocols.uniswap!.pool.priceUsdcPerWeth = 1700;
+  obs.protocols.balancer = { priceUsdcPerWeth: 1650 }; // 最安
+  obs.protocols.curve = { priceUsdcPerWeth: 1720 }; // 最高
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "bundle");
+    if (r.action.type === "bundle") {
+      assert.equal(r.action.actions[0].type, "balancerSwap"); // 最安で買い
+      assert.equal(r.action.actions[1].type, "curveSwap"); // 最高で売り
+    }
+  }
+});
+
+test("crossvenue ベース: venue が 2 未満なら noop", () => {
+  const s = getBaseStrategy("crossvenue");
+  assert.ok(s);
+  const obs = syntheticObs(); // uniswap のみ
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.action.type, "noop");
+});
+
+test("lpyield ベース: LP 無→mint、LP 有+遊休USDC→Aave supply", () => {
+  const s = getBaseStrategy("lpyield");
+  assert.ok(s);
+  // LP 無し → mint
+  const a = syntheticObs();
+  a.protocols.aave = emptyAave();
+  const ra = runExecutor(s, a, helpers);
+  assert.equal(ra.ok, true);
+  if (ra.ok) assert.equal(ra.action.type, "mintLiquidity");
+
+  // LP 有り + 遊休 USDC → Aave へ park
+  const b = syntheticObs();
+  b.protocols.aave = emptyAave();
+  b.balances.usdcUnits = "10000000000"; // 10000 USDC
+  b.protocols.uniswap!.positions = [
+    {
+      tokenId: "1",
+      tickLower: 199900,
+      tickUpper: 200100,
+      liquidity: "1000",
+      tokensOwedWethWei: "0",
+      tokensOwedUsdcUnits: "0",
+      amountWethWei: "0",
+      amountUsdcUnits: "0",
+      valueUsdc: 1,
+    },
+  ];
+  const rb = runExecutor(s, b, helpers);
+  assert.equal(rb.ok, true);
+  if (rb.ok) {
+    assert.equal(rb.action.type, "aaveSupply");
+    if (rb.action.type === "aaveSupply") assert.equal(rb.action.asset, "USDC");
+  }
+});
+
 test("getBaseStrategy: 未知 id / undefined は null", () => {
   assert.equal(getBaseStrategy("nope"), null);
   assert.equal(getBaseStrategy(undefined), null);

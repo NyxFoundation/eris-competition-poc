@@ -377,6 +377,111 @@ helpers.log("ladder step " + (step + 1) + "/" + steps + " center=" + segCenter);
 return { type: "mintLiquidity", tickLower: segCenter - halfWidth, tickUpper: segCenter + halfWidth, amountWethDesired: wethDesired.toString(), amountUsdcDesired: usdcDesired.toString(), maxPriorityFeePerGasWei: fee, slippageBps: params.slippageBps };
 `.trim();
 
+// aaveloop: WETH supply → USDC borrow → USDC を WETH に swap → 再 supply を多段ループする
+// leveraged WETH carry(GitHub #6)。状態は obs.protocols.aave の collateral/debt/availableBorrows
+// から毎ラウンド再構成し、targetLtv に達するまで 1 段ずつ進める素朴版。(aave-leverage の発展)
+const AAVELOOP_EXECUTOR = `
+const aave = obs.protocols && obs.protocols.aave;
+if (!aave) return { type: "noop", reason: "aave disabled" };
+const fee = obs.limits.defaultPriorityFeePerGasWei;
+const wethWei = BigInt(obs.balances.wethWei);
+const usdcUnits = BigInt(obs.balances.usdcUnits);
+const maxIn = BigInt(obs.limits.maxUsdcInUnits);
+const coll = Number(aave.totalCollateralBase) / 1e8;
+const debt = Number(aave.totalDebtBase) / 1e8;
+const avail = Number(aave.availableBorrowsBase) / 1e8;
+const underTarget = coll === 0 || debt / coll < params.targetLtv;
+// 1) 手元 WETH を supply して担保を積む(初期 WETH + swap で得た WETH。carry の土台)
+if (wethWei > 0n && underTarget) {
+  const maxSupply = BigInt(obs.limits.maxAaveSupplyWethWei);
+  const capped = wethWei < maxSupply ? wethWei : maxSupply;
+  const frac = BigInt(Math.max(0, Math.min(10000, Math.floor(params.supplyFraction * 10000))));
+  const amt = (capped * frac) / 10000n;
+  if (amt > 0n) return { type: "aaveSupply", asset: "WETH", amount: amt.toString(), maxPriorityFeePerGasWei: fee };
+}
+// 2) 目標 LTV 未満で借入余力があれば USDC borrow
+if (underTarget && coll > 0) {
+  const borrowUsd = Math.floor(avail * params.borrowFraction);
+  if (borrowUsd >= 10) {
+    const maxBorrow = BigInt(obs.limits.maxAaveBorrowUsdcUnits);
+    const want = BigInt(borrowUsd) * 1000000n;
+    const amt = want < maxBorrow ? want : maxBorrow;
+    if (amt > 0n) return { type: "aaveBorrow", asset: "USDC", amount: amt.toString(), maxPriorityFeePerGasWei: fee };
+  }
+}
+// 3) 借りた native USDC を WETH へ swap(次段 supply の原資)。maxUsdcInUnits で上限を切り、
+//    集約残高(USDC.e/USDT 込み)で native 残高を超えて reject されるのを避ける。
+if (underTarget && coll > 0 && usdcUnits > 1000000n) {
+  const amountIn = usdcUnits < maxIn ? usdcUnits : maxIn;
+  return { type: "swap", tokenIn: "USDC", amountIn: amountIn.toString(), slippageBps: params.slippageBps, maxPriorityFeePerGasWei: fee };
+}
+return { type: "noop", reason: "target leverage reached" };
+`.trim();
+
+// crossvenue: uniswap/balancer/curve のうち最安 venue で買い・最高 venue で売る 2-leg 裁定
+// (GitHub #4 の cross-venue 部分)。cvbal(bal↔curve 限定)を 3 venue の最大乖離ペアへ一般化。
+// 注: 別 fee-tier / v2 は観測に無いため対象外(uni 0.05% + balancer + curve のみ)。
+const CROSSVENUE_EXECUTOR = `
+const p = obs.protocols || {};
+const fee = obs.limits.defaultPriorityFeePerGasWei;
+const venues = [];
+if (p.uniswap && p.uniswap.pool && p.uniswap.pool.priceUsdcPerWeth > 0) venues.push({ swapType: "swap", price: p.uniswap.pool.priceUsdcPerWeth });
+if (p.balancer && p.balancer.priceUsdcPerWeth > 0) venues.push({ swapType: "balancerSwap", price: p.balancer.priceUsdcPerWeth });
+if (p.curve && p.curve.priceUsdcPerWeth > 0) venues.push({ swapType: "curveSwap", price: p.curve.priceUsdcPerWeth });
+if (venues.length < 2) return { type: "noop", reason: "need >=2 venues" };
+let lo = venues[0]; let hi = venues[0];
+for (let i = 0; i < venues.length; i++) { if (venues[i].price < lo.price) lo = venues[i]; if (venues[i].price > hi.price) hi = venues[i]; }
+const spread = hi.price / lo.price - 1;
+if (spread < params.spreadThreshold || lo.swapType === hi.swapType) return { type: "noop", reason: "spread too small" };
+const sizeBps = Math.min(params.maxSizeBps, Math.max(params.minSizeBps, Math.floor(spread * params.sizeGain)));
+const usdcIn = (BigInt(obs.limits.maxUsdcInUnits) * BigInt(sizeBps)) / 10000n;
+const wethIn = (BigInt(obs.limits.maxWethInWei) * BigInt(sizeBps)) / 10000n;
+if (usdcIn <= 0n || wethIn <= 0n) return { type: "noop", reason: "computed size zero" };
+helpers.log("crossvenue spread=" + (spread * 10000).toFixed(1) + "bps buy=" + lo.swapType + " sell=" + hi.swapType);
+return { type: "bundle", actions: [
+  { type: lo.swapType, tokenIn: "USDC", amountIn: usdcIn.toString(), slippageBps: params.slippageBps },
+  { type: hi.swapType, tokenIn: "WETH", amountIn: wethIn.toString(), slippageBps: params.slippageBps },
+], maxPriorityFeePerGasWei: fee };
+`.trim();
+
+// lpyield: fair 含意 tick 中心に LP を mint し、残った遊休 USDC を Aave に supply して手数料+利回りの
+// 二段収益を狙う無レバレッジ複合(GitHub #11)。fairmm(LP)+ aave(park)の合成。
+const LPYIELD_EXECUTOR = `
+const uni = obs.protocols && obs.protocols.uniswap;
+if (!uni || !uni.pool) return { type: "noop", reason: "uniswap disabled" };
+const aave = obs.protocols && obs.protocols.aave;
+const fee = obs.limits.defaultPriorityFeePerGasWei;
+const positions = uni.positions || [];
+let live = 0; for (let i = 0; i < positions.length; i++) if (BigInt(positions[i].liquidity) > 0n) live++;
+if (live === 0) {
+  const pool = uni.pool.priceUsdcPerWeth; const fair = obs.fairPriceUsdcPerWeth;
+  if (!(pool > 0) || !(fair > 0)) return { type: "noop", reason: "invalid prices" };
+  const spacing = uni.pool.tickSpacing;
+  const offset = Math.round(Math.log(fair / pool) / Math.log(1.0001));
+  const center = Math.round((uni.pool.tick + offset) / spacing) * spacing;
+  const w = Math.max(1, Math.floor(params.rangeSpacings)) * spacing;
+  const frac = BigInt(Math.max(0, Math.min(10000, Math.floor(params.depositFraction * 10000))));
+  const wethWei = BigInt(obs.balances.wethWei); const usdcUnits = BigInt(obs.balances.usdcUnits);
+  const maxW = BigInt(obs.limits.maxLpWethWei); const maxU = BigInt(obs.limits.maxLpUsdcUnits);
+  const wd = ((wethWei < maxW ? wethWei : maxW) * frac) / 10000n;
+  const ud = ((usdcUnits < maxU ? usdcUnits : maxU) * frac) / 10000n;
+  if (wd > 0n || ud > 0n) return { type: "mintLiquidity", tickLower: center - w, tickUpper: center + w, amountWethDesired: wd.toString(), amountUsdcDesired: ud.toString(), maxPriorityFeePerGasWei: fee, slippageBps: params.slippageBps };
+}
+// LP 配分後の遊休 USDC を Aave に park(余剰だけ)。1 回の supply は maxUsdcInUnits で上限を切り、
+// 集約残高(USDC.e/USDT 込み)で native USDC 残高を超えて reject されるのを避ける。
+if (aave) {
+  const usdcUnits = BigInt(obs.balances.usdcUnits);
+  const maxIn = BigInt(obs.limits.maxUsdcInUnits);
+  const minIdle = BigInt(Math.max(0, Math.floor(params.minIdleUsdc))) * 1000000n;
+  if (usdcUnits > minIdle) {
+    const excess = usdcUnits - minIdle;
+    const amt = excess < maxIn ? excess : maxIn;
+    return { type: "aaveSupply", asset: "USDC", amount: amt.toString(), maxPriorityFeePerGasWei: fee };
+  }
+}
+return { type: "noop", reason: "LP + idle parked" };
+`.trim();
+
 // id → ベース戦略(version を除いた雛形)。
 const BASE_STRATEGIES: Record<string, Omit<Strategy, "version">> = {
   arb: {
@@ -523,6 +628,40 @@ const BASE_STRATEGIES: Record<string, Omit<Strategy, "version">> = {
       slippageBps: 75,
     },
     executorTs: LADDER_EXECUTOR,
+  },
+  aaveloop: {
+    notes:
+      "Base strategy **aaveloop** (GitHub #6): WETH supply → USDC borrow → swap → 再 supply の多段レバレッジ carry。targetLtv まで 1 段ずつ。revise で targetLtv / borrowFraction を磨く。aave+uniswap 有効時のみ。",
+    params: {
+      targetLtv: 0.7,
+      borrowFraction: 0.8,
+      supplyFraction: 1.0,
+      slippageBps: 75,
+    },
+    executorTs: AAVELOOP_EXECUTOR,
+  },
+  crossvenue: {
+    notes:
+      "Base strategy **crossvenue** (GitHub #4): uniswap/balancer/curve の最安 venue で買い・最高 venue で売る 2-leg 裁定。revise で spreadThreshold / サイズを磨く。複数 AMM venue 有効時のみ。",
+    params: {
+      spreadThreshold: 0.001,
+      minSizeBps: 250,
+      maxSizeBps: 5000,
+      sizeGain: 200000,
+      slippageBps: 75,
+    },
+    executorTs: CROSSVENUE_EXECUTOR,
+  },
+  lpyield: {
+    notes:
+      "Base strategy **lpyield** (GitHub #11): fair 含意 tick 中心に LP を mint し残った遊休 USDC を Aave に supply する無レバレッジ複合(手数料+利回り)。revise でレンジ幅 / 預入率 / 遊休下限を磨く。uniswap+aave 有効時のみ。",
+    params: {
+      rangeSpacings: 4,
+      depositFraction: 0.5,
+      minIdleUsdc: 10,
+      slippageBps: 75,
+    },
+    executorTs: LPYIELD_EXECUTOR,
   },
 };
 
