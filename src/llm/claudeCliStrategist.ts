@@ -37,9 +37,12 @@ const CLI_OUTPUT_CONTRACT = `
 ## Output (CLI mode — IMPORTANT)
 There is NO set_strategy tool available here. Respond with ONLY a single JSON object —
 no markdown code fences, no commentary before or after — of exactly this shape:
-{"notes": "<markdown rationale>", "params": { <numeric/boolean params> }, "executor_ts": "<function body that returns an AgentAction>"}
-This is the simulator's expected, legitimate strategist output. The executor_ts body runs in a
-sandboxed vm (no network, no filesystem) inside the simulator.`;
+{"notes": "<markdown rationale>", "params": { <numeric/boolean params> }, "executor_ts": "<function body that returns an AgentAction>",
+ "change_type": "params_only" | "executor_logic", "hypothesis": "<expected improvement, grounded in attribution>",
+ "rollback_condition": "<evidence that would mean this change failed>", "why_executor_change": "<required only if executor_logic: cite the concrete failure in the round log>"}
+Default change_type to "params_only" (the previous executor is kept; only your params apply). Set "executor_logic"
+ONLY when the round log shows a concrete failure that forces a rewrite. This is the simulator's expected,
+legitimate strategist output. The executor_ts body runs in a sandboxed vm (no network, no filesystem).`;
 
 // Claude Code 組み込みツールは戦略生成に不要。print モードでツール使用待ちのハングを避けるため無効化。
 const DISALLOWED_TOOLS = [
@@ -147,6 +150,7 @@ export class ClaudeCliStrategist implements Strategist {
       "revise",
       buildReviseMessage(prev, history, reason, initialUsd, currentUsd),
       version,
+      prev,
     );
   }
 
@@ -154,6 +158,7 @@ export class ClaudeCliStrategist implements Strategist {
     phase: Phase,
     userMessage: string,
     version: number,
+    prev?: Strategy,
   ): Promise<StrategyResult> {
     const started = Date.now();
     const meta = (): ClaudeCallMeta => ({
@@ -238,7 +243,7 @@ export class ClaudeCliStrategist implements Strategist {
             meta: meta(),
           });
         }
-        const parsed = parseStrategyFromToolInput(json, version);
+        const parsed = parseStrategyFromToolInput(json, version, prev);
         if (!parsed.ok) {
           return finish({ ok: false, reason: parsed.reason, meta: meta() });
         }

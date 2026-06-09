@@ -6,7 +6,13 @@ import {
   type PublicClient,
 } from "viem";
 import { AAVE, TOKENS, stableBalanceOf } from "../constants.js";
-import { accountAddress, sendAndMine, sendAsImpersonated } from "../chain.js";
+import {
+  accountAddress,
+  increaseTime,
+  mine,
+  sendAndMine,
+  sendAsImpersonated,
+} from "../chain.js";
 import type {
   AaveObservation,
   AgentObservation,
@@ -42,6 +48,13 @@ export const aavePoolAbi = parseAbi([
 
 export const aaveDataProviderAbi = parseAbi([
   "function getUserReserveData(address asset, address user) view returns (uint256 currentATokenBalance, uint256 currentStableDebt, uint256 currentVariableDebt, uint256 principalStableDebt, uint256 scaledVariableDebt, uint256 stableBorrowRate, uint256 liquidityRate, uint40 stableRateLastUpdated, bool usageAsCollateralEnabled)",
+]);
+
+// Pool.getReserveData は「生の」格納値（index/rate/lastUpdate）を返す。利息計算を
+// 行わないため、後述の lastUpdateTimestamp が block.timestamp より未来でも revert しない。
+// （getUserAccountData / PoolDataProvider.getReserveData は利息を計算するため revert する。）
+export const aaveReserveDataAbi = parseAbi([
+  "function getReserveData(address asset) view returns ((uint256 configuration, uint128 liquidityIndex, uint128 currentLiquidityRate, uint128 variableBorrowIndex, uint128 currentVariableBorrowRate, uint128 currentStableBorrowRate, uint40 lastUpdateTimestamp, uint16 id, address aTokenAddress, address stableDebtTokenAddress, address variableDebtTokenAddress, address interestRateStrategyAddress, uint128 accruedToTreasury, uint128 unbacked, uint128 isolationModeTotalDebt))",
 ]);
 
 export const aaveOracleAbi = parseAbi([
@@ -239,6 +252,47 @@ export async function readAaveFlowReserves(
   return { wethSupplied: weth.supplied, usdcBorrowed: usdc.borrowed };
 }
 
+// reserve の最終更新時刻（生の格納値。利息計算しないので未来でも revert しない）。
+async function reserveLastUpdate(
+  publicClient: PublicClient,
+  asset: Address,
+): Promise<bigint> {
+  const r = (await publicClient.readContract({
+    address: AAVE.Pool,
+    abi: aaveReserveDataAbi,
+    functionName: "getReserveData",
+    args: [asset],
+  })) as { lastUpdateTimestamp: number | bigint };
+  return BigInt(r.lastUpdateTimestamp);
+}
+
+// Aave フォークの時刻整合を取る。Arbitrum を anvil でフォークすると、ブロックの
+// block.timestamp が reserve の lastUpdateTimestamp より過去になることがある
+// （フォークブロックの timestamp と state スナップショットのズレ。間欠的に発生）。
+// その状態では Aave の利息計算 `dt = block.timestamp - lastUpdateTimestamp` が
+// uint アンダーフロー(panic 0x11)を起こし、getUserAccountData / getReserveData が
+// revert → 最初の observe で sim 全体がクラッシュする。
+// 対策: 我々が使う WETH/USDC reserve の lastUpdateTimestamp を読み、block.timestamp が
+// それ以下(dt<=0)なら超えるまで EVM 時間を進める。これでラウンドループ中の Aave 読取が
+// 常に dt>0 となり、（間欠クラッシュせず）長走行でも aave 戦略を評価できる。
+// resetFork が forking 付き再フォークを行えば block.timestamp は通常 lastUpdate より後に
+// なるためここは発火しないが、フォークブロック次第で稀に逆転するため防御として残す。
+const AAVE_WARP_BUFFER_SECONDS = 3600n; // 1h。発火時に dt>0 を安定させる余裕。
+async function warpPastReserveLastUpdate(ctx: SimContext): Promise<void> {
+  const [wethUpdate, usdcUpdate] = await Promise.all([
+    reserveLastUpdate(ctx.publicClient, TOKENS.WETH.address),
+    reserveLastUpdate(ctx.publicClient, AAVE_STABLE),
+  ]);
+  const maxUpdate = wethUpdate > usdcUpdate ? wethUpdate : usdcUpdate;
+  const now = (await ctx.publicClient.getBlock()).timestamp;
+  if (now > maxUpdate) return; // dt>0 済み（健全なフォークブロック）→ 何もしない
+  await increaseTime(
+    ctx.publicClient,
+    Number(maxUpdate - now + AAVE_WARP_BUFFER_SECONDS),
+  );
+  await mine(ctx.publicClient);
+}
+
 export const aaveAdapter: ProtocolAdapter = {
   id: "aave",
   stableToken: AAVE_STABLE,
@@ -303,6 +357,9 @@ export const aaveAdapter: ProtocolAdapter = {
 
   async setupGlobal(ctx: SimContext): Promise<void> {
     const admin = accountAddress(ctx.adminPk);
+    // フォークの時刻ズレを補正（負の dt による利息計算アンダーフローを防ぐ）。
+    // 以降の setup / ラウンドループでの Aave 読取が常に有効になる。
+    await warpPastReserveLastUpdate(ctx);
     // 現在の Aave オラクル価格を初期値にして mock を差し込む（連続性のため）
     const [wethUsd8, usdcUsd8] = (await Promise.all([
       ctx.publicClient.readContract({

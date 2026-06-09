@@ -11,6 +11,7 @@
 //   ENABLED_PROTOCOLS=uniswap,balancer,curve,gmx ROUNDS=128 \
 //     AGENTS_CONFIG=agents.swarm-big.json npm run leaderboard
 import { writeFileSync } from "node:fs";
+import { BASE_STRATEGY_IDS } from "../src/llm/baseStrategies.js";
 import type { AgentSpec } from "../src/types.js";
 
 type Sweep = Record<string, Array<string | number>>;
@@ -52,6 +53,28 @@ const PARAMETRIC: StratDef[] = [
     script: "examples/agents/gmx-trend.ts",
     sweep: { TREND_BPS: [30, 60], TREND_LOOKBACK: [8, 16] },
   },
+  // main から取り込んだ新戦略(observation 正規化を入れて実動作させた)。
+  {
+    base: "statarb",
+    script: "examples/agents/stat-arb.ts",
+    // Z_AGGRESSIVE 既定 2.5 を超えない範囲で entry 閾値を sweep。
+    sweep: { STAT_ARB_Z_ENTER: [1.0, 1.5, 2.0] },
+  },
+  {
+    base: "fairmm",
+    script: "examples/agents/fair-mm.ts",
+    sweep: { FAIR_MM_RANGE_TICK_MULTIPLIER: [4, 8] },
+  },
+  {
+    base: "jitlp",
+    script: "examples/agents/jit-lp.ts",
+    sweep: { JIT_VOL_QUANTILE: [0.8, 0.9] },
+  },
+  {
+    base: "ladder",
+    script: "examples/agents/ladder-mm.ts",
+    sweep: { LADDER_STEPS: [3, 5] },
+  },
 ];
 
 // 固定挙動(env パラメータ無し)。1 インスタンスずつ。
@@ -64,6 +87,10 @@ const FIXED: StratDef[] = [
   { base: "venue", script: "examples/agents/venue-arb.ts" },
   { base: "simple", script: "examples/agents/simple-rule.ts" },
   { base: "rawswap", script: "examples/agents/raw-swap.ts" },
+  // GitHub [strategy] issues #6 / #4 / #11
+  { base: "aaveloop", script: "examples/agents/aave-loop.ts" },
+  { base: "crossvenue", script: "examples/agents/cross-venue-arb.ts" },
+  { base: "lpyield", script: "examples/agents/lp-yield.ts" },
 ];
 
 // env パラメータの直積。{A:[1,2],B:[9]} → [{A:1,B:9},{A:2,B:9}]
@@ -125,9 +152,12 @@ function build(): AgentSpec[] {
     });
   }
 
-  // 任意: 自己改善する LLM agent(ベース戦略から進化)。INCLUDE_LLM=1 で混ぜる。
+  // 任意: 自己改善する LLM agent。INCLUDE_LLM=1 で**全ベース戦略**(src/llm/baseStrategies.ts)を
+  // それぞれ LLM seed して混ぜる。ベース戦略を増やすほど自動で対象が増える。
+  // 注意: 各 agent が背景で `claude -p`(1回 ~1-3分)を revise ごとに呼ぶため、数が増えると
+  // run 時間とサブスク/API コストが大きくなる。小さく試すなら ERIS_LLM_REVIEW_EVERY を大きく。
   if (process.env.INCLUDE_LLM === "1") {
-    for (const base of ["arb", "lp"]) {
+    for (const base of BASE_STRATEGY_IDS) {
       agents.push({
         ...agentScript("examples/agents/claude-llm.ts"),
         id: `llm-${base}`,

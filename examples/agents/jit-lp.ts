@@ -21,7 +21,11 @@
 //     runtime-assigned tokenId.
 
 import { createInterface } from "node:readline";
-import { realizedVariance, quantile, type HistoryPoint } from "../lib/flow-stats.js";
+import {
+  realizedVariance,
+  quantile,
+  type HistoryPoint,
+} from "../lib/flow-stats.js";
 
 type PositionObs = {
   tokenId: string;
@@ -65,7 +69,9 @@ type Observation = {
 // low-vol-rounds completion criterion requires. Wider tick range (4 spacings)
 // earns fees in a wider band so a single mint is meaningful when we do fire.
 const VOL_WINDOW = positiveInt(process.env.JIT_VOL_WINDOW, 6);
-const VOL_QUANTILE = clampUnit(parseFloatEnv(process.env.JIT_VOL_QUANTILE, 0.9));
+const VOL_QUANTILE = clampUnit(
+  parseFloatEnv(process.env.JIT_VOL_QUANTILE, 0.9),
+);
 const RANGE_TICKS = positiveInt(process.env.JIT_RANGE_TICKS, 4);
 const MINT_BUDGET_BPS = positiveInt(process.env.JIT_MINT_BUDGET_BPS, 4500);
 const MIN_HISTORY = positiveInt(process.env.JIT_MIN_HISTORY, 12);
@@ -76,15 +82,37 @@ const MIN_USDC_MINT_UNITS = 2_500_000n; // 2.5 USDC floor
 let lastMintedTokenId: string | null = null;
 let pendingMintRange: { tickLower: number; tickUpper: number } | null = null;
 
+// 観測はネスト形 (protocols.uniswap.{pool,positions})。本戦略はトップレベル
+// pool/positions を前提にしたフラット形を使うため、パース後に正規化する。
+type RawObservation = Observation & {
+  protocols?: {
+    uniswap?: { pool?: Observation["pool"]; positions?: PositionObs[] };
+  };
+};
+
 const rl = createInterface({ input: process.stdin });
 rl.on("line", (line) => {
-  let observation: Observation;
+  let raw: RawObservation;
   try {
-    observation = JSON.parse(line) as Observation;
+    raw = JSON.parse(line) as RawObservation;
   } catch (err) {
-    process.stdout.write(`${JSON.stringify({ type: "noop", reason: `parse-error: ${(err as Error).message}` })}\n`);
+    process.stdout.write(
+      `${JSON.stringify({ type: "noop", reason: `parse-error: ${(err as Error).message}` })}\n`,
+    );
     return;
   }
+  const uni = raw.protocols?.uniswap;
+  if (!uni?.pool) {
+    process.stdout.write(
+      `${JSON.stringify({ type: "noop", reason: "uniswap unavailable" })}\n`,
+    );
+    return;
+  }
+  const observation: Observation = {
+    ...raw,
+    pool: uni.pool,
+    positions: uni.positions ?? [],
+  };
   reconcilePendingMint(observation);
   const action = decideAction(observation);
   process.stdout.write(`${JSON.stringify(action)}\n`);
@@ -100,7 +128,7 @@ function reconcilePendingMint(observation: Observation): void {
       (p) =>
         p.tickLower === pendingMintRange!.tickLower &&
         p.tickUpper === pendingMintRange!.tickUpper &&
-        BigInt(p.liquidity) > 0n
+        BigInt(p.liquidity) > 0n,
     )
     .sort((a, b) => {
       const da = BigInt(a.tokenId);
@@ -135,11 +163,12 @@ function decideAction(observation: Observation) {
       actions.push({
         type: "removeLiquidity",
         tokenId: closingTokenId,
-        liquidity: stalePosition.liquidity
+        liquidity: stalePosition.liquidity,
       });
     }
     actions.push({ type: "collectFees", tokenId: closingTokenId });
-    if (actions.length === 1) return { ...actions[0], maxPriorityFeePerGasWei: priorityFee };
+    if (actions.length === 1)
+      return { ...actions[0], maxPriorityFeePerGasWei: priorityFee };
     if (actions.length > observation.limits.maxBundleActions) {
       return { type: "noop", reason: "close bundle exceeds maxBundleActions" };
     }
@@ -185,7 +214,10 @@ function decideAction(observation: Observation) {
   const limitUsdc = BigInt(observation.limits.maxLpUsdcUnits);
   const amountWethDesired = budgetAmount(balanceWeth, limitWeth, budgetBps);
   const amountUsdcDesired = budgetAmount(balanceUsdc, limitUsdc, budgetBps);
-  if (amountWethDesired < MIN_WETH_MINT_WEI || amountUsdcDesired < MIN_USDC_MINT_UNITS) {
+  if (
+    amountWethDesired < MIN_WETH_MINT_WEI ||
+    amountUsdcDesired < MIN_USDC_MINT_UNITS
+  ) {
     return { type: "noop", reason: "insufficient LP budget" };
   }
 
@@ -208,11 +240,14 @@ function decideAction(observation: Observation) {
     amountWethDesired: amountWethDesired.toString(),
     amountUsdcDesired: amountUsdcDesired.toString(),
     maxPriorityFeePerGasWei: priorityFee,
-    slippageBps: 100
+    slippageBps: 100,
   };
 }
 
-function collectHistoricalVols(history: HistoryPoint[], window: number): number[] {
+function collectHistoricalVols(
+  history: HistoryPoint[],
+  window: number,
+): number[] {
   // Roll a window of size `window` across the history excluding the most recent
   // window (the "current" estimate). Step by max(1, window/2) so samples are
   // roughly independent.

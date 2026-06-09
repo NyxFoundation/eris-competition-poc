@@ -57,7 +57,11 @@ type BundleAction =
 type AgentAction =
   | { type: "noop"; reason?: string }
   | (BundleAction & { maxPriorityFeePerGasWei?: string })
-  | { type: "bundle"; actions: BundleAction[]; maxPriorityFeePerGasWei?: string };
+  | {
+      type: "bundle";
+      actions: BundleAction[];
+      maxPriorityFeePerGasWei?: string;
+    };
 
 type ManagedPosition = { tickLower: number; tickUpper: number; weight: number };
 
@@ -76,7 +80,10 @@ const LADDER_OUTER_WEIGHT = floatEnv("LADDER_OUTER_WEIGHT", 0.2);
 //
 // Previously 20 (~±1% per step) drained ladder slots within <128 rounds, since
 // drained NFTs permanently consume a `maxOpenPositions` slot (no burn action).
-const LADDER_STEP_WIDTH_MULTIPLIER = intEnv("LADDER_STEP_WIDTH_MULTIPLIER", 120);
+const LADDER_STEP_WIDTH_MULTIPLIER = intEnv(
+  "LADDER_STEP_WIDTH_MULTIPLIER",
+  120,
+);
 const LADDER_REBALANCE_GAP_BPS = intEnv("LADDER_REBALANCE_GAP_BPS", 80);
 const LADDER_REBALANCE_SKEW = floatEnv("LADDER_REBALANCE_SKEW", 0.3);
 // Total fraction of available balance to deploy across the ladder. The single-
@@ -91,16 +98,38 @@ const MIN_USDC_MINT_UNITS = 10_000_000n; // 10 USDC
 
 const managed = new Map<string, ManagedPosition>();
 
+// 観測はネスト形 (protocols.uniswap.{pool,positions})。本戦略はトップレベル
+// pool/positions を前提にしたフラット形を使うため、パース後に正規化する。
+type RawObservation = Observation & {
+  protocols?: {
+    uniswap?: { pool?: Observation["pool"]; positions?: PositionObservation[] };
+  };
+};
+
 const rl = createInterface({ input: process.stdin });
 
 rl.on("line", (line) => {
   try {
-    const observation = JSON.parse(line) as Observation;
+    const raw = JSON.parse(line) as RawObservation;
+    const uni = raw.protocols?.uniswap;
+    if (!uni?.pool) {
+      process.stdout.write(
+        `${JSON.stringify({ type: "noop", reason: "uniswap unavailable" })}\n`,
+      );
+      return;
+    }
+    const observation: Observation = {
+      ...raw,
+      pool: uni.pool,
+      positions: uni.positions ?? [],
+    };
     const action = decide(observation);
     process.stdout.write(`${JSON.stringify(action)}\n`);
   } catch (err) {
     process.stderr.write(`[ladder-mm] error: ${(err as Error).message}\n`);
-    process.stdout.write(`${JSON.stringify({ type: "noop", reason: "parse error" })}\n`);
+    process.stdout.write(
+      `${JSON.stringify({ type: "noop", reason: "parse error" })}\n`,
+    );
   }
 });
 
@@ -111,8 +140,14 @@ function decide(obs: Observation): AgentAction {
   const maxBundle = obs.limits.maxBundleActions;
   const maxOpen = obs.limits.maxOpenPositions;
 
-  const fairTick = fairTickFromPool(obs.pool.tick, obs.pool.priceUsdcPerWeth, obs.fairPriceUsdcPerWeth, obs.pool.tickSpacing);
-  const gapBps = Math.abs(obs.fairPriceUsdcPerWeth / obs.pool.priceUsdcPerWeth - 1) * 10_000;
+  const fairTick = fairTickFromPool(
+    obs.pool.tick,
+    obs.pool.priceUsdcPerWeth,
+    obs.fairPriceUsdcPerWeth,
+    obs.pool.tickSpacing,
+  );
+  const gapBps =
+    Math.abs(obs.fairPriceUsdcPerWeth / obs.pool.priceUsdcPerWeth - 1) * 10_000;
   const skew = inventorySkew(obs);
 
   const targets = buildTargetLadder(fairTick, skew, obs.pool.tickSpacing);
@@ -131,7 +166,11 @@ function decide(obs: Observation): AgentAction {
     for (let i = 0; i < targets.length; i++) {
       if (matchedTargetIdx.has(i)) continue;
       const t = targets[i];
-      const overlap = Math.max(0, Math.min(pos.tickUpper, t.tickUpper) - Math.max(pos.tickLower, t.tickLower));
+      const overlap = Math.max(
+        0,
+        Math.min(pos.tickUpper, t.tickUpper) -
+          Math.max(pos.tickLower, t.tickLower),
+      );
       const span = t.tickUpper - t.tickLower;
       if (span > 0 && overlap / span >= matchTolerance) {
         matchedTargetIdx.add(i);
@@ -148,10 +187,16 @@ function decide(obs: Observation): AgentAction {
   // are never burned in this sim, they just accumulate).
   const stepWidthTicks = obs.pool.tickSpacing * LADDER_STEP_WIDTH_MULTIPLIER;
   const ladderCenter = ownedPositions.length
-    ? Math.round(ownedPositions.reduce((s, p) => s + (p.tickLower + p.tickUpper) / 2, 0) / ownedPositions.length)
+    ? Math.round(
+        ownedPositions.reduce(
+          (s, p) => s + (p.tickLower + p.tickUpper) / 2,
+          0,
+        ) / ownedPositions.length,
+      )
     : fairTick;
   const driftTicks = Math.abs(fairTick - ladderCenter);
-  const driftTriggered = ownedPositions.length > 0 && driftTicks > stepWidthTicks * 1.5;
+  const driftTriggered =
+    ownedPositions.length > 0 && driftTicks > stepWidthTicks * 1.5;
 
   const gapTriggered = gapBps > LADDER_REBALANCE_GAP_BPS;
   const skewTriggered = Math.abs(skew) > LADDER_REBALANCE_SKEW;
@@ -165,7 +210,9 @@ function decide(obs: Observation): AgentAction {
   const rebalanceTriggered =
     rebalanceAllowed &&
     ownedPositions.length > 0 &&
-    (driftTriggered || (gapTriggered && stale.length > 0) || (skewTriggered && stale.length > 0));
+    (driftTriggered ||
+      (gapTriggered && stale.length > 0) ||
+      (skewTriggered && stale.length > 0));
 
   // When a rebalance fires we tear down the whole ladder so the next mint cycle
   // can construct a fresh, properly weighted one. Otherwise we only purge
@@ -181,7 +228,7 @@ function decide(obs: Observation): AgentAction {
       actions.push({
         type: "removeLiquidity",
         tokenId: pos.tokenId,
-        liquidity: pos.liquidity
+        liquidity: pos.liquidity,
       });
       actions.push({ type: "collectFees", tokenId: pos.tokenId });
       managed.delete(pos.tokenId);
@@ -198,7 +245,7 @@ function decide(obs: Observation): AgentAction {
 
   // 2. Collect fees on still-managed in-range positions before potentially minting more.
   const collectable = ownedPositions.find(
-    (p) => !positionsToRemove.includes(p) && hasCollectableFees(p)
+    (p) => !positionsToRemove.includes(p) && hasCollectableFees(p),
   );
   // Targets that don't already have a sufficiently-overlapping live position.
   // Use the same tolerance as the staleness check so we don't double-mint when
@@ -207,10 +254,14 @@ function decide(obs: Observation): AgentAction {
     (t) =>
       !ownedPositions.some((p) => {
         if (positionsToRemove.includes(p)) return false;
-        const overlap = Math.max(0, Math.min(p.tickUpper, t.tickUpper) - Math.max(p.tickLower, t.tickLower));
+        const overlap = Math.max(
+          0,
+          Math.min(p.tickUpper, t.tickUpper) -
+            Math.max(p.tickLower, t.tickLower),
+        );
         const span = t.tickUpper - t.tickLower;
         return span > 0 && overlap / span >= matchTolerance;
-      })
+      }),
   );
 
   // 3. Mint missing target steps.
@@ -218,16 +269,27 @@ function decide(obs: Observation): AgentAction {
   // exposed as an action, so every rebalance burns through real NFT slots. We
   // count drained NFTs against `maxOpenPositions` because the validator does.
   const slotsLeft = maxOpen - obs.positions.length;
-  const mintsToEmit = remainingTargets.slice(0, Math.max(0, Math.min(slotsLeft, maxBundle)));
+  const mintsToEmit = remainingTargets.slice(
+    0,
+    Math.max(0, Math.min(slotsLeft, maxBundle)),
+  );
 
   if (mintsToEmit.length > 0) {
     const totalWeightToMint = mintsToEmit.reduce((sum, t) => sum + t.weight, 0);
     if (totalWeightToMint <= 0) {
-      return collectable ? collectAction(collectable.tokenId, priorityFee) : { type: "noop", reason: "no positive ladder weight" };
+      return collectable
+        ? collectAction(collectable.tokenId, priorityFee)
+        : { type: "noop", reason: "no positive ladder weight" };
     }
 
-    const wethBudget = budgetAmount(BigInt(obs.balances.wethWei), BigInt(obs.limits.maxLpWethWei));
-    const usdcBudget = budgetAmount(BigInt(obs.balances.usdcUnits), BigInt(obs.limits.maxLpUsdcUnits));
+    const wethBudget = budgetAmount(
+      BigInt(obs.balances.wethWei),
+      BigInt(obs.limits.maxLpWethWei),
+    );
+    const usdcBudget = budgetAmount(
+      BigInt(obs.balances.usdcUnits),
+      BigInt(obs.limits.maxLpUsdcUnits),
+    );
 
     // If total budget is too tiny across the ladder, skip minting.
     if (wethBudget < MIN_WETH_MINT_WEI && usdcBudget < MIN_USDC_MINT_UNITS) {
@@ -239,22 +301,25 @@ function decide(obs: Observation): AgentAction {
     const actions: BundleAction[] = [];
     for (const t of mintsToEmit) {
       const share = t.weight / totalWeightToMint;
-      const wethShare = (wethBudget * BigInt(Math.floor(share * 10_000))) / 10_000n;
-      const usdcShare = (usdcBudget * BigInt(Math.floor(share * 10_000))) / 10_000n;
+      const wethShare =
+        (wethBudget * BigInt(Math.floor(share * 10_000))) / 10_000n;
+      const usdcShare =
+        (usdcBudget * BigInt(Math.floor(share * 10_000))) / 10_000n;
       // Skip ranges that would mint trivially small amounts.
-      if (wethShare < MIN_WETH_MINT_WEI && usdcShare < MIN_USDC_MINT_UNITS) continue;
+      if (wethShare < MIN_WETH_MINT_WEI && usdcShare < MIN_USDC_MINT_UNITS)
+        continue;
       actions.push({
         type: "mintLiquidity",
         tickLower: t.tickLower,
         tickUpper: t.tickUpper,
         amountWethDesired: wethShare.toString(),
         amountUsdcDesired: usdcShare.toString(),
-        slippageBps: 100
+        slippageBps: 100,
       });
       managed.set(`pending:${t.tickLower}:${t.tickUpper}`, {
         tickLower: t.tickLower,
         tickUpper: t.tickUpper,
-        weight: t.weight
+        weight: t.weight,
       });
     }
     if (actions.length === 1) {
@@ -286,7 +351,11 @@ function syncManaged(obs: Observation): void {
   for (const pos of obs.positions) {
     if (BigInt(pos.liquidity) === 0n) continue;
     if (!managed.has(pos.tokenId)) {
-      managed.set(pos.tokenId, { tickLower: pos.tickLower, tickUpper: pos.tickUpper, weight: 1 });
+      managed.set(pos.tokenId, {
+        tickLower: pos.tickLower,
+        tickUpper: pos.tickUpper,
+        weight: 1,
+      });
     }
   }
 }
@@ -294,7 +363,7 @@ function syncManaged(obs: Observation): void {
 function buildTargetLadder(
   fairTick: number,
   skew: number,
-  tickSpacing: number
+  tickSpacing: number,
 ): Array<{ tickLower: number; tickUpper: number; weight: number }> {
   // Ensure stepWidth is a multiple of tickSpacing and even so half-widths align.
   let stepWidth = tickSpacing * LADDER_STEP_WIDTH_MULTIPLIER;
@@ -315,10 +384,13 @@ function buildTargetLadder(
 
   const innerCount = steps % 2 === 1 ? 1 : 2;
   const outerCount = steps - innerCount;
-  const innerWeightEach = outerCount === 0 ? 1 : LADDER_INNER_WEIGHT / innerCount;
-  const outerWeightEach = outerCount === 0 ? 0 : LADDER_OUTER_WEIGHT / outerCount;
+  const innerWeightEach =
+    outerCount === 0 ? 1 : LADDER_INNER_WEIGHT / innerCount;
+  const outerWeightEach =
+    outerCount === 0 ? 0 : LADDER_OUTER_WEIGHT / outerCount;
 
-  const out: Array<{ tickLower: number; tickUpper: number; weight: number }> = [];
+  const out: Array<{ tickLower: number; tickUpper: number; weight: number }> =
+    [];
   for (const i of indices) {
     const isInner = steps % 2 === 1 ? i === 0 : Math.abs(i) === 1;
     let weight = isInner ? innerWeightEach : outerWeightEach;
@@ -377,8 +449,18 @@ function budgetAmount(balance: bigint, limit: bigint): bigint {
 //
 // After PR-A (#10) merges, swap this for `priceToTick` in `examples/lib/tick-math.ts`
 // (see follow-up issue).
-function fairTickFromPool(poolTick: number, poolPrice: number, fairPrice: number, tickSpacing: number): number {
-  if (!Number.isFinite(fairPrice) || fairPrice <= 0 || !Number.isFinite(poolPrice) || poolPrice <= 0) {
+function fairTickFromPool(
+  poolTick: number,
+  poolPrice: number,
+  fairPrice: number,
+  tickSpacing: number,
+): number {
+  if (
+    !Number.isFinite(fairPrice) ||
+    fairPrice <= 0 ||
+    !Number.isFinite(poolPrice) ||
+    poolPrice <= 0
+  ) {
     return alignTick(poolTick, tickSpacing);
   }
   const offset = Math.log(poolPrice / fairPrice) / Math.log(1.0001);

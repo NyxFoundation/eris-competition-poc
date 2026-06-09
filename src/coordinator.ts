@@ -48,6 +48,14 @@ import { GMX_MARKETS } from "./constants.js";
 import { FlowProcess } from "./flowProcess.js";
 import type { FlowContextWire } from "./flow/logic.js";
 import { readAaveFlowReserves } from "./protocols/aave.js";
+import {
+  applyOracleShock,
+  openVictimPosition,
+  setupVictim,
+  VICTIM_ADDRESS,
+  victimHealthFactor,
+} from "./liquidationDemo.js";
+import { deployFlashArb, FLASH_ARB_ADDRESS } from "./flashArbDemo.js";
 
 type AgentRuntime = {
   id: string;
@@ -107,8 +115,19 @@ export async function runSimulation(): Promise<void> {
     config.rpcUrl,
     config.chainId,
   );
-  await resetFork(publicClient);
-  logger.event({ type: "fork_reset" });
+  await resetFork(publicClient, {
+    forkUrl: config.forkUrl,
+    forkBlockNumber: config.forkBlockNumber,
+  });
+  if (!config.forkUrl) {
+    // 上流 RPC 未設定だと soft reset になり、run/seed 間で Aave 等の状態が残留する。
+    console.warn(
+      "[coordinator] ARB_RPC_URL 未設定: anvil_reset [] フォールバック。複数 run/seed を" +
+        "同一 anvil で回すと Aave ポジションが残留し PnL が汚染されます。ARB_RPC_URL を設定するか" +
+        " anvil を都度再起動してください。",
+    );
+  }
+  logger.event({ type: "fork_reset", forked: Boolean(config.forkUrl) });
 
   const agentSpecs = loadAgents(config.agentsConfigPath);
   const agentRuntimes: AgentRuntime[] = agentSpecs.map((spec) => {
@@ -250,6 +269,28 @@ export async function runSimulation(): Promise<void> {
       });
     }
 
+    // ---- 清算デモ(GitHub #1, env gate): victim を資金調達+approve ----
+    const liquidationDemo =
+      config.liquidationDemo && enabledIds.includes("aave");
+    if (liquidationDemo) {
+      await setupVictim(ctx);
+      logger.event({
+        type: "liquidation_victim_setup",
+        address: VICTIM_ADDRESS,
+      });
+    }
+
+    // ---- フラッシュ arb デモ(GitHub #3, env gate): FlashArb をデプロイ ----
+    if (
+      config.flashArbDemo &&
+      enabledIds.includes("aave") &&
+      enabledIds.includes("uniswap") &&
+      enabledIds.includes("balancer")
+    ) {
+      await deployFlashArb(ctx);
+      logger.event({ type: "flash_arb_deployed", address: FLASH_ARB_ADDRESS });
+    }
+
     let fairPrice = await initialFairPrice(ctx, enabledIds);
     const history: AgentObservation["history"] = [];
     for (const agent of agentRuntimes) {
@@ -272,6 +313,20 @@ export async function runSimulation(): Promise<void> {
       // ---- 1) Oracle ブロック（GMX/Aave の mock 価格を fairPrice に追従）----
       // updateOracles は内部で sendAndMine するため追加 mine は不要。
       await updateOracles(ctx, fairPrice);
+
+      // ---- 1b) 清算デモ(env gate): round 1 で victim を開き、shockRound 以降は
+      //         WETH オラクルを引き下げて victim を HF<1 にする ----
+      if (liquidationDemo) {
+        if (round === 1) await openVictimPosition(ctx);
+        if (round >= config.liquidationShockRound) {
+          await applyOracleShock(ctx, fairPrice);
+          logger.event({
+            type: "liquidation_victim_hf",
+            round,
+            healthFactor: (await victimHealthFactor(ctx)).toString(),
+          });
+        }
+      }
 
       // ---- 2) 競争ブロック ----
       const stateById = new Map<ProtocolId, unknown>();

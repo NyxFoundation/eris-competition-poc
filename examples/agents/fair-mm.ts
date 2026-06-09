@@ -62,13 +62,17 @@ type Observation = {
 const RANGE_TICK_MULTIPLIER = clampInt(
   parseIntEnv("FAIR_MM_RANGE_TICK_MULTIPLIER", 4),
   1,
-  64
+  64,
 );
-const MINT_BUDGET_BPS = clampInt(parseIntEnv("FAIR_MM_MINT_BUDGET_BPS", 3500), 1, 10_000);
+const MINT_BUDGET_BPS = clampInt(
+  parseIntEnv("FAIR_MM_MINT_BUDGET_BPS", 3500),
+  1,
+  10_000,
+);
 const REMINT_THRESHOLD_BPS = clampInt(
   parseIntEnv("FAIR_MM_REMINT_THRESHOLD_BPS", 150),
   1,
-  10_000
+  10_000,
 );
 
 const MIN_WETH_MINT_WEI = 5_000_000_000_000_000n; // 0.005 WETH
@@ -85,15 +89,37 @@ type ManagedRange = {
 };
 let managed: ManagedRange | null = null;
 
+// 観測はネスト形 (protocols.uniswap.{pool,positions})。本戦略はトップレベル
+// pool/positions を前提にしたフラット形を使うため、パース後に正規化する。
+type RawObservation = Observation & {
+  protocols?: {
+    uniswap?: { pool?: Observation["pool"]; positions?: ObservationPosition[] };
+  };
+};
+
 const rl = createInterface({ input: process.stdin });
 rl.on("line", (line) => {
-  let observation: Observation;
+  let raw: RawObservation;
   try {
-    observation = JSON.parse(line) as Observation;
+    raw = JSON.parse(line) as RawObservation;
   } catch (err) {
-    process.stdout.write(`${JSON.stringify({ type: "noop", reason: `parse error: ${(err as Error).message}` })}\n`);
+    process.stdout.write(
+      `${JSON.stringify({ type: "noop", reason: `parse error: ${(err as Error).message}` })}\n`,
+    );
     return;
   }
+  const uni = raw.protocols?.uniswap;
+  if (!uni?.pool) {
+    process.stdout.write(
+      `${JSON.stringify({ type: "noop", reason: "uniswap unavailable" })}\n`,
+    );
+    return;
+  }
+  const observation: Observation = {
+    ...raw,
+    pool: uni.pool,
+    positions: uni.positions ?? [],
+  };
   const action = decide(observation);
   process.stdout.write(`${JSON.stringify(action)}\n`);
 });
@@ -120,7 +146,10 @@ function decide(observation: Observation) {
   const fairTickAligned =
     fairTickRaw !== null
       ? alignTick(fairTickRaw, spacing)
-      : alignTick(priceToTick(observation.fairPriceUsdcPerWeth, spacing), spacing);
+      : alignTick(
+          priceToTick(observation.fairPriceUsdcPerWeth, spacing),
+          spacing,
+        );
 
   // The mint center is the fair tick, but clamped so the resulting band still
   // contains the current pool tick. If fair has wandered far from pool, this
@@ -129,7 +158,7 @@ function decide(observation: Observation) {
     fairTickAligned,
     poolTick,
     halfWidthTicks,
-    spacing
+    spacing,
   );
 
   // No live position → consider minting.
@@ -154,7 +183,8 @@ function decide(observation: Observation) {
   const driftExceeds =
     driftFromCenter >= Math.max(1, halfWidthTicks) &&
     driftBps >= REMINT_THRESHOLD_BPS;
-  const outOfRange = poolTick < livePosition.tickLower || poolTick > livePosition.tickUpper;
+  const outOfRange =
+    poolTick < livePosition.tickLower || poolTick > livePosition.tickUpper;
   const newBandLower = centerTick - halfWidthTicks;
   const newBandUpper = centerTick + halfWidthTicks;
   const newBandWouldHelp =
@@ -165,7 +195,11 @@ function decide(observation: Observation) {
   if ((driftExceeds && newBandWouldHelp) || (outOfRange && newBandWouldHelp)) {
     // Bundle remove + collect; the next round will mint anew.
     const actions: Array<Record<string, unknown>> = [
-      { type: "removeLiquidity", tokenId: livePosition.tokenId, liquidity: livePosition.liquidity }
+      {
+        type: "removeLiquidity",
+        tokenId: livePosition.tokenId,
+        liquidity: livePosition.liquidity,
+      },
     ];
     if (hasCollectableFees(livePosition)) {
       actions.push({ type: "collectFees", tokenId: livePosition.tokenId });
@@ -175,7 +209,7 @@ function decide(observation: Observation) {
     return {
       type: "bundle",
       maxPriorityFeePerGasWei: priorityFee,
-      actions
+      actions,
     };
   }
 
@@ -183,7 +217,7 @@ function decide(observation: Observation) {
     return {
       type: "collectFees",
       tokenId: livePosition.tokenId,
-      maxPriorityFeePerGasWei: priorityFee
+      maxPriorityFeePerGasWei: priorityFee,
     };
   }
 
@@ -197,7 +231,7 @@ function clampCenterToBracketPoolTick(
   fairCenter: number,
   poolTick: number,
   halfWidthTicks: number,
-  spacing: number
+  spacing: number,
 ): number {
   const minCenter = poolTick - halfWidthTicks;
   const maxCenter = poolTick + halfWidthTicks;
@@ -209,7 +243,7 @@ function tryMint(
   observation: Observation,
   centerTick: number,
   halfWidthTicks: number,
-  priorityFee: string
+  priorityFee: string,
 ) {
   if (observation.positions.length >= observation.limits.maxOpenPositions) {
     return { type: "noop", reason: "max open LP positions reached" };
@@ -225,11 +259,11 @@ function tryMint(
   // Target ratio: half value in WETH, half in USDC, where value uses fairPrice.
   const wethBudget = capBudget(
     BigInt(observation.balances.wethWei),
-    BigInt(observation.limits.maxLpWethWei)
+    BigInt(observation.limits.maxLpWethWei),
   );
   const usdcBudget = capBudget(
     BigInt(observation.balances.usdcUnits),
-    BigInt(observation.limits.maxLpUsdcUnits)
+    BigInt(observation.limits.maxLpUsdcUnits),
   );
 
   if (wethBudget < MIN_WETH_MINT_WEI || usdcBudget < MIN_USDC_MINT_UNITS) {
@@ -247,7 +281,7 @@ function tryMint(
     tickLower,
     tickUpper,
     midTick: centerTick,
-    fairAtMint: observation.fairPriceUsdcPerWeth
+    fairAtMint: observation.fairPriceUsdcPerWeth,
   };
 
   return {
@@ -257,16 +291,21 @@ function tryMint(
     amountWethDesired: amountWethDesired.toString(),
     amountUsdcDesired: amountUsdcDesired.toString(),
     maxPriorityFeePerGasWei: priorityFee,
-    slippageBps: Math.max(50, observation.limits.defaultSlippageBps)
+    slippageBps: Math.max(50, observation.limits.defaultSlippageBps),
   };
 }
 
-function pickLivePosition(observation: Observation, remembered: ManagedRange | null): ObservationPosition | null {
+function pickLivePosition(
+  observation: Observation,
+  remembered: ManagedRange | null,
+): ObservationPosition | null {
   const live = observation.positions.filter((p) => BigInt(p.liquidity) > 0n);
   if (live.length === 0) {
     // We may still hold a zero-liquidity position object with uncollected fees.
     if (remembered) {
-      const stale = observation.positions.find((p) => p.tokenId === remembered.tokenId);
+      const stale = observation.positions.find(
+        (p) => p.tokenId === remembered.tokenId,
+      );
       if (stale && hasCollectableFees(stale)) return stale;
     }
     return null;
@@ -280,19 +319,21 @@ function pickLivePosition(observation: Observation, remembered: ManagedRange | n
         tickLower: match.tickLower,
         tickUpper: match.tickUpper,
         midTick: midTick(match),
-        fairAtMint: remembered.fairAtMint
+        fairAtMint: remembered.fairAtMint,
       };
       return match;
     }
   }
   // Adopt the most-recent live position (largest tokenId numerically).
-  const adopted = live.reduce((best, p) => (BigInt(p.tokenId) > BigInt(best.tokenId) ? p : best));
+  const adopted = live.reduce((best, p) =>
+    BigInt(p.tokenId) > BigInt(best.tokenId) ? p : best,
+  );
   managed = {
     tokenId: adopted.tokenId,
     tickLower: adopted.tickLower,
     tickUpper: adopted.tickUpper,
     midTick: midTick(adopted),
-    fairAtMint: observation.fairPriceUsdcPerWeth
+    fairAtMint: observation.fairPriceUsdcPerWeth,
   };
   return adopted;
 }
@@ -300,19 +341,35 @@ function pickLivePosition(observation: Observation, remembered: ManagedRange | n
 function computeFairTickFromPool(observation: Observation): number | null {
   const pool = observation.pool.priceUsdcPerWeth;
   const fair = observation.fairPriceUsdcPerWeth;
-  if (!Number.isFinite(pool) || pool <= 0 || !Number.isFinite(fair) || fair <= 0) return null;
+  if (
+    !Number.isFinite(pool) ||
+    pool <= 0 ||
+    !Number.isFinite(fair) ||
+    fair <= 0
+  )
+    return null;
   const delta = Math.log(fair / pool) / LOG_BASE;
   return observation.pool.tick + delta;
 }
 
-function computeDriftBpsSinceMint(observation: Observation, remembered: ManagedRange | null): number {
-  if (!remembered || !Number.isFinite(remembered.fairAtMint) || remembered.fairAtMint <= 0) return 0;
+function computeDriftBpsSinceMint(
+  observation: Observation,
+  remembered: ManagedRange | null,
+): number {
+  if (
+    !remembered ||
+    !Number.isFinite(remembered.fairAtMint) ||
+    remembered.fairAtMint <= 0
+  )
+    return 0;
   const ratio = observation.fairPriceUsdcPerWeth / remembered.fairAtMint;
   const driftBps = Math.abs(ratio - 1) * 10_000;
   return driftBps;
 }
 
-function hasCollectableFees(p: Pick<ObservationPosition, "tokensOwedWethWei" | "tokensOwedUsdcUnits">): boolean {
+function hasCollectableFees(
+  p: Pick<ObservationPosition, "tokensOwedWethWei" | "tokensOwedUsdcUnits">,
+): boolean {
   return BigInt(p.tokensOwedWethWei) > 0n || BigInt(p.tokensOwedUsdcUnits) > 0n;
 }
 

@@ -329,6 +329,132 @@
       "args": [
         "--import",
         "tsx",
+        "examples/agents/stat-arb.ts"
+      ],
+      "id": "statarb-saze1",
+      "wallet": "AUTO",
+      "env": {
+        "STAT_ARB_Z_ENTER": "1"
+      },
+      "description": "statarb (STAT_ARB_Z_ENTER=1)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/stat-arb.ts"
+      ],
+      "id": "statarb-saze1.5",
+      "wallet": "AUTO",
+      "env": {
+        "STAT_ARB_Z_ENTER": "1.5"
+      },
+      "description": "statarb (STAT_ARB_Z_ENTER=1.5)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/stat-arb.ts"
+      ],
+      "id": "statarb-saze2",
+      "wallet": "AUTO",
+      "env": {
+        "STAT_ARB_Z_ENTER": "2"
+      },
+      "description": "statarb (STAT_ARB_Z_ENTER=2)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/fair-mm.ts"
+      ],
+      "id": "fairmm-fmrtm4",
+      "wallet": "AUTO",
+      "env": {
+        "FAIR_MM_RANGE_TICK_MULTIPLIER": "4"
+      },
+      "description": "fairmm (FAIR_MM_RANGE_TICK_MULTIPLIER=4)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/fair-mm.ts"
+      ],
+      "id": "fairmm-fmrtm8",
+      "wallet": "AUTO",
+      "env": {
+        "FAIR_MM_RANGE_TICK_MULTIPLIER": "8"
+      },
+      "description": "fairmm (FAIR_MM_RANGE_TICK_MULTIPLIER=8)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/jit-lp.ts"
+      ],
+      "id": "jitlp-jvq0.8",
+      "wallet": "AUTO",
+      "env": {
+        "JIT_VOL_QUANTILE": "0.8"
+      },
+      "description": "jitlp (JIT_VOL_QUANTILE=0.8)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/jit-lp.ts"
+      ],
+      "id": "jitlp-jvq0.9",
+      "wallet": "AUTO",
+      "env": {
+        "JIT_VOL_QUANTILE": "0.9"
+      },
+      "description": "jitlp (JIT_VOL_QUANTILE=0.9)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/ladder-mm.ts"
+      ],
+      "id": "ladder-ls3",
+      "wallet": "AUTO",
+      "env": {
+        "LADDER_STEPS": "3"
+      },
+      "description": "ladder (LADDER_STEPS=3)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/ladder-mm.ts"
+      ],
+      "id": "ladder-ls5",
+      "wallet": "AUTO",
+      "env": {
+        "LADDER_STEPS": "5"
+      },
+      "description": "ladder (LADDER_STEPS=5)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
         "examples/agents/gmx-perp.ts"
       ],
       "id": "gmxperp",
@@ -411,6 +537,39 @@
       "id": "rawswap",
       "wallet": "AUTO",
       "description": "rawswap (fixed)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/aave-loop.ts"
+      ],
+      "id": "aaveloop",
+      "wallet": "AUTO",
+      "description": "aaveloop (fixed)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/cross-venue-arb.ts"
+      ],
+      "id": "crossvenue",
+      "wallet": "AUTO",
+      "description": "crossvenue (fixed)"
+    },
+    {
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/lp-yield.ts"
+      ],
+      "id": "lpyield",
+      "wallet": "AUTO",
+      "description": "lpyield (fixed)"
     },
     {
       "command": "node",

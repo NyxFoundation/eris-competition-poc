@@ -105,6 +105,7 @@ export class ClaudeSubscriptionStrategist implements Strategist {
       "revise",
       buildReviseMessage(prev, history, reason, initialUsd, currentUsd),
       version,
+      prev,
     );
   }
 
@@ -112,6 +113,7 @@ export class ClaudeSubscriptionStrategist implements Strategist {
     phase: Phase,
     userMessage: string,
     version: number,
+    prev?: Strategy,
   ): Promise<StrategyResult> {
     const started = Date.now();
     let captured: unknown;
@@ -139,6 +141,28 @@ export class ClaudeSubscriptionStrategist implements Strategist {
               .string()
               .describe(
                 "TypeScript function body (no signature). Receives (obs, params, helpers) and must return an AgentAction.",
+              ),
+            change_type: z
+              .enum(["params_only", "executor_logic"])
+              .optional()
+              .describe(
+                "Default 'params_only' (previous executor kept; only params apply). Use 'executor_logic' ONLY with cited evidence.",
+              ),
+            hypothesis: z
+              .string()
+              .optional()
+              .describe(
+                "Expected improvement, grounded in the PnL attribution.",
+              ),
+            rollback_condition: z
+              .string()
+              .optional()
+              .describe("Evidence that would mean this change failed."),
+            why_executor_change: z
+              .string()
+              .optional()
+              .describe(
+                "Required only if change_type is 'executor_logic': quote the concrete failure in the round log.",
               ),
           },
           async (args) => {
@@ -208,7 +232,7 @@ export class ClaudeSubscriptionStrategist implements Strategist {
 
     if (!captured)
       return { ok: false, reason: "model did not call set_strategy", meta };
-    const parsed = parseStrategyFromToolInput(captured, version);
+    const parsed = parseStrategyFromToolInput(captured, version, prev);
     if (!parsed.ok) return { ok: false, reason: parsed.reason, meta };
     return {
       ok: true,

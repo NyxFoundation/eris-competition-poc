@@ -29,6 +29,18 @@ const HISTORY_CAPACITY = intEnv("ERIS_LLM_HISTORY_CAPACITY", 30);
 const EXECUTOR_TIMEOUT_MS = intEnv("ERIS_LLM_EXECUTOR_TIMEOUT_MS", 200);
 // 改訂凍結フラグ。1 なら init/seed 後に revise を一切行わない(決定論・ベース保護)。
 const FREEZE_STRATEGY = process.env.ERIS_FREEZE_STRATEGY === "1";
+// live sanity ゲート(ADR 0002 A-3)。直近 N 観測で revise 候補が前版より実行時エラーを
+// 増やすなら採用しない。ERIS_LLM_SANITY_GATE=0 で無効化(決定論測定など)。
+const SANITY_OBS_WINDOW = intEnv("ERIS_LLM_SANITY_WINDOW", 8);
+const SANITY_GATE_ENABLED = process.env.ERIS_LLM_SANITY_GATE !== "0";
+// live PnL ロールバック(ADR 0002 の rollback_condition を機構化)。revise 採用後に実現 PnL を
+// 監視し、採用時評価額から ROLLBACK_DROP 以上下落したら前版へ自動で巻き戻す(事後・反応的ガード)。
+// sanity ゲート(実行時エラーのみ)では捕えられない「正気だが致命的」な改悪を打ち切る。
+// ERIS_LLM_ROLLBACK=0 で無効化。
+const ROLLBACK_ENABLED = process.env.ERIS_LLM_ROLLBACK !== "0";
+const ROLLBACK_WINDOW = intEnv("ERIS_LLM_ROLLBACK_WINDOW", 5); // 判定までの最小経過ラウンド
+const ROLLBACK_DROP = floatEnv("ERIS_LLM_ROLLBACK_DROP", 0.04); // 採用時比の下落率しきい値
+const ROLLBACK_GRADUATE = intEnv("ERIS_LLM_ROLLBACK_GRADUATE", 24); // 監視を打ち切る経過ラウンド
 
 function reportDirRoot(): string {
   return process.env.REPORT_DIR ?? "./runs";
@@ -44,6 +56,14 @@ export type State = {
   agentDir: string | null;
   decisionsPath: string | null;
   callsPath: string | null;
+  rollbacksPath: string | null;
+  // sanity ゲート用の直近観測リング(最大 SANITY_OBS_WINDOW)。
+  recentObs: AgentObservation[];
+  // PnL ロールバック用: 採用直前の版・採用時評価額・採用ラウンド。
+  prevStrategy: Strategy | null;
+  adoptUsd: number | null;
+  adoptRound: number;
+  pendingAdoption: boolean;
 };
 
 export function createState(
@@ -60,6 +80,12 @@ export function createState(
     agentDir: null,
     decisionsPath: null,
     callsPath: null,
+    rollbacksPath: null,
+    recentObs: [],
+    prevStrategy: null,
+    adoptUsd: null,
+    adoptRound: -1,
+    pendingAdoption: false,
   };
 }
 
@@ -182,6 +208,11 @@ export async function handleLine(
 
   ensureRunDirs(state, obs);
   state.history.setInitialUsd(obs.inventory.valueUsdc);
+  state.recentObs.push(obs);
+  if (state.recentObs.length > SANITY_OBS_WINDOW) state.recentObs.shift();
+
+  // PnL ロールバック: 新版採用直後の評価額を基準化し、悪化していれば前版へ巻き戻す。
+  if (ROLLBACK_ENABLED) maybeRollback(state, obs);
 
   // Kick off background strategy calls if needed. These do not block the response.
   scheduleStrategyWorkIfNeeded(state, strategist, obs);
@@ -366,11 +397,23 @@ async function runStrategistRevise(
   );
   logClaudeCall(state, result, "revise");
   if (result.ok) {
-    state.strategy = result.strategy;
-    persistStrategy(state, result.strategy);
-    emitStderr(
-      `[claude-llm] strategy v${result.strategy.version} adopted (reason=${reason}, pnl=${currentUsd.toFixed(2)}/${initialUsd.toFixed(2)})\n`,
-    );
+    const gate = SANITY_GATE_ENABLED
+      ? passesSanityGate(result.strategy, state.strategy, state.recentObs)
+      : null;
+    if (!gate || gate.ok) {
+      // ロールバック用に直前の良い版を退避し、採用を handleLine で基準化する。
+      state.prevStrategy = state.strategy;
+      state.pendingAdoption = true;
+      state.strategy = result.strategy;
+      persistStrategy(state, result.strategy);
+      emitStderr(
+        `[claude-llm] strategy v${result.strategy.version} adopted (reason=${reason}, pnl=${currentUsd.toFixed(2)}/${initialUsd.toFixed(2)})\n`,
+      );
+    } else {
+      emitStderr(
+        `[claude-llm] revise v${result.strategy.version} rejected by sanity gate: ${gate.reason} — keeping v${state.strategy.version}\n`,
+      );
+    }
   } else {
     emitStderr(
       `[claude-llm] revise failed: ${result.reason} — keeping v${state.strategy.version}\n`,
@@ -379,6 +422,86 @@ async function runStrategistRevise(
   state.pendingPhase = null;
   state.pending = null;
   void obs;
+}
+
+/**
+ * live sanity ゲート(ADR 0002 A-3): revise 候補を直近観測で実行し、前版より実行時エラーを
+ * 増やす場合のみ却下する。noop は valid なので「正気だが弱い」変更は通す(真の PnL ゲートは
+ * offline /strategy-evolve の責務)。観測が無ければ常に通過。
+ */
+export function passesSanityGate(
+  candidate: Strategy,
+  prev: Strategy | null,
+  recentObs: AgentObservation[],
+): { ok: true } | { ok: false; reason: string } {
+  if (recentObs.length === 0) return { ok: true };
+  let candErr = 0;
+  let prevErr = 0;
+  for (const obs of recentObs) {
+    if (!runExecutor(candidate, obs, helpersBase, EXECUTOR_TIMEOUT_MS).ok)
+      candErr++;
+    if (prev && !runExecutor(prev, obs, helpersBase, EXECUTOR_TIMEOUT_MS).ok)
+      prevErr++;
+  }
+  if (candErr > prevErr) {
+    return {
+      ok: false,
+      reason: `candidate errors on ${candErr}/${recentObs.length} recent obs (prev ${prevErr})`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * live PnL ロールバック(ADR 0002 の rollback_condition を機構化)。
+ * 採用直後の評価額を基準化し、ROLLBACK_WINDOW 経過後に基準から ROLLBACK_DROP 以上下落していれば
+ * 前版へ巻き戻す。ROLLBACK_GRADUATE ラウンド生き延びたら「合格」として監視を解除する。
+ * 注意: 市場全体の下落と revise 起因の悪化を厳密に切り分けないため、しきい値は保守的にする。
+ */
+export function maybeRollback(state: State, obs: AgentObservation): void {
+  // 新版が live になった最初のラウンドで基準を取る。
+  if (state.pendingAdoption) {
+    state.adoptUsd = obs.inventory.valueUsdc;
+    state.adoptRound = obs.round;
+    state.pendingAdoption = false;
+    return;
+  }
+  if (!state.prevStrategy || state.adoptUsd === null || state.adoptUsd <= 0) {
+    return;
+  }
+  const elapsed = obs.round - state.adoptRound;
+  if (elapsed < ROLLBACK_WINDOW) return;
+  const drop = (state.adoptUsd - obs.inventory.valueUsdc) / state.adoptUsd;
+  if (drop >= ROLLBACK_DROP) {
+    const from = state.strategy?.version;
+    const to = state.prevStrategy.version;
+    state.strategy = state.prevStrategy;
+    logRollback(state, obs.round, from ?? null, to, drop);
+    emitStderr(
+      `[claude-llm] PnL rollback v${from}→v${to} (drop=${(drop * 100).toFixed(1)}% over ${elapsed}r) — reverted to last good version\n`,
+    );
+    state.prevStrategy = null;
+    state.adoptUsd = null;
+    state.lastReviseRound = obs.round; // 直後の連続 revise を抑制(cooldown)
+  } else if (elapsed >= ROLLBACK_GRADUATE) {
+    // 一定期間崩れなければ合格として監視解除。
+    state.prevStrategy = null;
+    state.adoptUsd = null;
+  }
+}
+
+function logRollback(
+  state: State,
+  round: number,
+  fromVersion: number | null,
+  toVersion: number,
+  drop: number,
+): void {
+  if (!state.rollbacksPath) return;
+  appendFileSync(
+    state.rollbacksPath,
+    `${JSON.stringify({ ts: new Date().toISOString(), round, fromVersion, toVersion, drop })}\n`,
+  );
 }
 
 function nextVersion(state: State): number {
@@ -392,8 +515,10 @@ function ensureRunDirs(state: State, obs: AgentObservation): void {
     mkdirSync(state.agentDir, { recursive: true });
   state.decisionsPath = join(state.agentDir, "decisions.jsonl");
   state.callsPath = join(state.agentDir, "claude-calls.jsonl");
+  state.rollbacksPath = join(state.agentDir, "rollbacks.jsonl");
   writeFileSync(state.decisionsPath, "");
   writeFileSync(state.callsPath, "");
+  writeFileSync(state.rollbacksPath, "");
 }
 
 function persistStrategy(state: State, strategy: Strategy): void {

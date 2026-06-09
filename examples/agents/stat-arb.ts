@@ -26,7 +26,11 @@
 import { createInterface } from "node:readline";
 import { RollingStats } from "../lib/rolling-stats.js";
 
-type HistoryPoint = { round: number; poolPriceUsdcPerWeth: number; fairPriceUsdcPerWeth: number };
+type HistoryPoint = {
+  round: number;
+  poolPriceUsdcPerWeth: number;
+  fairPriceUsdcPerWeth: number;
+};
 
 type Observation = {
   round: number;
@@ -41,26 +45,38 @@ type Observation = {
   };
 };
 
-const WINDOW = Math.max(2, Math.floor(Number(process.env.STAT_ARB_WINDOW ?? "64")));
+const WINDOW = Math.max(
+  2,
+  Math.floor(Number(process.env.STAT_ARB_WINDOW ?? "64")),
+);
 const Z_ENTER = Number(process.env.STAT_ARB_Z_ENTER ?? "1.5");
 const Z_AGGRESSIVE = Number(process.env.STAT_ARB_Z_AGGRESSIVE ?? "2.5");
 const BID_ALPHA = Number(process.env.STAT_ARB_BID_ALPHA ?? "0.3");
-const BURN_IN = Math.max(2, Math.floor(Number(process.env.STAT_ARB_BURN_IN ?? "20")));
+const BURN_IN = Math.max(
+  2,
+  Math.floor(Number(process.env.STAT_ARB_BURN_IN ?? "20")),
+);
 
 const GAS_UNITS_ESTIMATE = 180_000n;
 const SIZE_CAP_BPS = 5000; // 50% of per-round swap limit
 const SIZE_FLOOR_BPS = 500; // 5% — when |z| barely clears Z_ENTER
 
 if (!Number.isFinite(Z_ENTER) || Z_ENTER <= 0) {
-  process.stderr.write(`invalid STAT_ARB_Z_ENTER: ${process.env.STAT_ARB_Z_ENTER}\n`);
+  process.stderr.write(
+    `invalid STAT_ARB_Z_ENTER: ${process.env.STAT_ARB_Z_ENTER}\n`,
+  );
   process.exit(1);
 }
 if (!Number.isFinite(Z_AGGRESSIVE) || Z_AGGRESSIVE <= Z_ENTER) {
-  process.stderr.write(`invalid STAT_ARB_Z_AGGRESSIVE (must be > Z_ENTER): ${process.env.STAT_ARB_Z_AGGRESSIVE}\n`);
+  process.stderr.write(
+    `invalid STAT_ARB_Z_AGGRESSIVE (must be > Z_ENTER): ${process.env.STAT_ARB_Z_AGGRESSIVE}\n`,
+  );
   process.exit(1);
 }
 if (!Number.isFinite(BID_ALPHA) || BID_ALPHA < 0) {
-  process.stderr.write(`invalid STAT_ARB_BID_ALPHA: ${process.env.STAT_ARB_BID_ALPHA}\n`);
+  process.stderr.write(
+    `invalid STAT_ARB_BID_ALPHA: ${process.env.STAT_ARB_BID_ALPHA}\n`,
+  );
   process.exit(1);
 }
 
@@ -77,7 +93,10 @@ function seedFromHistory(history: HistoryPoint[] | undefined): void {
   if (!history || history.length === 0) return;
   for (const point of history) {
     if (seenRounds.has(point.round)) continue;
-    const gap = computeGap(point.poolPriceUsdcPerWeth, point.fairPriceUsdcPerWeth);
+    const gap = computeGap(
+      point.poolPriceUsdcPerWeth,
+      point.fairPriceUsdcPerWeth,
+    );
     if (gap === null) continue;
     stats.update(gap);
     seenRounds.add(point.round);
@@ -90,14 +109,26 @@ function noop(reason: string): string {
 
 const rl = createInterface({ input: process.stdin });
 
+// 観測はネスト形 (protocols.uniswap.pool)。本戦略はトップレベル pool を前提にした
+// フラット形を使うため、パース後に正規化する。uniswap 無効時は裁定できず noop。
+type RawObservation = Observation & {
+  protocols?: { uniswap?: { pool?: { priceUsdcPerWeth: number } } };
+};
+
 rl.on("line", (line) => {
-  let obs: Observation;
+  let raw: RawObservation;
   try {
-    obs = JSON.parse(line) as Observation;
+    raw = JSON.parse(line) as RawObservation;
   } catch (err) {
     process.stdout.write(noop(`parse error: ${(err as Error).message}`));
     return;
   }
+  const uniPool = raw.protocols?.uniswap?.pool;
+  if (!uniPool) {
+    process.stdout.write(noop("uniswap pool unavailable"));
+    return;
+  }
+  const obs: Observation = { ...raw, pool: uniPool };
 
   seedFromHistory(obs.history);
 
@@ -128,12 +159,20 @@ rl.on("line", (line) => {
   }
 
   const tokenIn: "WETH" | "USDC" = gap > 0 ? "USDC" : "WETH";
-  const max = BigInt(tokenIn === "WETH" ? obs.limits.maxWethInWei : obs.limits.maxUsdcInUnits);
+  const max = BigInt(
+    tokenIn === "WETH" ? obs.limits.maxWethInWei : obs.limits.maxUsdcInUnits,
+  );
 
   // Linear ramp: SIZE_FLOOR_BPS at |z| = Z_ENTER, SIZE_CAP_BPS at |z| >= Z_AGGRESSIVE.
   const span = Math.max(0.0001, Z_AGGRESSIVE - Z_ENTER);
   const t = Math.max(0, Math.min(1, (absZ - Z_ENTER) / span));
-  const sizeBps = Math.max(SIZE_FLOOR_BPS, Math.min(SIZE_CAP_BPS, Math.floor(SIZE_FLOOR_BPS + (SIZE_CAP_BPS - SIZE_FLOOR_BPS) * t)));
+  const sizeBps = Math.max(
+    SIZE_FLOOR_BPS,
+    Math.min(
+      SIZE_CAP_BPS,
+      Math.floor(SIZE_FLOOR_BPS + (SIZE_CAP_BPS - SIZE_FLOOR_BPS) * t),
+    ),
+  );
   const amountIn = (max * BigInt(sizeBps)) / 10_000n;
 
   if (amountIn <= 0n) {
@@ -151,12 +190,19 @@ rl.on("line", (line) => {
   const evWei = BigInt(evGwei) * 1_000_000_000n;
 
   const alphaScale = 10_000n;
-  const alphaNum = BigInt(Math.max(0, Math.floor(BID_ALPHA * Number(alphaScale))));
+  const alphaNum = BigInt(
+    Math.max(0, Math.floor(BID_ALPHA * Number(alphaScale))),
+  );
   const bidPerGasWei = (evWei * alphaNum) / alphaScale / GAS_UNITS_ESTIMATE;
 
   const minBid = BigInt(obs.limits.defaultPriorityFeePerGasWei);
   const maxBid = BigInt(obs.limits.maxPriorityFeePerGasWei);
-  const bid = bidPerGasWei < minBid ? minBid : bidPerGasWei > maxBid ? maxBid : bidPerGasWei;
+  const bid =
+    bidPerGasWei < minBid
+      ? minBid
+      : bidPerGasWei > maxBid
+        ? maxBid
+        : bidPerGasWei;
 
   process.stdout.write(
     `${JSON.stringify({
@@ -164,7 +210,7 @@ rl.on("line", (line) => {
       tokenIn,
       amountIn: amountIn.toString(),
       maxPriorityFeePerGasWei: bid.toString(),
-      slippageBps: 75
-    })}\n`
+      slippageBps: 75,
+    })}\n`,
   );
 });

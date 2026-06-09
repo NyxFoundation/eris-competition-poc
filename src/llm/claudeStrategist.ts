@@ -1,8 +1,19 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { AgentObservation } from "../types.js";
 import type { RoundRecord } from "./history.js";
-import { buildInitMessage, buildReviseMessage, SIM_RULES, SYSTEM_PROMPT, type Phase, type ReviseReason } from "./prompts.js";
-import { parseStrategyFromToolInput, type Strategy, type StrategyParseResult } from "./strategy.js";
+import {
+  buildInitMessage,
+  buildReviseMessage,
+  SIM_RULES,
+  SYSTEM_PROMPT,
+  type Phase,
+  type ReviseReason,
+} from "./prompts.js";
+import {
+  parseStrategyFromToolInput,
+  type Strategy,
+  type StrategyParseResult,
+} from "./strategy.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 
@@ -21,7 +32,14 @@ export type StrategyResult =
 
 export interface Strategist {
   init(obs: AgentObservation, version: number): Promise<StrategyResult>;
-  revise(prev: Strategy, history: RoundRecord[], reason: ReviseReason, initialUsd: number, currentUsd: number, version: number): Promise<StrategyResult>;
+  revise(
+    prev: Strategy,
+    history: RoundRecord[],
+    reason: ReviseReason,
+    initialUsd: number,
+    currentUsd: number,
+    version: number,
+  ): Promise<StrategyResult>;
 }
 
 const SET_STRATEGY_TOOL = {
@@ -32,20 +50,41 @@ const SET_STRATEGY_TOOL = {
     properties: {
       notes: {
         type: "string",
-        description: "Markdown rationale: thesis, edge, risks, what would make you revise."
+        description:
+          "Markdown rationale: thesis, edge, risks, what would make you revise.",
       },
       params: {
         type: "object",
-        description: "JSON object of numeric/boolean parameters the executor reads at runtime."
+        description:
+          "JSON object of numeric/boolean parameters the executor reads at runtime.",
       },
       executor_ts: {
         type: "string",
         description:
-          "TypeScript function body (no signature). Receives (obs, params, helpers) and must return an AgentAction. See SIM_RULES for the contract."
-      }
+          "TypeScript function body (no signature). Receives (obs, params, helpers) and must return an AgentAction. See SIM_RULES for the contract.",
+      },
+      change_type: {
+        type: "string",
+        enum: ["params_only", "executor_logic"],
+        description:
+          "Default 'params_only' (the previous executor is kept; only params apply). Use 'executor_logic' ONLY with cited evidence of a concrete failure.",
+      },
+      hypothesis: {
+        type: "string",
+        description: "Expected improvement, grounded in the PnL attribution.",
+      },
+      rollback_condition: {
+        type: "string",
+        description: "Evidence that would mean this change failed.",
+      },
+      why_executor_change: {
+        type: "string",
+        description:
+          "Required only if change_type is 'executor_logic': quote the concrete failure in the round log.",
+      },
     },
-    required: ["notes", "params", "executor_ts"]
-  }
+    required: ["notes", "params", "executor_ts"],
+  },
 };
 
 export class ClaudeStrategist implements Strategist {
@@ -53,7 +92,9 @@ export class ClaudeStrategist implements Strategist {
   private model: string;
 
   constructor(opts: { apiKey?: string; model?: string } = {}) {
-    this.client = new Anthropic({ apiKey: opts.apiKey ?? process.env.ANTHROPIC_API_KEY });
+    this.client = new Anthropic({
+      apiKey: opts.apiKey ?? process.env.ANTHROPIC_API_KEY,
+    });
     this.model = opts.model ?? process.env.ERIS_LLM_MODEL ?? DEFAULT_MODEL;
   }
 
@@ -67,12 +108,22 @@ export class ClaudeStrategist implements Strategist {
     reason: ReviseReason,
     initialUsd: number,
     currentUsd: number,
-    version: number
+    version: number,
   ): Promise<StrategyResult> {
-    return this.call("revise", buildReviseMessage(prev, history, reason, initialUsd, currentUsd), version);
+    return this.call(
+      "revise",
+      buildReviseMessage(prev, history, reason, initialUsd, currentUsd),
+      version,
+      prev,
+    );
   }
 
-  private async call(phase: Phase, userMessage: string, version: number): Promise<StrategyResult> {
+  private async call(
+    phase: Phase,
+    userMessage: string,
+    version: number,
+    prev?: Strategy,
+  ): Promise<StrategyResult> {
     const started = Date.now();
     let meta: ClaudeCallMeta | undefined;
     try {
@@ -81,11 +132,15 @@ export class ClaudeStrategist implements Strategist {
         max_tokens: 8192,
         system: [
           { type: "text", text: SYSTEM_PROMPT },
-          { type: "text", text: SIM_RULES, cache_control: { type: "ephemeral" } }
+          {
+            type: "text",
+            text: SIM_RULES,
+            cache_control: { type: "ephemeral" },
+          },
         ],
         messages: [{ role: "user", content: userMessage }],
         tools: [SET_STRATEGY_TOOL],
-        tool_choice: { type: "tool", name: "set_strategy" }
+        tool_choice: { type: "tool", name: "set_strategy" },
       });
       const latencyMs = Date.now() - started;
       const usage = response.usage as {
@@ -100,20 +155,26 @@ export class ClaudeStrategist implements Strategist {
         inputTokens: usage.input_tokens ?? 0,
         outputTokens: usage.output_tokens ?? 0,
         cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
-        cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0
+        cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
       };
-      const toolBlock = response.content.find((block) => block.type === "tool_use" && block.name === "set_strategy");
+      const toolBlock = response.content.find(
+        (block) => block.type === "tool_use" && block.name === "set_strategy",
+      );
       if (!toolBlock || toolBlock.type !== "tool_use") {
         return { ok: false, reason: "model did not call set_strategy", meta };
       }
-      const parsed: StrategyParseResult = parseStrategyFromToolInput(toolBlock.input, version);
+      const parsed: StrategyParseResult = parseStrategyFromToolInput(
+        toolBlock.input,
+        version,
+        prev,
+      );
       if (!parsed.ok) return { ok: false, reason: parsed.reason, meta };
       return { ok: true, strategy: parsed.strategy, meta };
     } catch (error) {
       return {
         ok: false,
         reason: `claude call failed: ${error instanceof Error ? error.message : String(error)}`,
-        meta
+        meta,
       };
     }
   }
@@ -125,15 +186,37 @@ export class ClaudeStrategist implements Strategist {
  */
 export class MockStrategist implements Strategist {
   async init(_obs: AgentObservation, version: number): Promise<StrategyResult> {
-    return { ok: true, strategy: defaultMockStrategy(version), meta: mockMeta("init") };
+    return {
+      ok: true,
+      strategy: defaultMockStrategy(version),
+      meta: mockMeta("init"),
+    };
   }
-  async revise(_prev: Strategy, _h: RoundRecord[], _r: ReviseReason, _i: number, _c: number, version: number): Promise<StrategyResult> {
-    return { ok: true, strategy: defaultMockStrategy(version), meta: mockMeta("revise") };
+  async revise(
+    _prev: Strategy,
+    _h: RoundRecord[],
+    _r: ReviseReason,
+    _i: number,
+    _c: number,
+    version: number,
+  ): Promise<StrategyResult> {
+    return {
+      ok: true,
+      strategy: defaultMockStrategy(version),
+      meta: mockMeta("revise"),
+    };
   }
 }
 
 function mockMeta(phase: Phase): ClaudeCallMeta {
-  return { phase, latencyMs: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+  return {
+    phase,
+    latencyMs: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadInputTokens: 0,
+    cacheCreationInputTokens: 0,
+  };
 }
 
 function defaultMockStrategy(version: number): Strategy {
@@ -141,6 +224,6 @@ function defaultMockStrategy(version: number): Strategy {
     version,
     notes: "Mock strategy: noop always. Replace with real ANTHROPIC_API_KEY.",
     params: { minGapBps: 15 },
-    executorTs: `return { type: "noop", reason: "mock strategy v${version}" };`
+    executorTs: `return { type: "noop", reason: "mock strategy v${version}" };`,
   };
 }

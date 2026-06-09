@@ -1,0 +1,7 @@
+{
+  "agents": [
+    { "id": "flasharb", "command": "node", "args": ["--import", "tsx", "examples/agents/flash-arb.ts"], "wallet": "AUTO", "description": "flash loan cross-venue arb" },
+    { "id": "crossvenue", "command": "node", "args": ["--import", "tsx", "examples/agents/cross-venue-arb.ts"], "wallet": "AUTO", "description": "wallet cross-venue arb" },
+    { "id": "noop", "command": "node", "args": ["--import", "tsx", "examples/agents/noop.ts"], "wallet": "AUTO", "baseline": true, "description": "noop" }
+  ]
+}

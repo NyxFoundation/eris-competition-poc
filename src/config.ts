@@ -29,6 +29,24 @@ const SUPPORTED_AGENT_WALLETS = [...NAMED_AGENT_WALLETS, "AUTO"] as const;
 export type SimConfig = {
   rpcUrl: string;
   chainId: number;
+  // フォーク元の上流 RPC（ARB_RPC_URL）。設定時は resetFork が anvil_reset を
+  // forking 設定付きで呼び、フォーク状態を毎回クリーンに再構築する（run/seed 間で
+  // Aave 等のポジションが残留する anvil_reset [] の問題を回避）。未設定なら従来の
+  // anvil_reset [] にフォールバック。
+  forkUrl?: string;
+  // 再フォーク先ブロック（FORK_BLOCK_NUMBER）。固定すると再実行が完全再現可能になる。
+  // 未設定なら最初の resetFork で latest を捕捉し、以降のリセットで再利用する。
+  forkBlockNumber?: number;
+  // 清算デモ(GitHub #1)。ERIS_LIQUIDATION_DEMO=1 のとき、coordinator が victim ウォレットに
+  // 過剰レバレッジの Aave ポジションを開かせ、shockRound 以降に Aave WETH オラクルを引き下げて
+  // HF<1 にし、liquidator agent が清算できる状況を作る。既定 off(既存 run/テストは不変)。
+  liquidationDemo: boolean;
+  liquidationShockBps: number; // WETH オラクル引き下げ幅(bps, 既定 1500=15%)
+  liquidationShockRound: number; // 引き下げを始めるラウンド(既定 3)
+  liquidationVictimSupplyWethWei: bigint; // victim が supply する WETH(既定 5)
+  // フラッシュ arb デモ(GitHub #3)。ERIS_FLASH_ARB=1 で coordinator が FlashArb コントラクトを
+  // デプロイし、flash-arb agent が利用できるようにする。uniswap+balancer+aave 有効が前提。既定 off。
+  flashArbDemo: boolean;
   rounds: number;
   roundTimeSeconds: number;
   seed: number;
@@ -81,6 +99,22 @@ export function loadConfig(env = process.env): SimConfig {
   return {
     rpcUrl: env.ANVIL_RPC_URL ?? `http://127.0.0.1:${anvilPort}`,
     chainId: intEnv(env.CHAIN_ID, CHAIN_ID),
+    forkUrl:
+      env.ARB_RPC_URL && env.ARB_RPC_URL.trim() !== ""
+        ? env.ARB_RPC_URL.trim()
+        : undefined,
+    forkBlockNumber:
+      env.FORK_BLOCK_NUMBER && env.FORK_BLOCK_NUMBER.trim() !== ""
+        ? intEnv(env.FORK_BLOCK_NUMBER, 0)
+        : undefined,
+    liquidationDemo: env.ERIS_LIQUIDATION_DEMO === "1",
+    liquidationShockBps: intEnv(env.ERIS_LIQUIDATION_SHOCK_BPS, 1500),
+    liquidationShockRound: intEnv(env.ERIS_LIQUIDATION_SHOCK_ROUND, 3),
+    liquidationVictimSupplyWethWei: bigintEnv(
+      env.ERIS_LIQUIDATION_VICTIM_WETH_WEI,
+      5_000_000_000_000_000_000n,
+    ),
+    flashArbDemo: env.ERIS_FLASH_ARB === "1",
     rounds: intEnv(env.ROUNDS, 50),
     // 1 ラウンドあたりに進める EVM 時間（秒）。Aave 変動金利の累積や GMX funding
     // を現実的なスケールで発生させるためにラウンドループで evm_increaseTime に渡す。

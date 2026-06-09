@@ -192,3 +192,54 @@ test("runExecutor sandbox does not expose process or require", () => {
     assert.equal(result.action.reason, "process=false require=false");
   }
 });
+
+const PREV: Strategy = {
+  version: 1,
+  notes: "prev",
+  params: { gap: 0.001 },
+  executorTs: `return { type: "noop", reason: "prev-executor" };`,
+};
+
+test("parseStrategyFromToolInput: prev あり・change_type 既定(params_only)は prev の executor を保持", () => {
+  const out = parseStrategyFromToolInput(
+    {
+      notes: "tune",
+      params: { gap: 0.002 },
+      executor_ts: `return { type: "swap", tokenIn: "WETH", amountIn: "1" };`,
+    },
+    2,
+    PREV,
+  );
+  assert.equal(out.ok, true);
+  if (out.ok) {
+    assert.equal(out.strategy.executorTs, PREV.executorTs); // モデルの executor は無視
+    assert.deepEqual(out.strategy.params, { gap: 0.002 }); // params は反映
+  }
+});
+
+test("parseStrategyFromToolInput: change_type=executor_logic は新 executor を採用", () => {
+  const newExec = `return { type: "swap", tokenIn: "USDC", amountIn: "1" };`;
+  const out = parseStrategyFromToolInput(
+    { notes: "rewrite", params: {}, executor_ts: newExec, change_type: "executor_logic" },
+    2,
+    PREV,
+  );
+  assert.equal(out.ok, true);
+  if (out.ok) assert.equal(out.strategy.executorTs, newExec);
+});
+
+test("parseStrategyFromToolInput: params_only かつ prev ありなら executor_ts 省略可", () => {
+  const out = parseStrategyFromToolInput({ notes: "tune", params: { gap: 0.003 } }, 2, PREV);
+  assert.equal(out.ok, true);
+  if (out.ok) assert.equal(out.strategy.executorTs, PREV.executorTs);
+});
+
+test("parseStrategyFromToolInput: prev 無し(init)は従来どおり executor_ts 必須", () => {
+  const ok = parseStrategyFromToolInput(
+    { notes: "init", params: {}, executor_ts: `return { type: "noop" };` },
+    1,
+  );
+  assert.equal(ok.ok, true);
+  const missing = parseStrategyFromToolInput({ notes: "init", params: {} }, 1);
+  assert.equal(missing.ok, false);
+});
