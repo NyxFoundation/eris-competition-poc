@@ -1,0 +1,31 @@
+{
+  "agents": [
+    {
+      "id": "lp-provider",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/lp-provider.ts"],
+      "wallet": "AGENT0_PRIVATE_KEY",
+      "description": "比較ベースライン: 通常レンジ LP"
+    },
+    {
+      "id": "noop",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/noop.ts"],
+      "wallet": "AGENT1_PRIVATE_KEY",
+      "description": "比較ベースライン: 何もしない"
+    },
+    {
+      "id": "jit-lp",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/jit-lp.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "JIT_VOL_WINDOW": "16",
+        "JIT_VOL_QUANTILE": "0.7",
+        "JIT_RANGE_TICKS": "2",
+        "JIT_MINT_BUDGET_BPS": "4500"
+      },
+      "description": "JIT-style LP: ボラ高ラウンドだけ narrow-range mint、次ラウンドで remove+collect"
+    }
+  ]
+}

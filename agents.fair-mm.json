@@ -1,0 +1,47 @@
+{
+  "agents": [
+    {
+      "id": "fair-mm",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/fair-mm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "FAIR_MM_RANGE_TICK_MULTIPLIER": "4",
+        "FAIR_MM_MINT_BUDGET_BPS": "3500",
+        "FAIR_MM_REMINT_THRESHOLD_BPS": "50"
+      },
+      "description": "Fair-price-anchored narrow-range LP MM (#10). Centers range on fairPriceUsdcPerWeth, rebalances only when fair drifts past half the range."
+    },
+    {
+      "id": "fair-mm-clone-a",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/fair-mm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "FAIR_MM_RANGE_TICK_MULTIPLIER": "4",
+        "FAIR_MM_MINT_BUDGET_BPS": "3500",
+        "FAIR_MM_REMINT_THRESHOLD_BPS": "50"
+      },
+      "description": "Bertrand-check clone A of fair-mm; identical params on a separate AUTO wallet."
+    },
+    {
+      "id": "fair-mm-clone-b",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/fair-mm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "FAIR_MM_RANGE_TICK_MULTIPLIER": "4",
+        "FAIR_MM_MINT_BUDGET_BPS": "3500",
+        "FAIR_MM_REMINT_THRESHOLD_BPS": "50"
+      },
+      "description": "Bertrand-check clone B of fair-mm; identical params on a separate AUTO wallet."
+    },
+    {
+      "id": "lp-provider-baseline",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/lp-provider.ts"],
+      "wallet": "AUTO",
+      "description": "Baseline LP-provider for same-seed PnL comparison vs fair-mm."
+    }
+  ]
+}
