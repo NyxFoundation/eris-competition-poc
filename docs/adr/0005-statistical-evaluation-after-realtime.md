@@ -137,4 +137,4 @@ Good（unpaired）: 旧版 N run・新版 N run を取り、分布で比較
 - ADR 0003: 競争環境の識別力ハードニング（realtime 化と対の環境側）
 - ADR 0004: 自己改善ループの汎化保証（holdout / regime family と整合）
 - 実時間化プラン: `~/.claude/plans/velvet-hopping-clock.md`（決定論を捨てる方針の出典）
-- 関連コード: `src/multiSeedRun.ts`（反復基盤へ置換）、`src/discrimination.ts`（C1/C2/C3 を再解釈）、`scripts/evaluate.ts` / `scripts/discrimination.ts`（CLI）、`/strategy-evolve`（ゲート差し替え）
+- 関連コード（実装済み）: `src/stats.ts`（unpaired 統計層: bootstrap CI / Welch / Mann-Whitney / 受理ゲート）、`src/multiSeedRun.ts`（`collectReplicationStats` = 反復基盤）、`src/discrimination.ts`（C1 有意性・C2 regime 畳み込み `collapseNetPnlByRegime`・単一 regime の C2 参考値化）、`src/realtime/coordinator.ts`（observation イベント記録 + included/revert 集計 = 評価対応）、`scripts/evaluate.ts` / `scripts/discrimination.ts` / `scripts/gate.ts`（CLI）、`/strategy-evolve`（§6 を unpaired ゲートへ差し替え済み）

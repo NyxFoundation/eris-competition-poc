@@ -7,9 +7,12 @@ eris-competition-poc は Anvil で Arbitrum をフォークする DeFi トレー
 - `npm run anvil` — 別ターミナルで Anvil フォークを起動（sim の前提）
 - `npm run sim` — 1 回シミュレーション（`AGENTS_CONFIG` / `ROUNDS` / `SEED` / `ENABLED_PROTOCOLS` を env で指定）
 - `npm run leaderboard` — sim を回して Sharpe→PnL でランキング（`runs/<id>/leaderboard.md`）
-- `npm run evaluate` — **複数 SEED** で sim を回し agent ごとの集計統計を JSON 出力（過学習ゲート）
-- `npm run discrimination` — 多様な戦略＋ベースラインを多 SEED で回し**識別力**（C1 実力報酬 / C2 順位安定 / C3 Sharpe 非潰れ）を判定（`runs/<id>/discrimination.md` + JSON。ADR 0001 P1）
+- `npm run evaluate` — 同一 config を **regime×N 回の実時間 run で反復**（`REGIMES` / `REPLICATIONS` / `ERIS_RUN_BLOCKS`）し、agent ごとの per-run サンプルと集計統計を JSON 出力（unpaired 統計ゲートのサンプル収集。ADR 0005）
+- `npm run gate` — before/after の evaluate JSON を **unpaired 統計**（bootstrap CI / Welch / Mann-Whitney）で比較し受理判定（`GATE_MODE=improve|noninferior`。strategy-evolve の受理ゲート本体。ADR 0005 §3）
+- `npm run discrimination` — 多様な戦略＋ベースラインを **regime×N 反復**で回し**識別力**（C1 実力報酬（bootstrap CI 有意性つき） / C2 順位安定（regime 間） / C3 Sharpe 非潰れ）を判定（`runs/<id>/discrimination.md` + JSON。ADR 0001 P1 / ADR 0005）
 - `npm run typecheck` / `npm run test` — 型チェック / ユニットテスト
+
+実時間化（ADR 0005）後の評価の前提: **SEED(=regime) は市場条件のラベル**で価格パスは再現可能だが、tx タイミング/着順は非決定 → 同一 regime でも結果はぶれる。だから評価は「同一 SEED の paired 比較」ではなく **N 回反復 + unpaired 統計**（`src/stats.ts` / `src/multiSeedRun.ts`）で行う。run 長は `ERIS_RUN_BLOCKS` 固定で揃える。
 
 ## アーキテクチャ（プロセス分離）
 

@@ -9,6 +9,7 @@
     "sim:realtime": "tsx src/cli/sim-realtime.ts",
     "leaderboard": "tsx scripts/leaderboard.ts",
     "evaluate": "tsx scripts/evaluate.ts",
+    "gate": "tsx scripts/gate.ts",
     "discrimination": "tsx scripts/discrimination.ts",
     "gen:roster": "tsx scripts/genRoster.ts",
     "agent:noop": "tsx examples/agents/noop.ts",

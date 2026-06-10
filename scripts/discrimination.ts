@@ -1,21 +1,27 @@
-// 識別力(discrimination power)判定 CLI（ADR 0001 P1）。
-// 多様な戦略 + ベースライン(noop/random)を多 seed で実走し、3 条件を判定する:
-//   C1 実力報酬 / C2 順位安定 / C3 risk 非潰れ
-// evaluate.ts(過学習ゲート)とは別物: こちらは「環境に識別力があるか」を見る。
+// 識別力(discrimination power)判定 CLI（ADR 0001 P1 / ADR 0005 で反復読み替え）。
+// 多様な戦略 + ベースライン(noop/random)を regime × N 回の実時間反復で実走し、3 条件を判定する:
+//   C1 実力報酬（bootstrap CI 有意性つき） / C2 順位安定（regime 間） / C3 risk 非潰れ
+// evaluate.ts(unpaired ゲートのサンプル収集)とは別物: こちらは「環境に識別力があるか」を見る。
 //
 // リスク調整リターンは information ratio(noop 比の超過リターン Sharpe)を優先する
 // （総リターン Sharpe は共有 ETH ベータに支配され全員潰れるため）。
 //
+// C2 は「市場(regime)が変わっても同じ agent が勝つか」を測る。regime 内の反復は
+// 代表値(median PnL)へ畳んでから順位相関に渡す。単一 regime 構成では C2 は参考値
+// （pass 判定から除外）になる（ADR 0005 §2）。
+//
 // 使い方（要 npm run anvil）:
-//   SEEDS=1,2,3 ROUNDS=128 AGENTS_CONFIG=agents.p1.json npm run discrimination
+//   REGIMES=1,2,3 REPLICATIONS=5 ERIS_RUN_BLOCKS=60 AGENTS_CONFIG=agents.p1.json npm run discrimination
 //
 // 既存 run の再判定(再シミュレーション無し。しきい値や metric を変えて試すとき):
 //   DISC_FROM_RUNS=runs/<dir1>,runs/<dir2>,... npm run discrimination
+//   DISC_FROM_RUNS_REGIMES=1,1,2,2  … 各 dir の regime ラベル(省略時は各 run を独立 regime 扱い)
 //
 // baseline の解決: ロスターの "baseline": true、無ければ env BASELINE_IDS=noop,random。
 // benchmark(超過リターンの基準): env DISC_BENCHMARK_ID、無ければ noop、無ければ最初の baseline。
-// しきい値は env で上書き可（既定は暫定。ADR: しきい値は P1 データを見て確定）:
+// しきい値は env で上書き可（既定は暫定。ADR: しきい値は実測データを見て確定）:
 //   DISC_PNL_MARGIN / DISC_SHARPE_MARGIN / DISC_MIN_BEAT_FRACTION
+//   DISC_C1_CI_LEVEL / DISC_BOOTSTRAP_ITERS
 //   DISC_MIN_SPEARMAN / DISC_MAX_GAP_CV / DISC_MIN_SHARPE_SPREAD
 //
 // 出力: JSON を stdout、人間向け markdown を runs/<latest>/discrimination.md に。
@@ -24,6 +30,7 @@ import { join } from "node:path";
 import { loadAgents } from "../src/config.js";
 import {
   aggregateAgents,
+  collapseNetPnlByRegime,
   computeVerdict,
   DEFAULT_THRESHOLDS,
   type AgentAggregate,
@@ -31,13 +38,15 @@ import {
   type DiscriminationVerdict,
 } from "../src/discrimination.js";
 import {
-  collectMultiSeedStats,
-  parseSeeds,
+  collectReplicationStats,
+  parseRegimes,
   statsFromRunDirs,
 } from "../src/multiSeedRun.js";
 
-process.env.ROUNDS ??= "128";
 process.env.AGENTS_CONFIG ??= "agents.p1.json";
+// 実時間 run の長さはブロック数で固定（ADR 0005 §1）。
+process.env.ERIS_RUN_BLOCKS ??= "60";
+process.env.ERIS_RUN_SECONDS ??= "0";
 
 function numEnv(value: string | undefined, fallback: number): number {
   if (value === undefined || value.trim() === "") return fallback;
@@ -60,6 +69,14 @@ function thresholdsFromEnv(): DiscriminationThresholds {
     minBeatFraction: numEnv(
       process.env.DISC_MIN_BEAT_FRACTION,
       DEFAULT_THRESHOLDS.minBeatFraction,
+    ),
+    c1CiLevel: numEnv(
+      process.env.DISC_C1_CI_LEVEL,
+      DEFAULT_THRESHOLDS.c1CiLevel,
+    ),
+    bootstrapIterations: numEnv(
+      process.env.DISC_BOOTSTRAP_ITERS,
+      DEFAULT_THRESHOLDS.bootstrapIterations,
     ),
     minSpearman: numEnv(
       process.env.DISC_MIN_SPEARMAN,
@@ -102,6 +119,14 @@ function splitEnvList(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
+function intEnv(value: string | undefined, fallback: number): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1)
+    throw new Error(`expected positive integer env value, got ${value}`);
+  return parsed;
+}
+
 async function main(): Promise<void> {
   const configPath = process.env.AGENTS_CONFIG as string;
   const baselineIds = resolveBaselineIds(configPath);
@@ -118,40 +143,69 @@ async function main(): Promise<void> {
   }
 
   const fromRuns = splitEnvList(process.env.DISC_FROM_RUNS);
-  const { byAgent, perSeedRuns } = fromRuns.length
+  const replications = intEnv(process.env.REPLICATIONS, 5);
+  const { byAgent, runs } = fromRuns.length
     ? (console.error(
         `[discrimination] offline: 既存 ${fromRuns.length} run を再判定（benchmark=${benchmarkId ?? "none"}）`,
       ),
-      statsFromRunDirs(fromRuns, benchmarkId))
-    : await collectMultiSeedStats(
-        parseSeeds(process.env.SEEDS, "1,2,3"),
+      statsFromRunDirs(
+        fromRuns,
+        benchmarkId,
+        process.env.DISC_FROM_RUNS_REGIMES
+          ? parseRegimes(process.env.DISC_FROM_RUNS_REGIMES, "")
+          : undefined,
+      ))
+    : await collectReplicationStats(
+        // C2 は複数 regime を必須とする（同一 regime だけ反復すると C2 が
+        // タイミングノイズ耐性に化ける。ADR 0005 §2）。SEEDS は旧名の別名。
+        parseRegimes(process.env.REGIMES ?? process.env.SEEDS, "1,2,3"),
+        replications,
         benchmarkId,
       );
 
-  const seeds = perSeedRuns.map((r) => r.seed);
+  const regimeOf = runs.map((r) => r.regime);
+  const regimes = [...new Set(regimeOf)];
+  if (regimes.length < 2) {
+    console.error(
+      "[discrimination] warning: 単一 regime 構成 → C2 は参考値（pass 判定から除外）。恒久判定は REGIMES を複数指定する。",
+    );
+  }
   const agents = aggregateAgents(byAgent);
+  // C2 用: regime 内の反復を代表値(median PnL)へ畳み、各スロット = 1 regime にする。
+  const rankAgents = aggregateAgents(collapseNetPnlByRegime(byAgent, regimeOf));
   const thresholds = thresholdsFromEnv();
-  const verdict = computeVerdict(agents, baselineIds, thresholds);
+  const verdict = computeVerdict(agents, baselineIds, thresholds, {
+    rankAgents,
+    regimeCount: regimes.length,
+  });
 
-  const md = renderMarkdown(verdict, agents, baselineIds, seeds, configPath);
-  const latest = perSeedRuns.at(-1)?.runDir;
+  const md = renderMarkdown(
+    verdict,
+    agents,
+    baselineIds,
+    runs.length,
+    regimes,
+    configPath,
+  );
+  const latest = runs.at(-1)?.runDir;
   if (latest) {
     const outPath = join(latest, "discrimination.md");
     writeFileSync(outPath, md);
     console.error(`[discrimination] wrote ${outPath}`);
   }
   console.error(
-    `[discrimination] verdict: ${verdict.pass ? "PASS" : "FAIL"} (C1=${ok(verdict.c1.pass)} C2=${ok(verdict.c2.pass)} C3=${ok(verdict.c3.pass)}) metric=${verdict.riskMetric}`,
+    `[discrimination] verdict: ${verdict.pass ? "PASS" : "FAIL"} (C1=${ok(verdict.c1.pass)} C2=${verdict.c2Skipped ? "SKIP" : ok(verdict.c2.pass)} C3=${ok(verdict.c3.pass)}) metric=${verdict.riskMetric}`,
   );
 
   const out = {
-    seeds,
-    rounds: Number(process.env.ROUNDS),
+    regimes,
+    replications,
+    runBlocks: Number(process.env.ERIS_RUN_BLOCKS),
     agentsConfig: configPath,
     benchmarkId: benchmarkId ?? null,
     forkBlock: process.env.FORK_BLOCK_NUMBER ?? null,
     enabledProtocols: process.env.ENABLED_PROTOCOLS ?? null,
-    perSeedRuns,
+    runs,
     verdict,
     agents,
   };
@@ -176,7 +230,8 @@ function renderMarkdown(
   v: DiscriminationVerdict,
   agents: AgentAggregate[],
   baselineIds: Set<string>,
-  seeds: number[],
+  runCount: number,
+  regimes: number[],
   configPath: string,
 ): string {
   const t = v.thresholds;
@@ -184,13 +239,13 @@ function renderMarkdown(
   lines.push(`# 識別力レポート — ${configPath}`);
   lines.push("");
   lines.push(
-    `**判定: ${v.pass ? "✅ PASS" : "❌ FAIL"}**  (seeds=${seeds.join(",")}, rounds=${process.env.ROUNDS})`,
+    `**判定: ${v.pass ? "✅ PASS" : "❌ FAIL"}**  (regimes=${regimes.join(",")}, runs=${runCount}, runBlocks=${process.env.ERIS_RUN_BLOCKS})`,
   );
   lines.push("");
   lines.push(`リスク調整 metric: **${metricLabel(v.riskMetric)}**`);
   lines.push("");
   lines.push(
-    `| 条件 | 結果 |\n|---|---|\n| C1 実力報酬 | ${ok(v.c1.pass)} |\n| C2 順位安定 | ${ok(v.c2.pass)} |\n| C3 risk 非潰れ | ${ok(v.c3.pass)} |`,
+    `| 条件 | 結果 |\n|---|---|\n| C1 実力報酬 | ${ok(v.c1.pass)} |\n| C2 順位安定（regime 間） | ${v.c2Skipped ? "SKIP（単一 regime: 参考値）" : ok(v.c2.pass)} |\n| C3 risk 非潰れ | ${ok(v.c3.pass)} |`,
   );
   lines.push("");
 
@@ -213,29 +268,31 @@ function renderMarkdown(
   lines.push(`## C1 実力報酬 — ${ok(v.c1.pass)}`);
   lines.push("");
   lines.push(
-    `最強 baseline: PnL median=${num(v.c1.bestBaselinePnlMedian)}, ${v.riskMetric} median=${num(v.c1.bestBaselineRiskMedian, 3)} / margin: pnl≥${t.pnlMargin}, risk≥${t.sharpeMargin}, beatFraction≥${t.minBeatFraction}（実測 ${(v.c1.beatFraction * 100).toFixed(0)}%）`,
+    `最強 baseline: PnL median=${num(v.c1.bestBaselinePnlMedian)}, ${v.riskMetric} median=${num(v.c1.bestBaselineRiskMedian, 3)} / margin: pnl≥${t.pnlMargin}, risk≥${t.sharpeMargin}, beatFraction≥${t.minBeatFraction}（実測 ${(v.c1.beatFraction * 100).toFixed(0)}%） / 有意性: 超過の bootstrap CI(${(v.c1.ciLevel * 100).toFixed(0)}%) 下限 > 0 を必須（ADR 0005）`,
   );
   lines.push("");
   lines.push(
-    "| 戦略 | PnL median | PnL gap | Sharpe(total) | IR(excess) | risk gap | baseline 超え |",
+    "| 戦略 | PnL median | PnL gap | PnL CI 下限 | Sharpe(total) | IR(excess) | risk gap | risk CI 下限 | baseline 超え |",
   );
-  lines.push("|---|---:|---:|---:|---:|---:|:---:|");
+  lines.push("|---|---:|---:|---:|---:|---:|---:|---:|:---:|");
   for (const r of v.c1.strategies) {
     lines.push(
-      `| ${r.id} | ${r.pnlMedian.toFixed(2)} | ${r.pnlGap.toFixed(2)} | ${num(r.sharpeMedian, 3)} | ${num(r.infoRatioMedian, 3)} | ${num(r.riskGap, 3)} | ${r.beats ? "✓" : "✗"} |`,
+      `| ${r.id} | ${r.pnlMedian.toFixed(2)} | ${r.pnlGap.toFixed(2)} | ${num(r.pnlCiLow)} | ${num(r.sharpeMedian, 3)} | ${num(r.infoRatioMedian, 3)} | ${num(r.riskGap, 3)} | ${num(r.riskCiLow, 3)} | ${r.beats ? "✓" : "✗"} |`,
     );
   }
   lines.push("");
 
   // C2
-  lines.push(`## C2 順位安定 — ${ok(v.c2.pass)}`);
-  lines.push("");
   lines.push(
-    `平均 Spearman=${num(v.c2.meanSpearman, 3)}（≥${t.minSpearman} で合格） / gap CV=${num(v.c2.gapCv, 3)}（≤${t.maxGapCv} で合格） / seeds=${v.c2.seeds}`,
+    `## C2 順位安定（regime 間） — ${v.c2Skipped ? "SKIP（単一 regime: 参考値）" : ok(v.c2.pass)}`,
   );
   lines.push("");
   lines.push(
-    `seed 別 top-bottom gap: ${v.c2.perSeedTopBottomGap.map((g) => g.toFixed(0)).join(", ")}`,
+    `平均 Spearman=${num(v.c2.meanSpearman, 3)}（≥${t.minSpearman} で合格） / gap CV=${num(v.c2.gapCv, 3)}（≤${t.maxGapCv} で合格） / regimes=${v.c2.regimes}（regime 内反復は median PnL の代表ランクへ畳み済み）`,
+  );
+  lines.push("");
+  lines.push(
+    `regime 別 top-bottom gap: ${v.c2.perRegimeTopBottomGap.map((g) => g.toFixed(0)).join(", ")}`,
   );
   lines.push("");
 

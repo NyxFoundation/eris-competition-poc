@@ -80,10 +80,10 @@
 
 | objective | 最適化対象（primary） | 方向 | paired ガード | 必要メトリクス | evaluate 対応 |
 |---|---|---|---|---|---|
-| `median_netPnl`（既定） | `netPnl.median` | ↑ | netPnl.perSeed | netPnl | ✅ 既存 |
-| `risk_adjusted` | `sharpe.median` | ↑ | netPnl.perSeed（PnL 床） | sharpe, netPnl | ✅ 既存 |
+| `median_netPnl`（既定） | `netPnl.median` | ↑ | netPnl.perRun | netPnl | ✅ 既存 |
+| `risk_adjusted` | `sharpe.median` | ↑ | netPnl.perRun（PnL 床） | sharpe, netPnl | ✅ 既存 |
 | `min_variance` | `netPnl.stdev` | ↓ | netPnl.median（リターン床） | stdev, netPnl | ✅ 既存 |
-| `gas_efficiency` | `netPnl / gasCostEth` | ↑ | netPnl.perSeed | **gasCostEth** | ⚠️ 要追加（summary に有り、evaluate 未集計） |
+| `gas_efficiency` | `netPnl / gasCostEth` | ↑ | netPnl.perRun | **gasCostEth** | ⚠️ 要追加（summary に有り、evaluate 未集計） |
 | `spread_capture`（MM） | maker 実現益/出来高 | ↑ | inventory 偏り | **新規メトリクス** | ❌ 要定義+計装。**flow bot は固定なので、MM を進化対象 agent として別途用意する必要** |
 
 ### evaluate.ts への変更（最小）

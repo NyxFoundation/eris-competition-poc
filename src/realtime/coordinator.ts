@@ -48,6 +48,8 @@ type RealtimeAgentRuntime = {
   process: RealtimeAgentProcess;
   initial: BalanceSnapshot;
   submitted: number;
+  included: number; // ブロックに取り込まれた tx 数（evaluate/discrimination の集計が読む）
+  reverted: number; // うち revert した tx 数
   lastObservation: AgentObservation | null;
   lastBalances: BalanceSnapshot | null;
 };
@@ -111,10 +113,13 @@ export async function runRealtimeSimulation(): Promise<void> {
       ),
       initial: { ethWei: 0n, wethWei: 0n, usdcUnits: 0n },
       submitted: 0,
+      included: 0,
+      reverted: 0,
       lastObservation: null,
       lastBalances: null,
     };
   });
+  const agentById = new Map(agentRuntimes.map((a) => [a.id, a]));
 
   // ---- flow-bot プロセス（realtime）。毎ブロック context を push し market を動かす ----
   const flowProcess = new RealtimeFlowProcess(
@@ -361,6 +366,13 @@ export async function runRealtimeSimulation(): Promise<void> {
         } catch {
           // receipt 取得失敗時は "mined" のまま
         }
+        if (meta.role === "agent") {
+          const runtime = agentById.get(meta.ownerId);
+          if (runtime) {
+            runtime.included++;
+            if (status !== "success") runtime.reverted++;
+          }
+        }
         logger.blockRow({
           round: b,
           blockNumber: BigInt(b),
@@ -491,6 +503,13 @@ export async function runRealtimeSimulation(): Promise<void> {
               enabledIds,
             );
             agent.lastObservation = obs;
+            // per-block 価値系列を events.jsonl に残す（evaluate/discrimination の
+            // Sharpe / information ratio が readPerRoundValues で再構成する。ADR 0005）。
+            logger.event({
+              type: "observation",
+              agentId: agent.id,
+              observation: obs,
+            });
             agent.process.pushObservation(obs);
           }
 
@@ -557,6 +576,8 @@ export async function runRealtimeSimulation(): Promise<void> {
         finalValueUsdc: finalValue,
         netPnlUsdc: finalValue - initialValue,
         submittedTxCount: agent.submitted,
+        includedTxCount: agent.included,
+        revertCount: agent.reverted,
         stderrTail: agent.process.getStderr(),
       });
     }
