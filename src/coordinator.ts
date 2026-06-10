@@ -45,7 +45,7 @@ import { enabledAdapters, setEnabledProtocols } from "./protocols/registry.js";
 import type { FlowKind, FlowWallet, SimContext } from "./protocols/types.js";
 import { updateOracles } from "./protocols/oracles.js";
 import { GMX_MARKETS } from "./constants.js";
-import { FlowProcess } from "./flowProcess.js";
+import { FlowProcess, type FlowOrderWire } from "./flowProcess.js";
 import type { FlowContextWire } from "./flow/logic.js";
 import { readAaveFlowReserves } from "./protocols/aave.js";
 import {
@@ -638,15 +638,14 @@ export async function observationFor(
 
 // orderflow bot プロセスに FlowContext を渡して FlowOrder[] を受け取り、TxIntent に変換する。
 // flow ウォレットの選択と tx 提出は coordinator が所有（bot は注文を決めるだけ）。
-export async function requestFlowIntents(
+// FlowContext を組み立てる（poolPrices / aave reserves / limits）。realtime でも毎ブロック再利用する。
+export async function buildFlowContext(
   ctx: SimContext,
-  flowProcess: FlowProcess,
   enabledIds: ProtocolId[],
   stateById: Map<ProtocolId, unknown>,
   fairPrice: number,
   round: number,
-  timeoutMs: number,
-): Promise<TxIntent[]> {
+): Promise<FlowContextWire> {
   const poolPrices: Partial<Record<"uniswap" | "balancer" | "curve", number>> =
     {};
   for (const id of ["uniswap", "balancer", "curve"] as const) {
@@ -667,7 +666,7 @@ export async function requestFlowIntents(
     };
   }
 
-  const context: FlowContextWire = {
+  return {
     round,
     fairPriceUsdcPerWeth: fairPrice,
     protocols: enabledIds,
@@ -684,8 +683,13 @@ export async function requestFlowIntents(
       defaultPriorityFeeWei: ctx.config.defaultPriorityFeeWei.toString(),
     },
   };
+}
 
-  const orders = await flowProcess.requestOrders(context, timeoutMs);
+// bot が返した FlowOrder[] を flow ウォレット紐付けの TxIntent[] に変換する。
+export function flowOrdersToIntents(
+  ctx: SimContext,
+  orders: FlowOrderWire[],
+): TxIntent[] {
   const intents: TxIntent[] = [];
   for (const order of orders) {
     const wallet = ctx.flowWallet(order.protocol, order.kind);
@@ -700,6 +704,28 @@ export async function requestFlowIntents(
     });
   }
   return intents;
+}
+
+// orderflow bot プロセスに FlowContext を渡して FlowOrder[] を受け取り、TxIntent に変換する。
+// flow ウォレットの選択と tx 提出は coordinator が所有（bot は注文を決めるだけ）。
+export async function requestFlowIntents(
+  ctx: SimContext,
+  flowProcess: FlowProcess,
+  enabledIds: ProtocolId[],
+  stateById: Map<ProtocolId, unknown>,
+  fairPrice: number,
+  round: number,
+  timeoutMs: number,
+): Promise<TxIntent[]> {
+  const context = await buildFlowContext(
+    ctx,
+    enabledIds,
+    stateById,
+    fairPrice,
+    round,
+  );
+  const orders = await flowProcess.requestOrders(context, timeoutMs);
+  return flowOrdersToIntents(ctx, orders);
 }
 
 export async function submitIntent(

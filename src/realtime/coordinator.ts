@@ -27,12 +27,16 @@ import { enabledAdapters, setEnabledProtocols } from "../protocols/registry.js";
 import type { FlowKind, FlowWallet, SimContext } from "../protocols/types.js";
 import { GMX_MARKETS } from "../constants.js";
 import {
+  buildFlowContext,
+  flowOrdersToIntents,
   initialFairPrice,
   observationFor,
   submitIntent,
   submitRawTxIntent,
 } from "../coordinator.js";
+import type { FlowOrderWire } from "../flowProcess.js";
 import { RealtimeAgentProcess } from "./agentProcess.js";
+import { RealtimeFlowProcess } from "./flowProcess.js";
 
 const GAS_ONLY_WEI = 2_000_000_000_000_000_000_000_000n; // 2,000,000 ETH（admin/keeper のガス）
 
@@ -111,7 +115,15 @@ export async function runRealtimeSimulation(): Promise<void> {
     };
   });
 
-  // ---- flow ウォレット（submitIntent / ctx が要求するため作るが、bot は未接続）----
+  // ---- flow-bot プロセス（realtime）。毎ブロック context を push し market を動かす ----
+  const flowProcess = new RealtimeFlowProcess(
+    config.flowBotCommand,
+    config.flowBotArgs,
+    config.flowSeed,
+    logger.runDir,
+  );
+
+  // ---- flow ウォレット（protocol/kind ごと。submitIntent / ctx が選択に使う）----
   const flowWalletMap = new Map<string, FlowWallet>();
   for (const id of enabledIds) {
     for (const kind of ["informed", "uninformed"] as FlowKind[]) {
@@ -294,6 +306,41 @@ export async function runRealtimeSimulation(): Promise<void> {
       agent.process.onAction((action) => void handleAgentAction(agent, action));
     }
 
+    // ---- flow order ハンドラ：bot の注文を flow ウォレットで mempool へ relay ----
+    const handleFlowOrders = async (orders: FlowOrderWire[]): Promise<void> => {
+      const intents = flowOrdersToIntents(ctx, orders);
+      for (const intent of intents) {
+        try {
+          const hashes = await submitIntent(ctx, intent, latestStateById);
+          for (const hash of hashes) {
+            submittedByHash.set(hash.toLowerCase(), {
+              ownerId: intent.ownerId,
+              role: intent.role,
+              priorityFeeWei: intent.priorityFeeWei,
+              actionType: intent.action.type,
+            });
+            logger.event({
+              type: "tx_submitted",
+              hash,
+              ownerId: intent.ownerId,
+              role: intent.role,
+              priorityFeeWei: intent.priorityFeeWei,
+              actionType: intent.action.type,
+              protocol: intent.protocol,
+            });
+          }
+        } catch (error) {
+          logger.event({
+            type: "tx_submit_failed",
+            ownerId: intent.ownerId,
+            actionType: intent.action.type,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    };
+    flowProcess.onOrders((orders) => void handleFlowOrders(orders));
+
     // ---- mined block の tx を blocks.csv へ（txIndex は実ブロック内位置）----
     const logBlock = async (b: number): Promise<void> => {
       const block = await publicClient.getBlock({
@@ -402,6 +449,18 @@ export async function runRealtimeSimulation(): Promise<void> {
             agent.process.pushObservation(obs);
           }
 
+          // flow-bot に context を push（market を動かして arb 機会を作る）
+          if (flowProcess.isAlive()) {
+            const flowContext = await buildFlowContext(
+              ctx,
+              enabledIds,
+              latestStateById,
+              latestFairPrice,
+              bn,
+            );
+            flowProcess.pushContext(flowContext);
+          }
+
           processedBlocks++;
           if (config.runBlocks > 0 && processedBlocks >= config.runBlocks)
             finish();
@@ -476,5 +535,6 @@ export async function runRealtimeSimulation(): Promise<void> {
       // teardown 中のエラーは無視
     }
     for (const agent of agentRuntimes) agent.process.close();
+    flowProcess.close();
   }
 }
