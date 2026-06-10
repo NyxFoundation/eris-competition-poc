@@ -51,7 +51,12 @@ export interface SimContext {
   // 競争ブロックで作成された GMX 注文キー（keeper ブロックで実行）
   pendingGmxOrders: Hex[];
   // GMX mock オラクル更新（gmx.setupGlobal が設定。oracles.updateOracles から呼ぶ）
-  updateGmxOracle?: (ctx: SimContext, fairPrice: number) => Promise<void>;
+  // opts.noMine=true で realtime 用に mine せず mempool submit（priorityFeeWei で入札）。
+  updateGmxOracle?: (
+    ctx: SimContext,
+    fairPrice: number,
+    opts?: { noMine?: boolean; priorityFeeWei?: bigint },
+  ) => Promise<void>;
   // protocol/kind ごとの flow ウォレット
   flowWallet(protocol: ProtocolId, kind: FlowKind): FlowWallet;
 }

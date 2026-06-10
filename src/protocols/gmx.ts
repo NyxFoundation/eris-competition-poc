@@ -19,6 +19,7 @@ import {
   mine,
   sendAndMine,
   sendAsImpersonated,
+  sendNoMine,
 } from "../chain.js";
 import type {
   AgentObservation,
@@ -791,8 +792,19 @@ export const gmxAdapter: ProtocolAdapter = {
 
     ctx.gmx.mockProvider = mock;
     ctx.oracle.gmxProvider = mock;
-    ctx.updateGmxOracle = async (c, fairPrice) => {
-      await sendAndMine(c.publicClient, c.walletClient, c.chain, c.adminPk, {
+    ctx.updateGmxOracle = async (c, fairPrice, opts) => {
+      const send = (tx: { to: Address; data: Hex }): Promise<unknown> =>
+        opts?.noMine
+          ? sendNoMine(
+              c.publicClient,
+              c.walletClient,
+              c.chain,
+              c.adminPk,
+              tx,
+              opts.priorityFeeWei ?? 1_000_000_000n,
+            )
+          : sendAndMine(c.publicClient, c.walletClient, c.chain, c.adminPk, tx);
+      await send({
         to: mock,
         data: encodeFunctionData({
           abi: mockOracleProviderAbi,
@@ -804,7 +816,7 @@ export const gmxAdapter: ProtocolAdapter = {
           ],
         }),
       });
-      await sendAndMine(c.publicClient, c.walletClient, c.chain, c.adminPk, {
+      await send({
         to: mock,
         data: encodeFunctionData({
           abi: mockOracleProviderAbi,

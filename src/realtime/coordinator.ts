@@ -25,6 +25,7 @@ import type {
 } from "../types.js";
 import { enabledAdapters, setEnabledProtocols } from "../protocols/registry.js";
 import type { FlowKind, FlowWallet, SimContext } from "../protocols/types.js";
+import { updateOraclesMempool } from "../protocols/oracles.js";
 import { GMX_MARKETS } from "../constants.js";
 import {
   buildFlowContext,
@@ -53,7 +54,7 @@ type RealtimeAgentRuntime = {
 
 type SubmittedMeta = {
   ownerId: string;
-  role: WalletRole;
+  role: WalletRole | "system";
   priorityFeeWei: bigint;
   actionType: string;
 };
@@ -375,6 +376,9 @@ export async function runRealtimeSimulation(): Promise<void> {
       }
     };
 
+    // oracle 更新の fee は agent 上限超にして --order fees で txIndex 0 付近に置く。
+    const oracleFee = config.maxPriorityFeeWei + 1_000_000_000n;
+
     // ---- 競争フェーズ開始：実 N 秒ごとの interval mining へ ----
     await setIntervalMining(publicClient, config.blockTimeSec);
     logger.event({
@@ -411,6 +415,28 @@ export async function runRealtimeSimulation(): Promise<void> {
 
           // 市場を1ステップ進めて state を読み直し、observation を全 agent へ push
           latestFairPrice = nextFairPrice(latestFairPrice, rng);
+
+          // oracle を mempool 更新（aave/gmx。uniswap-only では no-op）。次ブロックに fee 先頭で載る。
+          try {
+            const oracleHashes = await updateOraclesMempool(
+              ctx,
+              latestFairPrice,
+              oracleFee,
+            );
+            for (const hash of oracleHashes) {
+              submittedByHash.set(hash.toLowerCase(), {
+                ownerId: "oracle",
+                role: "system",
+                priorityFeeWei: oracleFee,
+                actionType: "oracleUpdate",
+              });
+            }
+          } catch (error) {
+            logger.event({
+              type: "oracle_update_failed",
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
           const stateById = new Map<ProtocolId, unknown>();
           for (const adapter of adapters)
             stateById.set(

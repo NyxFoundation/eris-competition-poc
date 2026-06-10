@@ -330,6 +330,31 @@ export async function sendAndMine(
   return hash;
 }
 
+// 実時間モード用：tx を mempool に投げるだけ（mine しない・receipt も待たない）。
+// priorityFee を指定でき、interval mining 下で次ブロックに --order fees で取り込ませる。
+// oracle 更新を agent より前(txIndex 0)に置きたいので、呼び側で agent 上限超の fee を渡す。
+export async function sendNoMine(
+  publicClient: PublicClient,
+  walletClient: WalletClient,
+  chain: ReturnType<typeof makeChain>,
+  privateKey: Hex,
+  tx: { to: Address; data?: Hex; value?: bigint },
+  priorityFeeWei: bigint,
+): Promise<Hex> {
+  const account = privateKeyToAccount(privateKey);
+  const block = await publicClient.getBlock();
+  const baseFee = block.baseFeePerGas ?? 0n;
+  return walletClient.sendTransaction({
+    account,
+    chain,
+    to: tx.to,
+    data: tx.data,
+    value: tx.value ?? 0n,
+    maxFeePerGas: baseFee + priorityFeeWei,
+    maxPriorityFeePerGas: priorityFeeWei,
+  });
+}
+
 // impersonated アドレスから送信（role-admin / acl-admin など）
 export async function sendAsImpersonated(
   publicClient: PublicClient,
