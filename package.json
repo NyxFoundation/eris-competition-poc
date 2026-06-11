@@ -19,6 +19,7 @@
     "agent:lp-provider": "tsx examples/agents/lp-provider.ts",
     "flow:market-maker": "tsx examples/flow/market-maker.ts",
     "check:ordering": "tsx src/cli/checkOrdering.ts",
+    "check:strategy": "tsx scripts/checkStrategyCode.ts",
     "build:contracts": "forge build",
     "presim": "forge build",
     "typecheck": "tsc --noEmit",

@@ -6,10 +6,40 @@ import { safeStringify } from "../logger.js";
 
 export type AgentActionHandler = (action: AgentAction) => void;
 
+// direct モード（ADR 0006 §2）で agent 子プロセスへ渡す資格情報・接続先。
+export type DirectAccess = {
+  privateKey: string;
+  priceFeedAddress: string;
+  runId: string;
+};
+
+const DIRECT_SHIM_URL = new URL(
+  "../../examples/agents/lib/directShim.ts",
+  import.meta.url,
+).href;
+
+// node + tsx で動く戦略の args に互換シム（directShim.ts）の --import を注入する。
+// シムは戦略モジュールより先に評価され、stdin/stdout を「チェーン読み書き」へ差し替える。
+// tsx ローダ未使用のコマンドは注入せずそのまま起動する（agent が自前で direct モードを
+// 実装している前提。env は渡る）。
+function injectDirectShim(command: string, args: string[]): string[] {
+  if (command !== "node" || !args.includes("tsx")) return args;
+  const scriptIdx = args.findIndex((a) => /\.(ts|js|mjs|cjs)$/.test(a));
+  if (scriptIdx < 0) return args;
+  return [
+    ...args.slice(0, scriptIdx),
+    "--import",
+    DIRECT_SHIM_URL,
+    ...args.slice(scriptIdx),
+  ];
+}
+
 // 実時間モードの agent プロセス。同期 request→response の `AgentProcess` と違い、
 // - coordinator → 子: 新ブロック毎に observation を push（応答は待たない）
 // - 子 → coordinator: stdout の各行を「独立した行動」として逐次ハンドラへ渡す（即 mempool relay 用）
 // FIFO の pending resolver は持たない。死活監視は `alive` で行い、落ちたら無視する。
+// direct モード（ADR 0006）では push/relay は使わず、子が自分でチェーンを読み書きする
+// （observation 再構成と直接送信は互換シム directShim.ts が担う）。
 export class RealtimeAgentProcess {
   private child: ChildProcessWithoutNullStreams;
   private stderr = "";
@@ -21,6 +51,7 @@ export class RealtimeAgentProcess {
     rpcUrl: string,
     agentAddress: string,
     runDir: string,
+    direct?: DirectAccess,
   ) {
     const childEnv: NodeJS.ProcessEnv = { ...process.env };
     // 親 Claude Code セッションのマーカーを除去（ネスト検出でハングするのを防ぐ。AgentProcess と同様）。
@@ -41,8 +72,16 @@ export class RealtimeAgentProcess {
     childEnv.ERIS_RUN_DIR = runDir;
     // 実時間モードであることを子に伝える（自前ループの agent が分岐できるように）。
     childEnv.ERIS_REALTIME = "1";
+    let args = spec.args ?? [];
+    if (direct) {
+      childEnv.ERIS_AGENT_DIRECT_TX = "1";
+      childEnv.ERIS_AGENT_PRIVATE_KEY = direct.privateKey;
+      childEnv.ERIS_PRICE_FEED_ADDRESS = direct.priceFeedAddress;
+      childEnv.ERIS_RUN_ID = direct.runId;
+      args = injectDirectShim(spec.command, args);
+    }
 
-    this.child = spawn(spec.command, spec.args ?? [], {
+    this.child = spawn(spec.command, args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: childEnv,
     });

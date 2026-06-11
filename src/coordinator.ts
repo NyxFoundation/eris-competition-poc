@@ -25,7 +25,6 @@ import {
   mine,
   resetFork,
   sendAndMine,
-  setActiveStables,
   setEthBalance,
   snapshotForLog,
 } from "./chain.js";
@@ -41,7 +40,7 @@ import type {
   TxIntent,
   WalletRole,
 } from "./types.js";
-import { enabledAdapters, setEnabledProtocols } from "./protocols/registry.js";
+import { enabledAdapters, initProtocols } from "./protocols/registry.js";
 import type { FlowKind, FlowWallet, SimContext } from "./protocols/types.js";
 import { updateOracles } from "./protocols/oracles.js";
 import { GMX_MARKETS } from "./constants.js";
@@ -94,13 +93,9 @@ const GAS_ONLY_WEI = 2_000_000_000_000_000_000_000_000n; // 2,000,000 ETH（admi
 
 export async function runSimulation(): Promise<void> {
   const config = loadConfig();
-  setEnabledProtocols(config.enabledProtocols);
-  const adapters = enabledAdapters();
+  // 有効 protocol の設定 + stable 統一会計の登録（registry.initProtocols に集約）
+  const adapters = initProtocols(config.enabledProtocols);
   const enabledIds = adapters.map((a) => a.id);
-  // stable 統一会計: 有効 adapter が使う stable を残高合算対象に登録
-  setActiveStables(
-    adapters.map((a) => a.stableToken).filter((t): t is Address => Boolean(t)),
-  );
 
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   const logger = new RunLogger(config.runDirRoot, runId);

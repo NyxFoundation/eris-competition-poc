@@ -54,6 +54,10 @@ export type SimConfig = {
   blockTimeSec: number;
   runSeconds: number;
   runBlocks: number;
+  // 環境とエージェント実行の分離（ADR 0006）。true なら agent は秘密鍵を受け取り
+  // チェーンを直接読み書きする（観測 push / 代理提出なし）。既定 on。
+  // ERIS_AGENT_DIRECT_TX=0 で旧 relay 方式へロールバック（run 単位で全 agent 一律）。
+  agentDirectTx: boolean;
   seed: number;
   runDirRoot: string;
   agentTimeoutMs: number;
@@ -128,6 +132,7 @@ export function loadConfig(env = process.env): SimConfig {
     blockTimeSec: intEnv(env.ERIS_BLOCK_TIME_SEC, 2),
     runSeconds: intEnv(env.ERIS_RUN_SECONDS, 20),
     runBlocks: intEnv(env.ERIS_RUN_BLOCKS, 0),
+    agentDirectTx: env.ERIS_AGENT_DIRECT_TX !== "0",
     seed: intEnv(env.SEED, 1),
     runDirRoot: env.REPORT_DIR ?? "./runs",
     agentTimeoutMs: intEnv(env.AGENT_TIMEOUT_MS, 5000),

@@ -26,6 +26,7 @@ type EvalJson = {
   regimes?: number[];
   replications?: number;
   runBlocks?: number;
+  granularityBlocks?: number;
   agentsConfig?: string;
   forkBlock?: string | null;
   agents: AgentAggregate[];
@@ -67,6 +68,16 @@ function main(): void {
 
   const before = loadEval(beforePath);
   const after = loadEval(afterPath);
+
+  // 価値系列の粒度不一致は warning ではなく拒否（ADR 0006 §4。Sharpe/IR のスケールが変わり
+  // 統計比較が成立しないため）。粒度未記載の旧 JSON は per-block(1) とみなす。
+  const granBefore = before.granularityBlocks ?? 1;
+  const granAfter = after.granularityBlocks ?? 1;
+  if (granBefore !== granAfter) {
+    throw new Error(
+      `価値系列の粒度が不一致です（before=${granBefore} / after=${granAfter} blocks）。同一粒度で evaluate し直してください。`,
+    );
+  }
 
   // 比較条件の整合チェック（市場条件が違う before/after は比較不能）
   const conditionKeys = [

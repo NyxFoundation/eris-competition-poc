@@ -3,27 +3,29 @@ import { loadAgents, loadConfig, privateKeyForWalletName } from "../config.js";
 import { validateAction } from "../action.js";
 import {
   accountAddress,
+  activeStables,
   fundWallet,
   getBalances,
   makeClients,
   resetFork,
   sendAndMine,
-  setActiveStables,
   setEthBalance,
   setIntervalMining,
 } from "../chain.js";
 import { RunLogger } from "../logger.js";
 import { valueUsdc } from "../pnl.js";
+import { checkRunFeeViolations } from "../postRunCheck.js";
 import { nextFairPrice, Rng } from "../rng.js";
 import type {
   AgentAction,
   AgentObservation,
+  AgentSpec,
   BalanceSnapshot,
   ProtocolId,
   TxIntent,
   WalletRole,
 } from "../types.js";
-import { enabledAdapters, setEnabledProtocols } from "../protocols/registry.js";
+import { initProtocols } from "../protocols/registry.js";
 import type { FlowKind, FlowWallet, SimContext } from "../protocols/types.js";
 import { updateOraclesMempool } from "../protocols/oracles.js";
 import { GMX_MARKETS } from "../constants.js";
@@ -38,16 +40,24 @@ import {
 import type { FlowOrderWire } from "../flowProcess.js";
 import { RealtimeAgentProcess } from "./agentProcess.js";
 import { RealtimeFlowProcess } from "./flowProcess.js";
+import { deployPriceFeed, updatePriceFeedMempool } from "./priceFeed.js";
+import { reconstructValueSeries } from "./reconstruct.js";
 
 const GAS_ONLY_WEI = 2_000_000_000_000_000_000_000_000n; // 2,000,000 ETH（admin/keeper のガス）
 
+// flowWalletMap のキー（`${protocol}:${kind}`）から WalletRole を引く。
+function flowRole(key: string): WalletRole {
+  return key.endsWith(":informed") ? "informed-flow" : "uninformed-flow";
+}
+
 type RealtimeAgentRuntime = {
   id: string;
+  spec: AgentSpec;
   privateKey: Hex;
   address: Address;
-  process: RealtimeAgentProcess;
+  process: RealtimeAgentProcess | null; // setup 完了後に spawn する
   initial: BalanceSnapshot;
-  submitted: number;
+  submitted: number; // relay モードのみ計数（direct では agent が自己申告ログに残す）
   included: number; // ブロックに取り込まれた tx 数（evaluate/discrimination の集計が読む）
   reverted: number; // うち revert した tx 数
   lastObservation: AgentObservation | null;
@@ -61,20 +71,18 @@ type SubmittedMeta = {
   actionType: string;
 };
 
-// 実時間モードのオーケストレータ。
-// setup（fork/資金/approve）は no-mining + sendAndMine で高速フラッシュ → 競争フェーズ開始時に
-// setIntervalMining(blockTimeSec) で実 N 秒ごとの自動 mine へ切り替える。以後は newHeads を購読し、
-// ブロック毎に observation を全 agent へ push、agent から非同期に届く action を即 mempool へ relay する
-// （--order fees が次ブロックで fee 降順整列）。決定論は持たない。
-// 注: 薄い縦切りのため uniswap-only 前提（oracle 更新を伴う aave/gmx は Phase 2 で対応）。flow bot は未接続。
+// 実時間モードのオーケストレータ（ADR 0006 で「環境デーモン + 採点者」へ縮小）。
+//
+// 環境はチェーンへの書き込みだけで世界を動かす:
+//   anvil ライフサイクル / fair price 生成 → PriceFeed・oracle 更新 tx / flow 注文 / GMX keeper。
+// agent はチェーンの読み書きだけで知覚・行動する（direct モード = 既定。ERIS_AGENT_DIRECT_TX=0 で
+// 旧 relay 方式へロールバック）。ブロック内順序は anvil --order fees が fee 降順で決める。
+// 採点（per-agent 価値系列）は run 終了直後に歴史ブロック読取で一括再構成する（§4）。
 export async function runRealtimeSimulation(): Promise<void> {
   const config = loadConfig();
-  setEnabledProtocols(config.enabledProtocols);
-  const adapters = enabledAdapters();
+  const adapters = initProtocols(config.enabledProtocols);
   const enabledIds = adapters.map((a) => a.id);
-  setActiveStables(
-    adapters.map((a) => a.stableToken).filter((t): t is Address => Boolean(t)),
-  );
+  const directTx = config.agentDirectTx;
 
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   const logger = new RunLogger(config.runDirRoot, runId);
@@ -85,6 +93,7 @@ export async function runRealtimeSimulation(): Promise<void> {
     blockTimeSec: config.blockTimeSec,
     runSeconds: config.runSeconds,
     runBlocks: config.runBlocks,
+    agentDirectTx: directTx,
   });
 
   const { chain, publicClient, walletClient } = makeClients(
@@ -96,21 +105,16 @@ export async function runRealtimeSimulation(): Promise<void> {
     forkBlockNumber: config.forkBlockNumber,
   });
 
-  // ---- agent プロセス（realtime）----
+  // ---- agent ウォレット（プロセスは setup 完了後に起動する）----
   const agentSpecs = loadAgents(config.agentsConfigPath);
   const agentRuntimes: RealtimeAgentRuntime[] = agentSpecs.map((spec) => {
     const privateKey = privateKeyForWalletName(config, spec.wallet, spec.id);
-    const address = accountAddress(privateKey);
     return {
       id: spec.id,
+      spec,
       privateKey,
-      address,
-      process: new RealtimeAgentProcess(
-        spec,
-        config.rpcUrl,
-        address,
-        logger.runDir,
-      ),
+      address: accountAddress(privateKey),
+      process: null,
       initial: { ethWei: 0n, wethWei: 0n, usdcUnits: 0n },
       submitted: 0,
       included: 0,
@@ -122,6 +126,7 @@ export async function runRealtimeSimulation(): Promise<void> {
   const agentById = new Map(agentRuntimes.map((a) => [a.id, a]));
 
   // ---- flow-bot プロセス（realtime）。毎ブロック context を push し market を動かす ----
+  // flow は環境側の市場機構なので relay のまま（ADR 0006「決めていないこと」）。
   const flowProcess = new RealtimeFlowProcess(
     config.flowBotCommand,
     config.flowBotArgs,
@@ -164,9 +169,35 @@ export async function runRealtimeSimulation(): Promise<void> {
     },
   };
 
-  // 提出した tx の hash → メタ（block ログで owner/fee を引くため）
+  // tx の帰属は from アドレス引きが基本（ADR 0006 §4。direct 送信でも blocks.csv を維持）。
+  // submittedByHash は環境/relay が自分で提出した tx の actionType・fee の補足にのみ使う。
+  const ownerByAddress = new Map<
+    string,
+    { ownerId: string; role: WalletRole | "system" }
+  >();
+  for (const agent of agentRuntimes) {
+    ownerByAddress.set(agent.address.toLowerCase(), {
+      ownerId: agent.id,
+      role: "agent",
+    });
+  }
+  for (const [key, wallet] of flowWalletMap) {
+    ownerByAddress.set(wallet.address.toLowerCase(), {
+      ownerId: wallet.id,
+      role: flowRole(key),
+    });
+  }
+  ownerByAddress.set(accountAddress(adminPk).toLowerCase(), {
+    ownerId: "oracle",
+    role: "system",
+  });
+  ownerByAddress.set(accountAddress(keeperPk).toLowerCase(), {
+    ownerId: "keeper",
+    role: "system",
+  });
   const submittedByHash = new Map<string, SubmittedMeta>();
-  // 実時間の共有最新状態（非同期 action ハンドラが参照する）
+
+  // 実時間の共有最新状態（relay の非同期 action ハンドラと flow context が参照する）
   let latestStateById = new Map<ProtocolId, unknown>();
   let latestFairPrice = 0;
   const latestHistory: AgentObservation["history"] = [];
@@ -184,9 +215,7 @@ export async function runRealtimeSimulation(): Promise<void> {
         privateKey: a.privateKey,
       })),
       ...[...flowWalletMap.entries()].map(([key, w]) => ({
-        role: (key.endsWith("informed") && !key.endsWith("uninformed")
-          ? "informed-flow"
-          : "uninformed-flow") as WalletRole,
+        role: flowRole(key),
         privateKey: w.privateKey,
       })),
     ];
@@ -221,7 +250,24 @@ export async function runRealtimeSimulation(): Promise<void> {
       agent.initial = await getBalances(publicClient, agent.address);
     }
 
-    // ---- 非同期 action ハンドラ：届いた action を即 mempool へ relay ----
+    // ---- fair price のオンチェーン配布経路（ADR 0006 §3）。常設し毎ブロック書き込む ----
+    const priceFeedAddress = await deployPriceFeed(ctx, latestFairPrice);
+    logger.event({ type: "price_feed_deployed", address: priceFeedAddress });
+
+    // ---- agent プロセス起動（direct: 秘密鍵 + 互換シム注入 / relay: 従来どおり）----
+    for (const agent of agentRuntimes) {
+      agent.process = new RealtimeAgentProcess(
+        agent.spec,
+        config.rpcUrl,
+        agent.address,
+        logger.runDir,
+        directTx
+          ? { privateKey: agent.privateKey, priceFeedAddress, runId }
+          : undefined,
+      );
+    }
+
+    // ---- 非同期 action ハンドラ（relay モードのみ）：届いた action を即 mempool へ relay ----
     const handleAgentAction = async (
       agent: RealtimeAgentRuntime,
       action: AgentAction,
@@ -308,8 +354,12 @@ export async function runRealtimeSimulation(): Promise<void> {
         }
       }
     };
-    for (const agent of agentRuntimes) {
-      agent.process.onAction((action) => void handleAgentAction(agent, action));
+    if (!directTx) {
+      for (const agent of agentRuntimes) {
+        agent.process?.onAction(
+          (action) => void handleAgentAction(agent, action),
+        );
+      }
     }
 
     // ---- flow order ハンドラ：bot の注文を flow ウォレットで mempool へ relay ----
@@ -347,16 +397,19 @@ export async function runRealtimeSimulation(): Promise<void> {
     };
     flowProcess.onOrders((orders) => void handleFlowOrders(orders));
 
-    // ---- mined block の tx を blocks.csv へ（txIndex は実ブロック内位置）----
+    // ---- mined block の tx を blocks.csv へ（帰属は from アドレス引き。ADR 0006 §4）----
     const logBlock = async (b: number): Promise<void> => {
       const block = await publicClient.getBlock({
         blockNumber: BigInt(b),
         includeTransactions: true,
       });
+      // 注: eth_getBlockReceipts での一括取得は anvil の Arbitrum フォークで
+      // "Failed to decode receipt" になるため使えない（per-tx 取得が確実）。
       for (const tx of block.transactions) {
         if (typeof tx === "string") continue;
         const meta = submittedByHash.get(tx.hash.toLowerCase());
-        if (!meta) continue;
+        const owner = meta ?? ownerByAddress.get(tx.from.toLowerCase());
+        if (!owner) continue; // run 外の tx（想定外の外部送信者）
         let status = "mined";
         try {
           const receipt = await publicClient.getTransactionReceipt({
@@ -366,8 +419,8 @@ export async function runRealtimeSimulation(): Promise<void> {
         } catch {
           // receipt 取得失敗時は "mined" のまま
         }
-        if (meta.role === "agent") {
-          const runtime = agentById.get(meta.ownerId);
+        if (owner.role === "agent") {
+          const runtime = agentById.get(owner.ownerId);
           if (runtime) {
             runtime.included++;
             if (status !== "success") runtime.reverted++;
@@ -379,16 +432,18 @@ export async function runRealtimeSimulation(): Promise<void> {
           txIndex: tx.transactionIndex,
           hash: tx.hash,
           from: tx.from,
-          priorityFeeWei: meta.priorityFeeWei,
+          // fee はチェーン上の tx フィールドが正（事後検査の根拠。自己申告に依らない）
+          priorityFeeWei: tx.maxPriorityFeePerGas ?? meta?.priorityFeeWei ?? 0n,
           status,
-          ownerId: meta.ownerId,
-          role: meta.role,
-          actionType: meta.actionType,
+          ownerId: owner.ownerId,
+          role: owner.role,
+          actionType:
+            meta?.actionType ?? (owner.role === "agent" ? "direct" : ""),
         });
       }
     };
 
-    // oracle 更新の fee は agent 上限超にして --order fees で txIndex 0 付近に置く。
+    // oracle/PriceFeed 更新の fee は agent 上限超にして --order fees で txIndex 0 付近に置く。
     const oracleFee = config.maxPriorityFeeWei + 1_000_000_000n;
 
     // ---- 競争フェーズ開始：実 N 秒ごとの interval mining へ ----
@@ -401,6 +456,7 @@ export async function runRealtimeSimulation(): Promise<void> {
     let processedBlocks = 0;
     let processing = false;
     let lastLoggedBlock = Number(await publicClient.getBlockNumber());
+    const runStartBlock = lastLoggedBlock + 1;
 
     await new Promise<void>((resolve) => {
       let finished = false;
@@ -444,11 +500,24 @@ export async function runRealtimeSimulation(): Promise<void> {
           }
           lastLoggedBlock = Math.max(lastLoggedBlock, bn);
 
-          // 市場を1ステップ進めて state を読み直し、observation を全 agent へ push
+          // 市場を1ステップ進める
           latestFairPrice = nextFairPrice(latestFairPrice, rng);
 
-          // oracle を mempool 更新（aave/gmx。uniswap-only では no-op）。次ブロックに fee 先頭で載る。
+          // fair price をオンチェーン配布（PriceFeed）+ oracle を mempool 更新（aave/gmx）。
+          // 次ブロックに fee 先頭で載る。
           try {
+            const feedHash = await updatePriceFeedMempool(
+              ctx,
+              priceFeedAddress,
+              latestFairPrice,
+              oracleFee,
+            );
+            submittedByHash.set(feedHash.toLowerCase(), {
+              ownerId: "oracle",
+              role: "system",
+              priorityFeeWei: oracleFee,
+              actionType: "priceFeedUpdate",
+            });
             const oracleHashes = await updateOraclesMempool(
               ctx,
               latestFairPrice,
@@ -468,6 +537,8 @@ export async function runRealtimeSimulation(): Promise<void> {
               error: error instanceof Error ? error.message : String(error),
             });
           }
+
+          // state 読取は flow context（と relay の観測）用。agent 数に依存しない固定コスト。
           const stateById = new Map<ProtocolId, unknown>();
           for (const adapter of adapters)
             stateById.set(
@@ -484,33 +555,37 @@ export async function runRealtimeSimulation(): Promise<void> {
             fairPriceUsdcPerWeth: latestFairPrice,
           });
 
-          for (const agent of agentRuntimes) {
-            if (!agent.process.isAlive()) continue;
-            const balances = await getBalances(publicClient, agent.address);
-            agent.lastBalances = balances;
-            const obs = await observationFor(
-              ctx,
-              adapters,
-              latestStateById,
-              runId,
-              bn,
-              BigInt(bn),
-              agent.address,
-              latestFairPrice,
-              balances,
-              latestHistory.slice(-20),
-              config,
-              enabledIds,
-            );
-            agent.lastObservation = obs;
-            // per-block 価値系列を events.jsonl に残す（evaluate/discrimination の
-            // Sharpe / information ratio が readPerRoundValues で再構成する。ADR 0005）。
-            logger.event({
-              type: "observation",
-              agentId: agent.id,
-              observation: obs,
-            });
-            agent.process.pushObservation(obs);
+          // relay モードのみ: per-agent 観測を読んで push（direct では agent が self-serve。
+          // 環境ループから agent 数比例の読取を消すのが ADR 0006 の主目的）。
+          if (!directTx) {
+            for (const agent of agentRuntimes) {
+              if (!agent.process?.isAlive()) continue;
+              const balances = await getBalances(publicClient, agent.address);
+              agent.lastBalances = balances;
+              const obs = await observationFor(
+                ctx,
+                adapters,
+                latestStateById,
+                runId,
+                bn,
+                BigInt(bn),
+                agent.address,
+                latestFairPrice,
+                balances,
+                latestHistory.slice(-20),
+                config,
+                enabledIds,
+              );
+              agent.lastObservation = obs;
+              // per-block 価値系列を events.jsonl に残す（relay のみ。direct では
+              // run 後の歴史ブロック再構成が同じ形で書く。ADR 0006 §4）。
+              logger.event({
+                type: "observation",
+                agentId: agent.id,
+                observation: obs,
+              });
+              agent.process.pushObservation(obs);
+            }
           }
 
           // flow-bot に context を push（market を動かして arb 機会を作る）
@@ -551,6 +626,45 @@ export async function runRealtimeSimulation(): Promise<void> {
 
     const elapsedMs = Date.now() - startTime;
 
+    // ---- 競争終了: agent を止めてから採点する（direct agent は止めない限り発注し続ける）----
+    for (const agent of agentRuntimes) agent.process?.close();
+    flowProcess.close();
+    await setIntervalMining(publicClient, 0);
+
+    // 終了間際に mine されたブロックの記録を取り切る
+    const finalBlock = Number(await publicClient.getBlockNumber());
+    for (let b = lastLoggedBlock + 1; b <= finalBlock; b++) await logBlock(b);
+
+    // ---- 採点: per-agent 価値系列を歴史ブロックから一括再構成（ADR 0006 §4）----
+    // relay モードは run 中の live observation が同じ形で残っているため再構成しない。
+    let valueSeries: Record<string, unknown> = {
+      source: "live-observation",
+      granularityBlocks: 1,
+    };
+    if (directTx && finalBlock >= runStartBlock) {
+      const meta = await reconstructValueSeries({
+        publicClient,
+        logger,
+        agents: agentRuntimes.map((a) => ({ id: a.id, address: a.address })),
+        enabledIds,
+        activeStables: activeStables(),
+        priceFeed: priceFeedAddress,
+        fromBlock: runStartBlock,
+        toBlock: finalBlock,
+      });
+      valueSeries = meta;
+      logger.event({ type: "value_series_reconstructed", ...meta });
+    }
+
+    // ---- 事後ルール検査（ADR 0006 §5）: fee 上限超過は run 無効化の根拠になる ----
+    const violations = checkRunFeeViolations(
+      logger.runDir,
+      config.maxPriorityFeeWei,
+    );
+    if (violations.length > 0) {
+      logger.event({ type: "rule_violations_detected", violations });
+    }
+
     // ---- 最終 PnL ----
     const finalFairPrice = latestFairPrice;
     const agentsSummary = [];
@@ -575,19 +689,23 @@ export async function runRealtimeSimulation(): Promise<void> {
         initialValueUsdc: initialValue,
         finalValueUsdc: finalValue,
         netPnlUsdc: finalValue - initialValue,
-        submittedTxCount: agent.submitted,
+        // direct では提出数は agent の自己申告ログ（agents/<id>.jsonl）が一次情報
+        ...(directTx ? {} : { submittedTxCount: agent.submitted }),
         includedTxCount: agent.included,
         revertCount: agent.reverted,
-        stderrTail: agent.process.getStderr(),
+        stderrTail: agent.process?.getStderr() ?? "",
       });
     }
     logger.summary({
       runId,
       mode: "realtime",
+      agentDirectTx: directTx,
       blockTimeSec: config.blockTimeSec,
       blocksProcessed: processedBlocks,
       elapsedMs,
       finalFairPriceUsdcPerWeth: finalFairPrice,
+      valueSeries,
+      violations,
       agents: agentsSummary,
     });
     logger.event({ type: "run_completed", runId, runDir: logger.runDir });
@@ -600,7 +718,7 @@ export async function runRealtimeSimulation(): Promise<void> {
     } catch {
       // teardown 中のエラーは無視
     }
-    for (const agent of agentRuntimes) agent.process.close();
+    for (const agent of agentRuntimes) agent.process?.close();
     flowProcess.close();
   }
 }

@@ -35,7 +35,7 @@ async function main(): Promise<void> {
   // 恒久化・holdout 検証では REGIMES を切り替える（例 REGIMES=11）。SEEDS は旧名の別名。
   const regimes = parseRegimes(process.env.REGIMES ?? process.env.SEEDS, "1");
   const replications = intEnv(process.env.REPLICATIONS, 8);
-  const { byAgent, runs } = await collectReplicationStats(
+  const { byAgent, runs, granularityBlocks } = await collectReplicationStats(
     regimes,
     replications,
   );
@@ -46,6 +46,8 @@ async function main(): Promise<void> {
     replications,
     runBlocks: Number(process.env.ERIS_RUN_BLOCKS),
     blockTimeSec: Number(process.env.ERIS_BLOCK_TIME_SEC ?? 2),
+    // 価値系列の粒度（ADR 0006 §4）。gate は粒度不一致の比較を拒否する。
+    granularityBlocks,
     agentsConfig: process.env.AGENTS_CONFIG,
     // 再現性メタデータ: fork block を固定しないと before/after の市場が動く。
     forkBlock: process.env.FORK_BLOCK_NUMBER ?? null,

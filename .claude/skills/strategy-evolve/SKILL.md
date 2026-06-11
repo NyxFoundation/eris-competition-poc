@@ -84,6 +84,12 @@ REGIMES=1 REPLICATIONS=8 ERIS_RUN_BLOCKS=60 AGENTS_CONFIG=agents.evolve.json npm
 ## 4. Implement
 
 **1 agent への 1 変更だけ**。`npm run typecheck` と `npm run test` を通す。
+コード編集（第2層）を伴う場合は **静的検査を必ず通す**（ADR 0006 §5 の入口防御。direct モードでは
+agent が anvil RPC に直接触れるため、cheatcode 混入はチートになる）:
+
+```bash
+npm run check:strategy --silent -- examples/agents/<target>.ts   # exit 0 = PASS（2 = cheatcode 検出 → 即 REVERT）
+```
 
 ## 5. Re-evaluate（同一条件・同一 N）
 
@@ -104,7 +110,7 @@ npm run gate --silent -- /tmp/eval-before.json /tmp/eval-after.json <target>
    ※ 旧「median 改善 + per-seed 非劣化（paired）」は実時間では同一市場前提が崩れて意味を失うので**使わない**。
 2. **win-rate（補助指標）**: gate 出力の `winRate`（= P(after run > before run)）を併記。0.5 未満で CI だけ通る場合は要注意としてログに残す（自動却下はしない）。
 3. **他 agent への転嫁チェック**: gate 出力の `spillover.flag`。他 agent の mean netPnl 低下合計が対象の改善を超えるなら **flag してログ**（ほぼゼロサム。gas 入札で 1 体から奪っただけは自動却下しない）。
-4. `typecheck` / `test` パス
+4. `typecheck` / `test` パス。コード編集時は `npm run check:strategy --silent -- <編集ファイル>` も PASS（§4）
 
 いずれか失敗 → **REVERT**: `git checkout -- agents.evolve.json examples/agents/<target>.ts`。失敗イテレーションとして metric 表ごとログに残す（同じ手を再試行しない）。
 CI 下限が僅かに負（|下限| < |meanDiff| の ~20%）なら「N 不足の可能性」としてログし、次サイクルで `REPLICATIONS` を増やして同じ変更を 1 回だけ再評価してよい（2 連続で不合格なら破棄）。

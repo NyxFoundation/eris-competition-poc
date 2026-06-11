@@ -35,6 +35,9 @@ export type ReplicationStats = {
   byAgent: Map<string, AgentAcc>;
   // 各 run のメタ。診断で worst/median run の成果物を直接開けるようにする。
   runs: ReplicationRun[];
+  // 価値系列の再構成粒度（ブロック数。ADR 0006 §4）。全 run で一致していることを保証済み。
+  // gate は粒度不一致の run 比較を拒否する。
+  granularityBlocks: number;
 };
 
 type SummaryAgent = {
@@ -47,6 +50,9 @@ type SummaryAgent = {
 type Summary = {
   runId: string;
   agents: SummaryAgent[];
+  // ADR 0006: 価値系列メタ（再構成粒度）と事後ルール検査の結果。
+  valueSeries?: { granularityBlocks?: number };
+  violations?: Array<{ ownerId: string; hash: string }>;
 };
 
 function emptyAcc(): AgentAcc {
@@ -55,12 +61,12 @@ function emptyAcc(): AgentAcc {
 
 // 1 つの run ディレクトリ(summary.json + events.jsonl)を読み、byAgent に寄与させる。
 // benchmarkId が渡されたら、その agent の per-round 系列を基準に information ratio も計算する。
-// 戻り値は run の runId(runs 構築用)。
+// 戻り値は run の runId と価値系列粒度(runs 構築・粒度整合チェック用)。
 export function accumulateRun(
   byAgent: Map<string, AgentAcc>,
   runDir: string,
   benchmarkId?: string,
-): string {
+): { runId: string; granularityBlocks: number } {
   const summary = JSON.parse(
     readFileSync(join(runDir, "summary.json"), "utf8"),
   ) as Summary;
@@ -80,11 +86,38 @@ export function accumulateRun(
     acc.included.push(a.includedTxCount ?? 0);
     byAgent.set(a.id, acc);
   }
-  return summary.runId;
+  return {
+    runId: summary.runId,
+    granularityBlocks: summary.valueSeries?.granularityBlocks ?? 1,
+  };
 }
+
+// 全 run の粒度が一致していることを確認して返す（混在サンプルの統計比較を防ぐ。ADR 0006 §4）。
+function uniformGranularity(granularities: number[]): number {
+  const unique = [...new Set(granularities)];
+  if (unique.length > 1) {
+    throw new Error(
+      `価値系列の粒度が run 間で混在しています: ${unique.join(", ")} blocks。同一粒度で取り直してください(ADR 0006 §4)。`,
+    );
+  }
+  return unique[0] ?? 1;
+}
+
+// run の市場を歪める違反（fee 上限超過など。ADR 0006 §5）。検出された run は
+// サンプルとして無効（違反 tx が動かした市場で他 agent の成績が付く「run 汚染」を防ぐ）。
+function runViolations(runDir: string): NonNullable<Summary["violations"]> {
+  const summary = JSON.parse(
+    readFileSync(join(runDir, "summary.json"), "utf8"),
+  ) as Summary;
+  return summary.violations ?? [];
+}
+
+// 違反 run の自動再実行の上限。恒常的に違反する agent はロスター修正が必要なので打ち切る。
+const MAX_VIOLATION_RETRIES = 2;
 
 // regime ごとに replications 回、実時間 sim を直列で実走し、accumulateRun で集計する。
 // 旧 collectMultiSeedStats(seed ごとに 1 回・決定論前提)の置換(ADR 0005 §1)。
+// ルール違反が検出された run は無効化して自動再実行する(ADR 0006 §5)。
 export async function collectReplicationStats(
   regimes: number[],
   replications: number,
@@ -101,21 +134,49 @@ export async function collectReplicationStats(
   }
   const byAgent = new Map<string, AgentAcc>();
   const runs: ReplicationRun[] = [];
+  const granularities: number[] = [];
 
   for (const regime of regimes) {
     for (let rep = 1; rep <= replications; rep++) {
       process.env.SEED = String(regime);
-      console.error(
-        `[replication] regime=${regime} rep=${rep}/${replications} running realtime simulation (${config.runBlocks} blocks)...`,
-      );
-      await runRealtimeSimulation();
-      const runDir = latestRunDir(config.runDirRoot, true);
-      const runId = accumulateRun(byAgent, runDir, benchmarkId);
-      runs.push({ regime, replication: rep, runId, runDir });
+      let retries = 0;
+      for (;;) {
+        console.error(
+          `[replication] regime=${regime} rep=${rep}/${replications} running realtime simulation (${config.runBlocks} blocks)...`,
+        );
+        await runRealtimeSimulation();
+        const runDir = latestRunDir(config.runDirRoot, true);
+        const violations = runViolations(runDir);
+        if (violations.length > 0) {
+          if (retries >= MAX_VIOLATION_RETRIES) {
+            throw new Error(
+              `run ${runDir} のルール違反が ${retries} 回の再実行後も解消しません: ` +
+                `${violations.map((v) => v.ownerId).join(", ")}。違反 agent をロスターから外してください(ADR 0006 §5)。`,
+            );
+          }
+          retries++;
+          console.error(
+            `[replication] rule violation detected (${violations.map((v) => v.ownerId).join(", ")}) — run を無効化して再実行 (${retries}/${MAX_VIOLATION_RETRIES})`,
+          );
+          continue;
+        }
+        const { runId, granularityBlocks } = accumulateRun(
+          byAgent,
+          runDir,
+          benchmarkId,
+        );
+        granularities.push(granularityBlocks);
+        runs.push({ regime, replication: rep, runId, runDir });
+        break;
+      }
     }
   }
 
-  return { byAgent, runs };
+  return {
+    byAgent,
+    runs,
+    granularityBlocks: uniformGranularity(granularities),
+  };
 }
 
 // 既存の run ディレクトリ群を再シミュレーション無しで集計する(オフライン再判定用)。
@@ -134,15 +195,25 @@ export function statsFromRunDirs(
   }
   const byAgent = new Map<string, AgentAcc>();
   const runs: ReplicationRun[] = [];
+  const granularities: number[] = [];
   const repCount = new Map<number, number>();
   runDirs.forEach((runDir, i) => {
     const regime = regimes?.[i] ?? i + 1;
     const replication = (repCount.get(regime) ?? 0) + 1;
     repCount.set(regime, replication);
-    const runId = accumulateRun(byAgent, runDir, benchmarkId);
+    const { runId, granularityBlocks } = accumulateRun(
+      byAgent,
+      runDir,
+      benchmarkId,
+    );
+    granularities.push(granularityBlocks);
     runs.push({ regime, replication, runId, runDir });
   });
-  return { byAgent, runs };
+  return {
+    byAgent,
+    runs,
+    granularityBlocks: uniformGranularity(granularities),
+  };
 }
 
 // REGIMES / SEEDS env のパース(evaluate / discrimination 共通)。

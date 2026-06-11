@@ -565,6 +565,37 @@ function positionPnlUsd(p: Position, markPrice: number): number {
 }
 const FLOAT_PRECISION_NUM = 1e30;
 
+// ---------------------------------------------------------------------------
+// 歴史ブロック再構成（ADR 0006 §4）: blockNumber 指定 multicall で使う読取記述子と、
+// その結果から valueUsdc と同じ式でポジション価値を出す純粋関数。
+// ---------------------------------------------------------------------------
+
+export function gmxAccountPositionsCall(account: Address) {
+  return {
+    address: GMX.Reader,
+    abi: readerAbi,
+    functionName: "getAccountPositions",
+    args: [GMX.DataStore, account, 0n, 50n],
+  } as const;
+}
+
+export function gmxEthUsdPositionValueUsd(
+  positions: readonly Position[] | undefined,
+  markPrice: number,
+): number {
+  const pos = positions?.find(
+    (p) =>
+      p.addresses.market.toLowerCase() === GMX_MARKETS.ETH_USD.toLowerCase(),
+  );
+  if (!pos || pos.numbers.sizeInUsd === 0n) return 0;
+  const collateralUsd =
+    pos.addresses.collateralToken.toLowerCase() ===
+    TOKENS.WETH.address.toLowerCase()
+      ? (Number(pos.numbers.collateralAmount) / 1e18) * markPrice
+      : Number(pos.numbers.collateralAmount) / 1e6;
+  return collateralUsd + positionPnlUsd(pos, markPrice);
+}
+
 export const gmxAdapter: ProtocolAdapter = {
   id: "gmx",
   stableToken: TOKENS.USDC.address,

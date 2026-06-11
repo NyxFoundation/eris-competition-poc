@@ -367,6 +367,57 @@ function valuePositionUsdc(
   return usdc + weth * fairPriceUsdcPerWeth;
 }
 
+// 歴史ブロック再構成（ADR 0006 §4）: positions(tokenId) の生 tuple から
+// getLpPositions と同じ式で LP 価値を出す純粋関数。WETH/USDC 以外のポジションは 0。
+export function lpPositionValueUsdc(
+  position: readonly [
+    bigint,
+    Address,
+    Address,
+    Address,
+    number,
+    number,
+    number,
+    bigint,
+    bigint,
+    bigint,
+    bigint,
+    bigint,
+  ],
+  tick: number,
+  fairPriceUsdcPerWeth: number,
+): number {
+  const [
+    ,
+    ,
+    token0,
+    token1,
+    fee,
+    tickLower,
+    tickUpper,
+    liquidity,
+    ,
+    ,
+    tokensOwed0,
+    tokensOwed1,
+  ] = position;
+  if (!isWethUsdcPosition(token0, token1, fee)) return 0;
+  const amounts = liquidityToTokenAmounts({
+    liquidity,
+    tick,
+    tickLower,
+    tickUpper,
+  });
+  const w0 = wethIsToken0();
+  return valuePositionUsdc(
+    w0 ? amounts.amount0 : amounts.amount1,
+    w0 ? amounts.amount1 : amounts.amount0,
+    w0 ? tokensOwed0 : tokensOwed1,
+    w0 ? tokensOwed1 : tokensOwed0,
+    fairPriceUsdcPerWeth,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // parse / validate
 // ---------------------------------------------------------------------------
