@@ -351,12 +351,14 @@ export async function sendAndMine(
 // 実時間モード用：tx を mempool に投げるだけ（mine しない・receipt も待たない）。
 // priorityFee を指定でき、interval mining 下で次ブロックに --order fees で取り込ませる。
 // oracle 更新を agent より前(txIndex 0)に置きたいので、呼び側で agent 上限超の fee を渡す。
+// tx.gas を明示すると viem の eth_estimateGas（= EVM 実行）が省かれる。oracle 書込のような
+// 毎ブロックの定型 tx は明示し、agent 負荷で anvil の実行キューが詰まっても待たされないようにする。
 export async function sendNoMine(
   publicClient: PublicClient,
   walletClient: WalletClient,
   chain: ReturnType<typeof makeChain>,
   privateKey: Hex,
-  tx: { to: Address; data?: Hex; value?: bigint },
+  tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint },
   priorityFeeWei: bigint,
 ): Promise<Hex> {
   const account = privateKeyToAccount(privateKey);
@@ -368,6 +370,7 @@ export async function sendNoMine(
     to: tx.to,
     data: tx.data,
     value: tx.value ?? 0n,
+    gas: tx.gas,
     maxFeePerGas: baseFee + priorityFeeWei,
     maxPriorityFeePerGas: priorityFeeWei,
   });

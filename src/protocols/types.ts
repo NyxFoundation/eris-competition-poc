@@ -100,10 +100,18 @@ export interface ProtocolAdapter {
 
   // ---- mine 後フック（GMX keeper 実行）----
   // 競争ブロック後の keeper 処理（GMX 注文実行など）。
-  // opts.noMine=true で realtime 用に mine せず mempool submit。blockNumber で対象ブロック指定。
+  // opts.noMine=true で realtime 用に mine せず mempool submit。
+  // 対象ブロックは fromBlock..toBlock の範囲指定（realtime の追いつき分を 1 回の getLogs で
+  // 走査するため）。blockNumber は単一ブロック指定の旧形（同期 coordinator 用に残す）。
   afterMine?(
     ctx: SimContext,
-    opts?: { noMine?: boolean; priorityFeeWei?: bigint; blockNumber?: bigint },
+    opts?: {
+      noMine?: boolean;
+      priorityFeeWei?: bigint;
+      blockNumber?: bigint;
+      fromBlock?: bigint;
+      toBlock?: bigint;
+    },
   ): Promise<void>;
 
   // ---- PnL 寄与（USDC）----

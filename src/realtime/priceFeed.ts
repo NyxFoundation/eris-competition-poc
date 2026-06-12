@@ -47,6 +47,9 @@ export async function deployPriceFeed(
   return deployContract(ctx, "PriceFeed", [toPriceFeedAnswer(initialPrice)]);
 }
 
+// 単純な setter の固定 gas。明示して estimateGas（EVM 実行待ち）を省く。
+const SETTER_GAS = 300_000n;
+
 // 毎ブロックの fair price 書込（mempool submit。oracle と同じく agent 上限超の fee で先頭に置く）。
 export async function updatePriceFeedMempool(
   ctx: SimContext,
@@ -66,6 +69,7 @@ export async function updatePriceFeedMempool(
         functionName: "setPrice",
         args: [toPriceFeedAnswer(fairPrice)],
       }),
+      gas: SETTER_GAS,
     },
     priorityFeeWei,
   );

@@ -642,15 +642,26 @@ export const gmxAdapter: ProtocolAdapter = {
   // 競争ブロックで作成された注文を keeper が約定する
   async afterMine(
     ctx: SimContext,
-    opts?: { noMine?: boolean; priorityFeeWei?: bigint; blockNumber?: bigint },
+    opts?: {
+      noMine?: boolean;
+      priorityFeeWei?: bigint;
+      blockNumber?: bigint;
+      fromBlock?: bigint;
+      toBlock?: bigint;
+    },
   ): Promise<void> {
     if (!ctx.gmx.mockProvider) return;
-    const blockNumber =
-      opts?.blockNumber ?? (await ctx.publicClient.getBlockNumber());
+    // 範囲指定なら 1 回の getLogs でまとめて走査（realtime の追いつき分をブロックごとに
+    // 呼ぶより RPC が 1/N になる）。単一 blockNumber は旧形互換。
+    const toBlock =
+      opts?.toBlock ??
+      opts?.blockNumber ??
+      (await ctx.publicClient.getBlockNumber());
+    const fromBlock = opts?.fromBlock ?? opts?.blockNumber ?? toBlock;
     const logs = await ctx.publicClient.getLogs({
       address: GMX.EventEmitter,
-      fromBlock: blockNumber,
-      toBlock: blockNumber,
+      fromBlock,
+      toBlock,
     });
     const keys = logs
       .filter(
@@ -856,7 +867,8 @@ export const gmxAdapter: ProtocolAdapter = {
               c.walletClient,
               c.chain,
               c.adminPk,
-              tx,
+              // gas を明示して estimateGas（anvil の実行キュー待ち）を省く
+              { ...tx, gas: 300_000n },
               opts.priorityFeeWei ?? 1_000_000_000n,
             )
           : sendAndMine(c.publicClient, c.walletClient, c.chain, c.adminPk, tx);

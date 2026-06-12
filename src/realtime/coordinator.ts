@@ -96,9 +96,12 @@ export async function runRealtimeSimulation(): Promise<void> {
     agentDirectTx: directTx,
   });
 
+  // batch=true: 同一 tick の読取（receipt 並列取得・readState 等）を JSON-RPC array batch /
+  // Multicall3 に自動集約し、環境ループの往復回数を抑える。
   const { chain, publicClient, walletClient } = makeClients(
     config.rpcUrl,
     config.chainId,
+    { batch: true },
   );
   await resetFork(publicClient, {
     forkUrl: config.forkUrl,
@@ -398,27 +401,37 @@ export async function runRealtimeSimulation(): Promise<void> {
     flowProcess.onOrders((orders) => void handleFlowOrders(orders));
 
     // ---- mined block の tx を blocks.csv へ（帰属は from アドレス引き。ADR 0006 §4）----
+    // 実時間ループからは外し、run 終了後に全ブロックを一括走査する（採点の歴史再構成と
+    // 同じ「クリティカルパス外」化）。元データは全部チェーンに残っているため後追いで足りる。
+    // 帰結: run が途中クラッシュすると blocks.csv は空になる（診断は events.jsonl で行う）。
     const logBlock = async (b: number): Promise<void> => {
       const block = await publicClient.getBlock({
         blockNumber: BigInt(b),
         includeTransactions: true,
       });
+      const txs = block.transactions.filter(
+        (tx): tx is Exclude<typeof tx, string> => typeof tx !== "string",
+      );
       // 注: eth_getBlockReceipts での一括取得は anvil の Arbitrum フォークで
-      // "Failed to decode receipt" になるため使えない（per-tx 取得が確実）。
-      for (const tx of block.transactions) {
-        if (typeof tx === "string") continue;
+      // "Failed to decode receipt" になるため使えない。per-tx 取得を並列発行する
+      // （batch transport が 1 HTTP に束ねる）。
+      const statuses = await Promise.all(
+        txs.map(async (tx) => {
+          try {
+            const receipt = await publicClient.getTransactionReceipt({
+              hash: tx.hash,
+            });
+            return receipt.status as string;
+          } catch {
+            return "mined"; // receipt 取得失敗時のフォールバック
+          }
+        }),
+      );
+      txs.forEach((tx, i) => {
         const meta = submittedByHash.get(tx.hash.toLowerCase());
         const owner = meta ?? ownerByAddress.get(tx.from.toLowerCase());
-        if (!owner) continue; // run 外の tx（想定外の外部送信者）
-        let status = "mined";
-        try {
-          const receipt = await publicClient.getTransactionReceipt({
-            hash: tx.hash,
-          });
-          status = receipt.status;
-        } catch {
-          // receipt 取得失敗時は "mined" のまま
-        }
+        if (!owner) return; // run 外の tx（想定外の外部送信者）
+        const status = statuses[i];
         if (owner.role === "agent") {
           const runtime = agentById.get(owner.ownerId);
           if (runtime) {
@@ -440,11 +453,14 @@ export async function runRealtimeSimulation(): Promise<void> {
           actionType:
             meta?.actionType ?? (owner.role === "agent" ? "direct" : ""),
         });
-      }
+      });
     };
 
-    // oracle/PriceFeed 更新の fee は agent 上限超にして --order fees で txIndex 0 付近に置く。
+    // oracle/PriceFeed 更新の fee は agent 上限超にして --order fees で txIndex 0 に置く。
+    // keeper はその僅か下に置き、同一ブロック内で「oracle 更新 → 注文約定」の順を固定する
+    // （並列提出しても到着順に依らず fee で順序が決まる）。
     const oracleFee = config.maxPriorityFeeWei + 1_000_000_000n;
+    const keeperFee = config.maxPriorityFeeWei + 500_000_000n;
 
     // ---- 競争フェーズ開始：実 N 秒ごとの interval mining へ ----
     await setIntervalMining(publicClient, config.blockTimeSec);
@@ -455,8 +471,8 @@ export async function runRealtimeSimulation(): Promise<void> {
     const startTime = Date.now();
     let processedBlocks = 0;
     let processing = false;
-    let lastLoggedBlock = Number(await publicClient.getBlockNumber());
-    const runStartBlock = lastLoggedBlock + 1;
+    let lastProcessedBlock = Number(await publicClient.getBlockNumber());
+    const runStartBlock = lastProcessedBlock + 1;
 
     await new Promise<void>((resolve) => {
       let finished = false;
@@ -477,128 +493,164 @@ export async function runRealtimeSimulation(): Promise<void> {
         if (processing || finished) return;
         processing = true;
         try {
-          // 新規に mine されたブロックの tx をログし、keeper（GMX 注文実行等）を回す
-          for (let b = lastLoggedBlock + 1; b <= bn; b++) {
-            await logBlock(b);
+          const fromBlock = lastProcessedBlock + 1;
+          lastProcessedBlock = Math.max(lastProcessedBlock, bn);
+
+          // 市場を1ステップ進める（RNG の更新は 1 周に 1 回。以降の並列タスクは値だけ共有）
+          latestFairPrice = nextFairPrice(latestFairPrice, rng);
+
+          // keeper / oracle 書込 / state+flow は相互に独立（ウォレットも別）なので並列に走らせる。
+          // tx の記録（blocks.csv）はループから外し、run 後に一括走査する（logBlock 参照）。
+
+          // keeper（GMX 注文実行等）。追いついた範囲をまとめて 1 回の getLogs で走査する。
+          const keeperTask = async (): Promise<void> => {
+            if (fromBlock > bn) return;
             for (const adapter of adapters) {
               if (!adapter.afterMine) continue;
               try {
                 await adapter.afterMine(ctx, {
                   noMine: true,
-                  priorityFeeWei: oracleFee,
-                  blockNumber: BigInt(b),
+                  priorityFeeWei: keeperFee,
+                  fromBlock: BigInt(fromBlock),
+                  toBlock: BigInt(bn),
                 });
               } catch (error) {
                 logger.event({
                   type: "keeper_failed",
                   protocol: adapter.id,
-                  blockNumber: b,
+                  fromBlock,
+                  toBlock: bn,
                   error: error instanceof Error ? error.message : String(error),
                 });
               }
             }
-          }
-          lastLoggedBlock = Math.max(lastLoggedBlock, bn);
-
-          // 市場を1ステップ進める
-          latestFairPrice = nextFairPrice(latestFairPrice, rng);
+          };
 
           // fair price をオンチェーン配布（PriceFeed）+ oracle を mempool 更新（aave/gmx）。
           // 次ブロックに fee 先頭で載る。
-          try {
-            const feedHash = await updatePriceFeedMempool(
-              ctx,
-              priceFeedAddress,
-              latestFairPrice,
-              oracleFee,
-            );
-            submittedByHash.set(feedHash.toLowerCase(), {
-              ownerId: "oracle",
-              role: "system",
-              priorityFeeWei: oracleFee,
-              actionType: "priceFeedUpdate",
-            });
-            const oracleHashes = await updateOraclesMempool(
-              ctx,
-              latestFairPrice,
-              oracleFee,
-            );
-            for (const hash of oracleHashes) {
-              submittedByHash.set(hash.toLowerCase(), {
+          const oracleTask = async (): Promise<void> => {
+            try {
+              const feedHash = await updatePriceFeedMempool(
+                ctx,
+                priceFeedAddress,
+                latestFairPrice,
+                oracleFee,
+              );
+              submittedByHash.set(feedHash.toLowerCase(), {
                 ownerId: "oracle",
                 role: "system",
                 priorityFeeWei: oracleFee,
-                actionType: "oracleUpdate",
+                actionType: "priceFeedUpdate",
               });
-            }
-          } catch (error) {
-            logger.event({
-              type: "oracle_update_failed",
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-
-          // state 読取は flow context（と relay の観測）用。agent 数に依存しない固定コスト。
-          const stateById = new Map<ProtocolId, unknown>();
-          for (const adapter of adapters)
-            stateById.set(
-              adapter.id,
-              await adapter.readState(ctx, latestFairPrice),
-            );
-          latestStateById = stateById;
-          const uni = stateById.get("uniswap") as
-            | { priceUsdcPerWeth?: number }
-            | undefined;
-          latestHistory.push({
-            round: bn,
-            poolPriceUsdcPerWeth: uni?.priceUsdcPerWeth ?? latestFairPrice,
-            fairPriceUsdcPerWeth: latestFairPrice,
-          });
-
-          // relay モードのみ: per-agent 観測を読んで push（direct では agent が self-serve。
-          // 環境ループから agent 数比例の読取を消すのが ADR 0006 の主目的）。
-          if (!directTx) {
-            for (const agent of agentRuntimes) {
-              if (!agent.process?.isAlive()) continue;
-              const balances = await getBalances(publicClient, agent.address);
-              agent.lastBalances = balances;
-              const obs = await observationFor(
+              const oracleHashes = await updateOraclesMempool(
                 ctx,
-                adapters,
-                latestStateById,
-                runId,
-                bn,
-                BigInt(bn),
-                agent.address,
                 latestFairPrice,
-                balances,
-                latestHistory.slice(-20),
-                config,
-                enabledIds,
+                oracleFee,
               );
-              agent.lastObservation = obs;
-              // per-block 価値系列を events.jsonl に残す（relay のみ。direct では
-              // run 後の歴史ブロック再構成が同じ形で書く。ADR 0006 §4）。
+              for (const hash of oracleHashes) {
+                submittedByHash.set(hash.toLowerCase(), {
+                  ownerId: "oracle",
+                  role: "system",
+                  priorityFeeWei: oracleFee,
+                  actionType: "oracleUpdate",
+                });
+              }
+            } catch (error) {
               logger.event({
-                type: "observation",
-                agentId: agent.id,
-                observation: obs,
+                type: "oracle_update_failed",
+                error: error instanceof Error ? error.message : String(error),
               });
-              agent.process.pushObservation(obs);
             }
-          }
+          };
 
-          // flow-bot に context を push（market を動かして arb 機会を作る）
-          if (flowProcess.isAlive()) {
-            const flowContext = await buildFlowContext(
-              ctx,
-              enabledIds,
-              latestStateById,
-              latestFairPrice,
-              bn,
+          // state 読取（flow context と relay の観測用。agent 数に依存しない固定コスト）→
+          // relay の観測 push → flow-bot への context push。
+          const stateAndFlowTask = async (): Promise<void> => {
+            const states = await Promise.all(
+              adapters.map((adapter) =>
+                adapter.readState(ctx, latestFairPrice),
+              ),
             );
-            flowProcess.pushContext(flowContext);
-          }
+            const stateById = new Map<ProtocolId, unknown>(
+              adapters.map((adapter, i) => [adapter.id, states[i]]),
+            );
+            latestStateById = stateById;
+            const uni = stateById.get("uniswap") as
+              | { priceUsdcPerWeth?: number }
+              | undefined;
+            latestHistory.push({
+              round: bn,
+              poolPriceUsdcPerWeth: uni?.priceUsdcPerWeth ?? latestFairPrice,
+              fairPriceUsdcPerWeth: latestFairPrice,
+            });
+
+            // relay モードのみ: per-agent 観測を読んで push（direct では agent が self-serve。
+            // 環境ループから agent 数比例の読取を消すのが ADR 0006 の主目的）。
+            if (!directTx) {
+              for (const agent of agentRuntimes) {
+                if (!agent.process?.isAlive()) continue;
+                const balances = await getBalances(publicClient, agent.address);
+                agent.lastBalances = balances;
+                const obs = await observationFor(
+                  ctx,
+                  adapters,
+                  latestStateById,
+                  runId,
+                  bn,
+                  BigInt(bn),
+                  agent.address,
+                  latestFairPrice,
+                  balances,
+                  latestHistory.slice(-20),
+                  config,
+                  enabledIds,
+                );
+                agent.lastObservation = obs;
+                // per-block 価値系列を events.jsonl に残す（relay のみ。direct では
+                // run 後の歴史ブロック再構成が同じ形で書く。ADR 0006 §4）。
+                logger.event({
+                  type: "observation",
+                  agentId: agent.id,
+                  observation: obs,
+                });
+                agent.process.pushObservation(obs);
+              }
+            }
+
+            // flow-bot に context を push（market を動かして arb 機会を作る）
+            if (flowProcess.isAlive()) {
+              const flowContext = await buildFlowContext(
+                ctx,
+                enabledIds,
+                latestStateById,
+                latestFairPrice,
+                bn,
+              );
+              flowProcess.pushContext(flowContext);
+            }
+          };
+
+          // 各タスクの所要時間を残す（環境ループの律速診断用。ADR 0006「判定指標」の実測元）
+          const timed = async (task: () => Promise<void>): Promise<number> => {
+            const t0 = Date.now();
+            await task();
+            return Date.now() - t0;
+          };
+          const roundStart = Date.now();
+          const [keeperMs, oracleMs, stateFlowMs] = await Promise.all([
+            timed(keeperTask),
+            timed(oracleTask),
+            timed(stateAndFlowTask),
+          ]);
+          logger.event({
+            type: "round_timing",
+            blockNumber: bn,
+            blocksCaughtUp: Math.max(0, bn - fromBlock + 1),
+            keeperMs,
+            oracleMs,
+            stateFlowMs,
+            totalMs: Date.now() - roundStart,
+          });
 
           processedBlocks++;
           if (config.runBlocks > 0 && processedBlocks >= config.runBlocks)
@@ -631,9 +683,10 @@ export async function runRealtimeSimulation(): Promise<void> {
     flowProcess.close();
     await setIntervalMining(publicClient, 0);
 
-    // 終了間際に mine されたブロックの記録を取り切る
+    // ---- blocks.csv の一括記録: 実時間ループから外した分を run 全ブロックぶん走査する ----
+    // （resetFork で歴史が消える前・違反検査と summary の前に終える）
     const finalBlock = Number(await publicClient.getBlockNumber());
-    for (let b = lastLoggedBlock + 1; b <= finalBlock; b++) await logBlock(b);
+    for (let b = runStartBlock; b <= finalBlock; b++) await logBlock(b);
 
     // ---- 採点: per-agent 価値系列を歴史ブロックから一括再構成（ADR 0006 §4）----
     // relay モードは run 中の live observation が同じ形で残っているため再構成しない。
