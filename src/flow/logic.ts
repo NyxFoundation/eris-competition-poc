@@ -65,6 +65,12 @@ function randomBigInt(
   );
 }
 
+// WETH wei(1e18) を fairPrice(USDC/WETH) で USDC units(1e6) へ換算。
+// flow の WETH 上限を USDC 側の注文サイズにも適用し、両側を同じ強度ノブで制御するため。
+function wethToUsdcUnits(wethWei: bigint, fairPrice: number): bigint {
+  return (wethWei * BigInt(Math.round(fairPrice * 100))) / (100n * 10n ** 12n);
+}
+
 // AMM (uniswap/balancer/curve) の flow。uninformed ノイズ + informed(価格を fair に寄せる)。
 export function buildAmmFlow(
   rng: Rng,
@@ -83,12 +89,18 @@ export function buildAmmFlow(
         ? "balancerSwap"
         : "curveSwap";
 
-  // uninformed
+  // uninformed: pool を fair から押しのけて gap(裁定の餌)を作る。WETH/USDC とも同じ
+  // WETH 相当のランダム量にして、uninformedMaxWethWei が両側を一様に制御する（rng 消費は不変）。
   const uninformedTokenIn: TokenSymbol = rng.bool() ? "WETH" : "USDC";
+  const uninformedWethEquiv = randomBigInt(
+    rng,
+    uninformedMaxWethWei / 20n,
+    uninformedMaxWethWei,
+  );
   const uninformedAmount =
     uninformedTokenIn === "WETH"
-      ? randomBigInt(rng, uninformedMaxWethWei / 20n, uninformedMaxWethWei)
-      : randomBigInt(rng, 100_000_000n, 2_500_000_000n);
+      ? uninformedWethEquiv
+      : wethToUsdcUnits(uninformedWethEquiv, fairPrice);
   orders.push({
     kind: "uninformed",
     action: {
@@ -100,13 +112,17 @@ export function buildAmmFlow(
     priorityFeeWei: defaultPriorityFeeWei + BigInt(rng.int(1, 50)) * 1_000_000n,
   });
 
-  // informed: pool 価格を fairPrice に寄せる
+  // informed: pool 価格を fairPrice に寄せる（gap を閉じる側＝arb agent と競合する）。
+  // 両側を informedMaxWethWei × gap で揃え、USDC 側も WETH 上限で制御する。
+  // informedMaxWethWei を下げると flow bot が gap を潰さなくなり、arb の取り分が増える。
   const informedTokenIn: TokenSymbol = poolPrice < fairPrice ? "USDC" : "WETH";
   const gap = Math.min(1, Math.abs(fairPrice / poolPrice - 1) * 20);
+  const informedWethEquiv =
+    (informedMaxWethWei * BigInt(Math.max(1, Math.floor(gap * 100)))) / 100n;
   const informedAmount =
     informedTokenIn === "WETH"
-      ? (informedMaxWethWei * BigInt(Math.max(1, Math.floor(gap * 100)))) / 100n
-      : BigInt(Math.max(100_000_000, Math.floor(gap * 5_000_000_000)));
+      ? informedWethEquiv
+      : wethToUsdcUnits(informedWethEquiv, fairPrice);
   orders.push({
     kind: "informed",
     action: {
