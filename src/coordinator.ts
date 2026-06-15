@@ -287,6 +287,7 @@ export async function runSimulation(): Promise<void> {
     }
 
     let fairPrice = await initialFairPrice(ctx, enabledIds);
+    const fairAnchor = fairPrice; // 平均回帰価格モデルの中心（初期 fair price）
     const history: AgentObservation["history"] = [];
     for (const agent of agentRuntimes) {
       agent.initial = await getBalances(
@@ -296,7 +297,7 @@ export async function runSimulation(): Promise<void> {
     }
 
     for (let round = 1; round <= config.rounds; round++) {
-      fairPrice = nextFairPrice(fairPrice, rng);
+      fairPrice = nextFairPrice(fairPrice, rng, fairAnchor);
 
       // ---- 0) EVM 時間を進める（Aave 変動金利・GMX funding が現実スケールで効くように）----
       // evm_increaseTime は「次の mine 時点での timestamp」に効くので、

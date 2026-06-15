@@ -81,7 +81,7 @@ async function prewarmWorkingSet(
     const warmRng = new Rng(ctx.config.seed);
     let warmPrice = startPrice;
     for (let i = 1; i <= blocks; i++) {
-      warmPrice = nextFairPrice(warmPrice, warmRng);
+      warmPrice = nextFairPrice(warmPrice, warmRng, startPrice);
       await updateOracles(ctx, warmPrice);
       const states = await Promise.all(
         adapters.map((adapter) => adapter.readState(ctx, warmPrice)),
@@ -559,6 +559,8 @@ export async function runRealtimeSimulation(): Promise<void> {
       blockTimeSec: config.blockTimeSec,
     });
     const startTime = Date.now();
+    // 平均回帰価格モデルの中心（競争開始時の fair price）。run を通して固定。
+    const fairAnchor = latestFairPrice;
     let processedBlocks = 0;
     let processing = false;
     let lastProcessedBlock = Number(await publicClient.getBlockNumber());
@@ -587,7 +589,7 @@ export async function runRealtimeSimulation(): Promise<void> {
           lastProcessedBlock = Math.max(lastProcessedBlock, bn);
 
           // 市場を1ステップ進める（RNG の更新は 1 周に 1 回。以降の並列タスクは値だけ共有）
-          latestFairPrice = nextFairPrice(latestFairPrice, rng);
+          latestFairPrice = nextFairPrice(latestFairPrice, rng, fairAnchor);
 
           // keeper / oracle 書込 / state+flow は相互に独立（ウォレットも別）なので並列に走らせる。
           // tx の記録（blocks.csv）はループから外し、run 後に一括走査する（logBlock 参照）。
