@@ -79,6 +79,37 @@ export function bootstrapMeanDiffCI(
   };
 }
 
+// mean(xs[i] − ys[i]) の **paired** percentile bootstrap CI。
+// xs/ys は要素ごとに対応（同じ run の index）し長さが等しいこと。ペア差分の配列を復元抽出する。
+//
+// なぜ paired か: 同一 run で並走した agent 同士は **同一市場ドロー**（同じ価格パス・flow・ブロック）を
+// 受けるため、run 間の市場分散はペア差分で相殺される。これにより unpaired（周辺分布を独立抽出）が
+// regime 分散に埋もれて検出できない小さな実力差を有意に拾える。ADR 0005 の unpaired 方針は
+// 「別 run の before/after は同一市場でなく pair 不可」が根拠で、同一 run 内の agent 間比較には当たらない。
+// 長さ不一致 / 2 未満は判定不能として null（呼び側で unpaired にフォールバック）。
+export function bootstrapPairedMeanDiffCI(
+  xs: number[],
+  ys: number[],
+  opts: BootstrapOptions = {},
+): BootstrapCI | null {
+  if (xs.length !== ys.length || xs.length < 2) return null;
+  const diffsObs = xs.map((x, i) => x - ys[i]);
+  const iterations = opts.iterations ?? 4000;
+  const level = opts.level ?? 0.9;
+  const rng = new Rng(opts.seed ?? 12345);
+  const means: number[] = new Array(iterations);
+  for (let i = 0; i < iterations; i++) means[i] = resampleMean(diffsObs, rng);
+  means.sort((a, b) => a - b);
+  const alpha = (1 - level) / 2;
+  return {
+    meanDiff: meanOf(diffsObs),
+    low: percentileSorted(means, alpha),
+    high: percentileSorted(means, 1 - alpha),
+    level,
+    iterations,
+  };
+}
+
 // --- Welch の t 検定（補助） ---
 
 // Lanczos 近似の log-gamma。

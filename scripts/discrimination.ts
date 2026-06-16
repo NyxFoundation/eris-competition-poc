@@ -78,6 +78,8 @@ function thresholdsFromEnv(): DiscriminationThresholds {
       process.env.DISC_BOOTSTRAP_ITERS,
       DEFAULT_THRESHOLDS.bootstrapIterations,
     ),
+    // DISC_C1_PAIRED=0 で unpaired にロールバック（既定は paired = run 内同一市場の対）。
+    c1Paired: (process.env.DISC_C1_PAIRED ?? "1").trim() !== "0",
     minSpearman: numEnv(
       process.env.DISC_MIN_SPEARMAN,
       DEFAULT_THRESHOLDS.minSpearman,
@@ -268,7 +270,7 @@ function renderMarkdown(
   lines.push(`## C1 実力報酬 — ${ok(v.c1.pass)}`);
   lines.push("");
   lines.push(
-    `最強 baseline: PnL median=${num(v.c1.bestBaselinePnlMedian)}, ${v.riskMetric} median=${num(v.c1.bestBaselineRiskMedian, 3)} / margin: pnl≥${t.pnlMargin}, risk≥${t.sharpeMargin}, beatFraction≥${t.minBeatFraction}（実測 ${(v.c1.beatFraction * 100).toFixed(0)}%） / 有意性: 超過の bootstrap CI(${(v.c1.ciLevel * 100).toFixed(0)}%) 下限 > 0 を必須（ADR 0005）`,
+    `最強 baseline: PnL median=${num(v.c1.bestBaselinePnlMedian)}, ${v.riskMetric} median=${num(v.c1.bestBaselineRiskMedian, 3)} / margin: pnl≥${t.pnlMargin}, risk≥${t.sharpeMargin}, beatFraction≥${t.minBeatFraction}（実測 ${(v.c1.beatFraction * 100).toFixed(0)}%） / 有意性: 超過の bootstrap CI(${(v.c1.ciLevel * 100).toFixed(0)}%) 下限 > 0 を必須（ADR 0005）。CI 法: **${v.c1.paired ? "paired（run 内＝同一市場の対。同一 run で並走した agent 間は同一ドローなので高検出力）" : "unpaired（run 整列できず周辺分布を独立抽出）"}**`,
   );
   lines.push("");
   lines.push(

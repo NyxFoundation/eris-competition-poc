@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   bootstrapMeanDiffCI,
+  bootstrapPairedMeanDiffCI,
   evaluateUnpairedGate,
   mannWhitney,
   welchT,
@@ -27,6 +28,33 @@ test("bootstrapMeanDiffCI: 決定論（同 seed・同入力 = 同結果）/ サ�
   assert.deepEqual(a, b);
   assert.equal(bootstrapMeanDiffCI([1], [1, 2]), null);
   assert.equal(bootstrapMeanDiffCI([1, 2], [1]), null);
+});
+
+test("bootstrapPairedMeanDiffCI: run 間分散が大きくても一貫した小差を有意に拾う（unpaired は埋もれる）", () => {
+  // 各 index = 同一 run。run 間で水準は激しく動く(8→311)が、対の差は常に +8〜+12 と一貫。
+  const xs = [8, 112, 209, 311, 507, 903];
+  const ys = [0, 100, 200, 300, 500, 900];
+  const paired = bootstrapPairedMeanDiffCI(xs, ys, { seed: 1 });
+  const unpaired = bootstrapMeanDiffCI(xs, ys, { seed: 1 });
+  assert.ok(paired !== null && unpaired !== null);
+  assert.ok(paired.low > 0, `paired low=${paired.low}（一貫差は有意）`);
+  assert.ok(
+    unpaired.low < 0,
+    `unpaired low=${unpaired.low}（run 間分散に埋もれ 0 跨ぎ）`,
+  );
+  // meanDiff は両者一致（平均の差は同じ）
+  assert.ok(Math.abs(paired.meanDiff - unpaired.meanDiff) < 1e-9);
+});
+
+test("bootstrapPairedMeanDiffCI: 長さ不一致 / 2 未満は null（呼び側が unpaired にフォールバック）", () => {
+  assert.equal(bootstrapPairedMeanDiffCI([1, 2, 3], [1, 2]), null);
+  assert.equal(bootstrapPairedMeanDiffCI([1], [2]), null);
+});
+
+test("bootstrapPairedMeanDiffCI: 決定論（同 seed・同入力 = 同結果）", () => {
+  const a = bootstrapPairedMeanDiffCI([3, 5, 4, 6], [1, 3, 1, 2], { seed: 7 });
+  const b = bootstrapPairedMeanDiffCI([3, 5, 4, 6], [1, 3, 1, 2], { seed: 7 });
+  assert.deepEqual(a, b);
 });
 
 test("welchT: 既知値（scipy 一致）と退化ケース", () => {

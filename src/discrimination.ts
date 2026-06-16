@@ -20,7 +20,7 @@
 // 反復実走ループは src/multiSeedRun.ts、CLI は scripts/discrimination.ts。
 // 集計(aggregateAgents)は evaluate.ts(過学習ゲート)とも共有し、Sharpe/PnL の基準を一致させる。
 
-import { bootstrapMeanDiffCI } from "./stats.js";
+import { bootstrapMeanDiffCI, bootstrapPairedMeanDiffCI } from "./stats.js";
 
 export type RiskMetric = "infoRatio" | "sharpe";
 
@@ -154,6 +154,9 @@ export type DiscriminationThresholds = {
   minBeatFraction: number; // C1: baseline を上回るべき戦略の割合(0..1)
   c1CiLevel: number; // C1: 超過の bootstrap CI 信頼水準(両側。ADR 0005。暫定値、実測で再較正)
   bootstrapIterations: number; // C1: bootstrap 反復数
+  // C1: 超過の bootstrap を paired(run 内 = 同一市場の対)で取るか。同一 run で並走した agent 同士は
+  // 同一ドローなので paired が valid かつ高検出力。run 整列(長さ一致)できないときは unpaired にフォールバック。
+  c1Paired: boolean;
   minSpearman: number; // C2: regime 間順位相関(平均)の下限
   maxGapCv: number; // C2: top-bottom gap の変動係数(CV)上限
   minSharpeSpread: number; // C3: リスク調整 metric の median (max-min) 下限
@@ -165,6 +168,7 @@ export const DEFAULT_THRESHOLDS: DiscriminationThresholds = {
   minBeatFraction: 0.5,
   c1CiLevel: 0.9,
   bootstrapIterations: 2000,
+  c1Paired: true,
   minSpearman: 0.5,
   maxGapCv: 1.0,
   minSharpeSpread: 0.04,
@@ -199,6 +203,7 @@ export type C1Result = {
   bestBaselinePnlMedian: number | null;
   bestBaselineRiskMedian: number | null;
   beatFraction: number;
+  paired: boolean; // 超過 CI を paired(run 内)で取ったか(run 整列できた比較のみ。レポート表示用)
   strategies: C1StrategyRow[];
 };
 
@@ -240,6 +245,22 @@ export function evaluateC1(
   const bestBaselineRisk = bestRiskBaseline ? risk(bestRiskBaseline) : null;
 
   const ciOpts = { level: t.c1CiLevel, iterations: t.bootstrapIterations };
+  // run 内 paired を優先(同一市場の対 → 高検出力)。run 整列(長さ一致)できない比較だけ unpaired に落ちる。
+  // netPnl は全 agent 全 run で 1 サンプル = 必ず整列。リスク metric は null run で詰まり長さがずれ得るので、
+  // その場合は paired が null を返し unpaired にフォールバックする。
+  let anyUnpaired = false;
+  const diffCI = (
+    xs: number[],
+    ys: number[],
+    seed: number,
+  ): ReturnType<typeof bootstrapMeanDiffCI> => {
+    if (t.c1Paired) {
+      const paired = bootstrapPairedMeanDiffCI(xs, ys, { ...ciOpts, seed });
+      if (paired) return paired;
+      anyUnpaired = true; // 長さ不一致 → unpaired にフォールバック
+    }
+    return bootstrapMeanDiffCI(xs, ys, { ...ciOpts, seed });
+  };
   const rows: C1StrategyRow[] = strategies.map((s) => {
     const pnlGap =
       bestBaselinePnl === null ? 0 : s.netPnl.median - bestBaselinePnl;
@@ -249,17 +270,19 @@ export function evaluateC1(
         ? sRisk - bestBaselineRisk
         : null;
     const pnlCi = bestPnlBaseline
-      ? bootstrapMeanDiffCI(s.netPnl.perRun, bestPnlBaseline.netPnl.perRun, {
-          ...ciOpts,
-          seed: bootstrapSeedFor(s.id),
-        })
+      ? diffCI(
+          s.netPnl.perRun,
+          bestPnlBaseline.netPnl.perRun,
+          bootstrapSeedFor(s.id),
+        )
       : null;
     const riskCi =
       bestRiskBaseline && riskGap !== null
-        ? bootstrapMeanDiffCI(riskSamples(s), riskSamples(bestRiskBaseline), {
-            ...ciOpts,
-            seed: bootstrapSeedFor(s.id) ^ 0x9e3779b9,
-          })
+        ? diffCI(
+            riskSamples(s),
+            riskSamples(bestRiskBaseline),
+            bootstrapSeedFor(s.id) ^ 0x9e3779b9,
+          )
         : null;
     const beatsPnl = bestBaselinePnl !== null && pnlGap >= t.pnlMargin;
     // リスク調整 metric は計算不能 run があり得るので、欠落時は PnL のみで判定(true 扱い)。
@@ -295,6 +318,7 @@ export function evaluateC1(
     bestBaselinePnlMedian: bestBaselinePnl,
     bestBaselineRiskMedian: bestBaselineRisk,
     beatFraction,
+    paired: t.c1Paired && !anyUnpaired,
     strategies: rows,
   };
 }

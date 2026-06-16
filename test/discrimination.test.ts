@@ -201,6 +201,61 @@ test("C1 有意性: 安定して上回る戦略は CI 下限 > 0 で合格のま
   assert.equal(c1.pass, true);
 });
 
+test("C1 paired(既定): run 間分散が大きくても一貫して baseline を上回る戦略を有意検出（unpaired は見逃す）", () => {
+  const baselineIds = new Set(["random"]);
+  // 各 index = 同一 run（= 同一市場）。run 間で水準は 10→2010 と激しく動くが、
+  // 同一 run 内では strat が random を常に +10 上回る。
+  const raw = byAgent({
+    strat: acc(
+      [10, 1010, 2010, 10, 1010, 2010],
+      [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+      [0.01, 0.01, 0.01, 0.01, 0.01, 0.01],
+    ),
+    random: acc(
+      [0, 1000, 2000, 0, 1000, 2000],
+      [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+      [0, 0, 0, 0, 0, 0],
+    ),
+  });
+  const agents = aggregateAgents(raw);
+  // paired(既定): 同一市場の対なので一貫差を有意に拾う → beats
+  const paired = evaluateC1(agents, baselineIds, DEFAULT_THRESHOLDS);
+  assert.equal(paired.paired, true);
+  const pRow = paired.strategies.find((r) => r.id === "strat");
+  assert.ok(
+    pRow && pRow.pnlCiLow !== null && pRow.pnlCiLow > 0,
+    "paired CI 下限 > 0",
+  );
+  assert.equal(pRow.beats, true);
+  // unpaired: run 間分散に埋もれ CI が 0 を跨ぐ → 見逃す
+  const unpaired = evaluateC1(agents, baselineIds, {
+    ...DEFAULT_THRESHOLDS,
+    c1Paired: false,
+  });
+  assert.equal(unpaired.paired, false);
+  const uRow = unpaired.strategies.find((r) => r.id === "strat");
+  assert.ok(
+    uRow && uRow.pnlCiLow !== null && uRow.pnlCiLow <= 0,
+    "unpaired CI 下限 ≤ 0",
+  );
+  assert.equal(uRow.beats, false);
+});
+
+test("C1 paired: 長さ不一致(リスク metric 欠落 run)があれば unpaired にフォールバックし paired=false", () => {
+  const baselineIds = new Set(["random"]);
+  // infoRatio の長さが strat(3) と random(2) で不一致 → paired 不可 → unpaired にフォールバック。
+  const raw = byAgent({
+    strat: acc([100, 110, 90], [0.5, 0.5, 0.5], [0.4, 0.45, 0.4]),
+    random: acc([10, 20, 15], [0.3, 0.3, 0.3], [0.0, 0.01]),
+  });
+  const c1 = evaluateC1(aggregateAgents(raw), baselineIds, DEFAULT_THRESHOLDS);
+  assert.equal(
+    c1.paired,
+    false,
+    "リスク CI が長さ不一致で unpaired フォールバック → paired=false",
+  );
+});
+
 test("collapseNetPnlByRegime: regime 内反復を median に畳む（C2 の代表ランク用）", () => {
   const collapsed = collapseNetPnlByRegime(
     byAgent({
