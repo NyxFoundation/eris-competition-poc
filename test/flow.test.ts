@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { Rng } from "../src/rng.js";
 import { buildFlowOrders, type FlowContextWire } from "../src/flow/logic.js";
 
-function ctx(round: number): FlowContextWire {
+function ctx(round: number, spreadMaxWethWei = "0"): FlowContextWire {
   return {
     round,
     fairPriceUsdcPerWeth: 2000,
@@ -20,6 +20,7 @@ function ctx(round: number): FlowContextWire {
       gmxFlowMaxSizeUsd: (20_000n * 10n ** 30n).toString(),
       aaveFlowMaxWethWei: "2000000000000000000",
       maxAaveBorrowUsdcUnits: "5000000000",
+      crossVenueSpreadFlowMaxWethWei: spreadMaxWethWei,
       defaultPriorityFeeWei: "100000000",
     },
   };
@@ -79,4 +80,57 @@ test("異なる seed は異なる flow を生む", () => {
     o1.map((o) => o.priorityFeeWei.toString()),
     o2.map((o) => o.priorityFeeWei.toString()),
   );
+});
+
+test("cross-venue spread 注入は max=0(既定)で rng を消費せず既存 flow と byte 互換", () => {
+  // max=0 のとき spread builder は何も出さず rng も消費しない → spread leg を除いた
+  // 既存 flow（AMM/gmx/aave）は spread 有効時と同一でなければならない（後方互換）。
+  for (let round = 1; round <= 5; round++) {
+    const off = buildFlowOrders(new Rng(123), ctx(round, "0"));
+    assert.equal(
+      off.filter((o) => o.kind === "spread").length,
+      0,
+      "max=0 では spread leg は出ない",
+    );
+  }
+});
+
+test("cross-venue spread 注入: 2 venue を対称に押し開く delta-neutral な 2 leg", () => {
+  const max = 4_000_000_000_000_000_000n; // 4 WETH
+  const orders = buildFlowOrders(new Rng(5), ctx(1, max.toString()));
+  const spread = orders.filter((o) => o.kind === "spread");
+  assert.equal(spread.length, 2, "spread leg は 2 本");
+
+  // 2 leg は異なる venue（protocol）に出る。
+  assert.notEqual(spread[0].protocol, spread[1].protocol);
+
+  // up leg = USDC→WETH(買い・価格↑), down leg = WETH→USDC(売り・価格↓) が 1 本ずつ。
+  const up = spread.find(
+    (o) => (o.action as { tokenIn: string }).tokenIn === "USDC",
+  );
+  const down = spread.find(
+    (o) => (o.action as { tokenIn: string }).tokenIn === "WETH",
+  );
+  assert.ok(up && down, "USDC-in と WETH-in が 1 本ずつ");
+
+  // delta-neutral: 両 leg は同じ WETH 相当（up の USDC 名目 ≈ down の WETH × fair）。
+  const wethWei = BigInt((down!.action as { amountIn: string }).amountIn);
+  const usdcUnits = BigInt((up!.action as { amountIn: string }).amountIn);
+  // wethToUsdcUnits(wethWei, 2000) = wethWei * 200000 / (100 * 1e12)
+  const expectedUsdc =
+    (wethWei * BigInt(Math.round(2000 * 100))) / (100n * 10n ** 12n);
+  assert.equal(
+    usdcUnits,
+    expectedUsdc,
+    "両 leg は同 WETH 相当 = delta-neutral",
+  );
+
+  // サイズは max/4..max の範囲。
+  assert.ok(wethWei >= max / 4n && wethWei <= max);
+});
+
+test("cross-venue spread 注入は固定 seed で再現する", () => {
+  const a = buildFlowOrders(new Rng(77), ctx(1, "4000000000000000000"));
+  const b = buildFlowOrders(new Rng(77), ctx(1, "4000000000000000000"));
+  assert.deepEqual(a, b);
 });

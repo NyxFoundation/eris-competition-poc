@@ -215,7 +215,7 @@ export async function runRealtimeSimulation(): Promise<void> {
   // ---- flow ウォレット（protocol/kind ごと。submitIntent / ctx が選択に使う）----
   const flowWalletMap = new Map<string, FlowWallet>();
   for (const id of enabledIds) {
-    for (const kind of ["informed", "uninformed"] as FlowKind[]) {
+    for (const kind of ["informed", "uninformed", "spread"] as FlowKind[]) {
       const key = `${id}:${kind}`;
       const privateKey = keccak256(stringToBytes(`flow:${config.seed}:${key}`));
       flowWalletMap.set(key, {
@@ -287,7 +287,11 @@ export async function runRealtimeSimulation(): Promise<void> {
     for (const adapter of adapters) {
       if (adapter.setupGlobal) await adapter.setupGlobal(ctx);
     }
-    const fundTargets: Array<{ role: WalletRole; privateKey: Hex }> = [
+    const fundTargets: Array<{
+      role: WalletRole;
+      privateKey: Hex;
+      key?: string;
+    }> = [
       ...agentRuntimes.map((a) => ({
         role: "agent" as WalletRole,
         privateKey: a.privateKey,
@@ -295,17 +299,23 @@ export async function runRealtimeSimulation(): Promise<void> {
       ...[...flowWalletMap.entries()].map(([key, w]) => ({
         role: flowRole(key),
         privateKey: w.privateKey,
+        key,
       })),
     ];
     for (const t of fundTargets) {
+      // spread 注入ウォレットは毎ブロック片側 leg を出し続けるため在庫が枯れやすい。
+      // cheatcode 設定で市場インパクトなく深く積んでおく（leg サイズ × run 長で枯れない）。
+      const isSpread = t.key?.endsWith(":spread") ?? false;
       await fundWallet(
         publicClient,
         walletClient,
         chain,
         t.privateKey,
         config.initialEthWei,
-        config.initialWethWei,
-        config.initialUsdcUnits,
+        isSpread
+          ? config.initialWethWei + config.crossVenueSpreadFlowMaxWethWei * 500n
+          : config.initialWethWei,
+        isSpread ? config.initialUsdcUnits * 200n : config.initialUsdcUnits,
       );
       for (const adapter of adapters) {
         if (!adapter.setupWallet) continue;

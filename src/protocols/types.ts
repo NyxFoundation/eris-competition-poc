@@ -10,7 +10,9 @@ import type {
   ProtocolId,
 } from "../types.js";
 
-export type FlowKind = "informed" | "uninformed";
+// "spread" = delta-neutral cross-venue スプレッド注入（α 機会の構造的生成。flow/logic.ts）。
+// 専用ウォレットを使い、同一 venue の uninformed/informed leg と nonce/fee 順序で干渉しない。
+export type FlowKind = "informed" | "uninformed" | "spread";
 
 export interface FlowWallet {
   id: string;

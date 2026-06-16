@@ -91,6 +91,10 @@ export type SimConfig = {
   curveFlowMaxWethWei: bigint;
   gmxFlowMaxSizeUsd: bigint;
   aaveFlowMaxWethWei: bigint;
+  // delta-neutral cross-venue スプレッド注入の 1 leg あたり最大 WETH 相当（既定 0 = 無効）。
+  // 毎ブロック 2 venue を対称に押し開いて「2-leg 裁定(α)だけが取れる」機会を構造的に作る。
+  // 方向 β を注入せず α を増やすレバー（env を α 支配へ寄せる。discrimination-needs-delta-neutral）。
+  crossVenueSpreadFlowMaxWethWei: bigint;
   // orderflow bot（独立プロセス）の起動コマンドと決定論シード。
   flowBotCommand: string;
   flowBotArgs: string[];
@@ -200,6 +204,11 @@ export function loadConfig(env = process.env): SimConfig {
     aaveFlowMaxWethWei: bigintEnv(
       env.AAVE_FLOW_MAX_WETH_WEI,
       2_000_000_000_000_000_000n,
+    ),
+    // 既定 0 = 無効（既存 run の flow と byte 互換を保つ）。α 支配 env プロファイルで > 0 にする。
+    crossVenueSpreadFlowMaxWethWei: bigintEnv(
+      env.CROSS_VENUE_SPREAD_FLOW_MAX_WETH_WEI,
+      0n,
     ),
     flowBotCommand: env.FLOW_BOT_COMMAND ?? "node",
     flowBotArgs:

@@ -152,10 +152,11 @@ export async function runSimulation(): Promise<void> {
     logger.runDir,
   );
 
-  // protocol/kind ごとの flow ウォレットを導出
+  // protocol/kind ごとの flow ウォレットを導出（spread = cross-venue 注入用。既定 off だが
+  // wallet は常に用意し、有効化時に flowOrdersToIntents が引けるようにする）
   const flowWalletMap = new Map<string, FlowWallet>();
   for (const id of enabledIds) {
-    for (const kind of ["informed", "uninformed"] as FlowKind[]) {
+    for (const kind of ["informed", "uninformed", "spread"] as FlowKind[]) {
       const key = `${id}:${kind}`;
       const privateKey = keccak256(stringToBytes(`flow:${config.seed}:${key}`));
       flowWalletMap.set(key, {
@@ -681,6 +682,8 @@ export async function buildFlowContext(
       gmxFlowMaxSizeUsd: ctx.config.gmxFlowMaxSizeUsd.toString(),
       aaveFlowMaxWethWei: ctx.config.aaveFlowMaxWethWei.toString(),
       maxAaveBorrowUsdcUnits: ctx.config.maxAaveBorrowUsdcUnits.toString(),
+      crossVenueSpreadFlowMaxWethWei:
+        ctx.config.crossVenueSpreadFlowMaxWethWei.toString(),
       defaultPriorityFeeWei: ctx.config.defaultPriorityFeeWei.toString(),
     },
   };

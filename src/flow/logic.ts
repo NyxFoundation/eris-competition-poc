@@ -23,6 +23,7 @@ export type FlowLimits = {
   gmxFlowMaxSizeUsd: bigint;
   aaveFlowMaxWethWei: bigint;
   maxAaveBorrowUsdcUnits: bigint;
+  crossVenueSpreadFlowMaxWethWei: bigint;
   defaultPriorityFeeWei: bigint;
 };
 
@@ -41,6 +42,7 @@ export type FlowContextWire = {
     gmxFlowMaxSizeUsd: string;
     aaveFlowMaxWethWei: string;
     maxAaveBorrowUsdcUnits: string;
+    crossVenueSpreadFlowMaxWethWei: string;
     defaultPriorityFeeWei: string;
   };
 };
@@ -212,6 +214,78 @@ export function buildAaveFlow(
   return [{ kind: "informed", action, priorityFeeWei: fee }];
 }
 
+// delta-neutral cross-venue スプレッド注入（α 機会の構造的生成）。
+//
+// 動機（discrimination-needs-delta-neutral / selfimprove-validation-synthesis）:
+// この市場の支配的利益源は α(裁定)でなく β(方向)で、優劣が「市場スタイル適合(β)」で決まり
+// 真のスキル選別ができない。原因は (1) 方向 β が大きい、(2) 取れる α(cross-venue スプレッド)が薄い。
+// この注入は (2) を構造的に増やす: 毎ブロック有効 AMM venue から 2 つを選び、一方で WETH を
+// 買い上げ(価格↑)・他方で同 WETH 相当を売り下げる(価格↓)。fair price 周りに対称な spread を開けるので:
+//   - 方向シグナル(β)も fair 乖離も注入しない（2 leg の市場インパクトが相殺 = delta-neutral）
+//   - その spread は「安い venue で買い・高い venue で売る」2-leg 裁定(α)だけが取れる。
+//     単発 swap の random は片側しか取れず逆 leg の戻りで損になり得る → α を運で拾えない。
+//   - 単 venue β-carrier も各 venue が fair から半分しかズレない上、2 venue が逆方向なので取り分小。
+// rng 消費は「2 venue 選択 + サイズ + fee」の固定回数。maxWethWei<=0 / venue<2 の時のみ消費せず空返し。
+export function buildCrossVenueSpreadFlow(
+  rng: Rng,
+  protocols: ProtocolId[],
+  poolPrices: Partial<Record<"uniswap" | "balancer" | "curve", number>>,
+  fairPrice: number,
+  maxWethWei: bigint,
+  defaultPriorityFeeWei: bigint,
+): FlowOrderOut[] {
+  if (maxWethWei <= 0n) return [];
+  const swapTypeOf: Record<
+    "uniswap" | "balancer" | "curve",
+    "swap" | "balancerSwap" | "curveSwap"
+  > = { uniswap: "swap", balancer: "balancerSwap", curve: "curveSwap" };
+  const venues = (["uniswap", "balancer", "curve"] as const).filter(
+    (v) => protocols.includes(v) && (poolPrices[v] ?? 0) > 0,
+  );
+  if (venues.length < 2) return [];
+
+  // 2 venue を決定論的に選ぶ（up=買い上げる venue、down=売り下げる venue）。
+  const iUp = rng.int(0, venues.length);
+  let iDown = rng.int(0, venues.length - 1);
+  if (iDown >= iUp) iDown += 1; // iUp を除いた残りから一様に選ぶ
+  const upVenue = venues[iUp];
+  const downVenue = venues[iDown];
+
+  // 両 leg を同じ WETH 相当にして delta-neutral に保つ（市場全体への方向インパクト ≈ 0）。
+  const wethEquiv = randomBigInt(rng, maxWethWei / 4n, maxWethWei);
+  // 低 fee: agent が翌ブロックで spread を取りに来られるよう、informed より控えめに置く。
+  const fee = defaultPriorityFeeWei + BigInt(rng.int(1, 30)) * 1_000_000n;
+  // 注入は意図的に価格を動かす（spread を開く）ので slippage を広く取り revert を避ける。
+  const SPREAD_SLIPPAGE_BPS = 1000;
+
+  return [
+    {
+      // up leg: USDC→WETH（買い）→ upVenue の価格を押し上げる
+      protocol: upVenue,
+      kind: "spread",
+      action: {
+        type: swapTypeOf[upVenue],
+        tokenIn: "USDC",
+        amountIn: wethToUsdcUnits(wethEquiv, fairPrice).toString(),
+        slippageBps: SPREAD_SLIPPAGE_BPS,
+      } as LeafAction,
+      priorityFeeWei: fee,
+    },
+    {
+      // down leg: WETH→USDC（売り）→ downVenue の価格を押し下げる
+      protocol: downVenue,
+      kind: "spread",
+      action: {
+        type: swapTypeOf[downVenue],
+        tokenIn: "WETH",
+        amountIn: wethEquiv.toString(),
+        slippageBps: SPREAD_SLIPPAGE_BPS,
+      } as LeafAction,
+      priorityFeeWei: fee,
+    },
+  ];
+}
+
 // wire の文字列 limits を bigint へ復元。
 export function decodeFlowLimits(wire: FlowContextWire["limits"]): FlowLimits {
   return {
@@ -222,6 +296,9 @@ export function decodeFlowLimits(wire: FlowContextWire["limits"]): FlowLimits {
     gmxFlowMaxSizeUsd: BigInt(wire.gmxFlowMaxSizeUsd),
     aaveFlowMaxWethWei: BigInt(wire.aaveFlowMaxWethWei),
     maxAaveBorrowUsdcUnits: BigInt(wire.maxAaveBorrowUsdcUnits),
+    crossVenueSpreadFlowMaxWethWei: BigInt(
+      wire.crossVenueSpreadFlowMaxWethWei ?? "0",
+    ),
     defaultPriorityFeeWei: BigInt(wire.defaultPriorityFeeWei),
   };
 }
@@ -290,5 +367,18 @@ export function buildFlowOrders(
       );
     }
   }
+
+  // 最後に cross-venue スプレッド注入（α 機会）。per-protocol ループの後に置くことで、
+  // 無効時(max=0)は rng を一切消費せず既存 flow と byte 互換を保つ。
+  out.push(
+    ...buildCrossVenueSpreadFlow(
+      rng,
+      ctx.protocols,
+      ctx.poolPrices,
+      ctx.fairPriceUsdcPerWeth,
+      limits.crossVenueSpreadFlowMaxWethWei,
+      limits.defaultPriorityFeeWei,
+    ),
+  );
   return out;
 }
