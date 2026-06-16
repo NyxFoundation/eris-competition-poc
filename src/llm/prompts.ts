@@ -182,7 +182,8 @@ export function buildReviseMessage(
   currentUsd: number,
 ): string {
   const pnlPct = ((currentUsd - initialUsd) / initialUsd) * 100;
-  const attribution = formatAttribution(computeAttribution(history));
+  const attr = computeAttribution(history);
+  const attribution = formatAttribution(attr);
   const recent = history.slice(-12);
   const lines = recent.map(
     (r) =>
@@ -192,6 +193,7 @@ export function buildReviseMessage(
 
 Reason: **${reason}**
 PnL since start: ${pnlPct.toFixed(2)}% (initial=${initialUsd.toFixed(2)} → current=${currentUsd.toFixed(2)} USDC)
+Of which, trade edge (α, price moves removed) over last ${attr.samples} rounds = ${attr.totalAlphaUsd.toFixed(2)} USDC; the rest is price drift (β) you do NOT control and that does NOT scale with trade size.
 
 ## Previous strategy (v${prev.version})
 ### notes
@@ -207,7 +209,7 @@ ${JSON.stringify(prev.params, null, 2)}
 ${prev.executorTs}
 \`\`\`
 
-## PnL attribution (which actions earned/lost; use this to decide what to change)
+## PnL attribution — α (trade edge, price moves removed). Use this, NOT total value, to decide what to change.
 ${attribution}
 
 ## Recent ${recent.length} rounds
@@ -218,6 +220,13 @@ Produce an updated strategy that is MEANINGFULLY BETTER, not a token tweak. The 
 started from a hand-tuned base (see notes above) — improve it where the attribution shows headroom
 (missed/idle rounds, mis-sizing, reverts, an ignored venue or signal). Make a decisive change rather than a
 ±few% nudge when the evidence supports it.
+
+CRITICAL — size off α, not total value: judge sizing/aggression ONLY by the α attribution (trade edge), never by
+total value or per-round inventory change (those are dominated by price drift β that does NOT scale with size).
+Increasing trade size scales α AND its costs (slippage, price impact, gas); if α per round is already small or
+the base sizing is at a sensible level, sizing up will lose more to slippage than it gains. Only size up when the
+α attribution clearly shows captured edge left on the table (e.g. α-positive rounds repeatedly hitting a size cap).
+If the base already captures the available α cleanly, the best revision may be a small, targeted one — or none.
 
 Include a "change contract" alongside notes/params/executor_ts:
 - change_type: "params_only" or "executor_logic"
