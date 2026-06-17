@@ -25,6 +25,12 @@ import { CodexCliStrategist } from "./codexCliStrategist.js";
 import type { ReviseReason } from "./prompts.js";
 
 const REVIEW_EVERY_N_ROUNDS = intEnv("ERIS_LLM_REVIEW_EVERY", 10);
+// revise ウィンドウの位相オフセット(ブロック)。多数の自己改善 agent を並列で回すとき、
+// 全員が同じ round で同時に revise すると LLM API のピーク並走が agent 数になり競合する
+// (各 revise が遅くなり runway 内に終わらない)。agent ごとに別オフセットを与えて revise を
+// ずらす(stagger)と同時刻の revise が数体に減り、同じ API プールで多数の agent を収容できる。
+// 既定 0 = 従来どおり(全員同位相)。ロスターで agent 別に設定する。
+const REVIEW_OFFSET = intEnv("ERIS_LLM_REVIEW_OFFSET", 0);
 const DRAWDOWN_TRIGGER_RATIO = floatEnv("ERIS_LLM_DRAWDOWN_RATIO", 0.05);
 const HISTORY_CAPACITY = intEnv("ERIS_LLM_HISTORY_CAPACITY", 30);
 const EXECUTOR_TIMEOUT_MS = intEnv("ERIS_LLM_EXECUTOR_TIMEOUT_MS", 200);
@@ -373,11 +379,13 @@ export function whichReviseReason(
   lastReviseRound: number,
   currentUsd: number,
   initialUsd: number,
+  reviewEvery: number = REVIEW_EVERY_N_ROUNDS,
+  offset: number = REVIEW_OFFSET,
 ): ReviseReason | null {
   if (
-    round > 0 &&
+    round > offset &&
     round !== lastReviseRound &&
-    round % REVIEW_EVERY_N_ROUNDS === 0
+    (round - offset) % reviewEvery === 0
   )
     return "scheduled";
   if (

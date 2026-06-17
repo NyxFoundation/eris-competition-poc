@@ -355,6 +355,26 @@ test("whichReviseReason cadence and drawdown logic", () => {
   assert.equal(whichReviseReason(3, -1, -10, 0), null);
 });
 
+test("whichReviseReason: revise オフセットで stagger できる(多数並列の競合緩和)", () => {
+  // reviewEvery=60, offset=0: 60,120,... で発火、20 では非発火
+  assert.equal(whichReviseReason(60, -1, 100, 100, 60, 0), "scheduled");
+  assert.equal(whichReviseReason(20, -1, 100, 100, 60, 0), null);
+  // offset=20: (round-20)%60==0 → 20,80,140 で発火、60 では非発火（位相がずれる）
+  assert.equal(whichReviseReason(80, -1, 100, 100, 60, 20), "scheduled");
+  assert.equal(whichReviseReason(60, -1, 100, 100, 60, 20), null);
+  // offset 直前/未満は発火しない(round<=offset)
+  assert.equal(
+    whichReviseReason(20, -1, 100, 100, 60, 20),
+    null,
+    "round==offset は発火しない",
+  );
+  // 異なる offset の agent は別 round で発火 → 同時刻の revise が分散する
+  const a = whichReviseReason(120, -1, 100, 100, 60, 0); // agent A: 発火
+  const b = whichReviseReason(120, -1, 100, 100, 60, 20); // agent B: 非発火(140 で発火)
+  assert.equal(a, "scheduled");
+  assert.equal(b, null);
+});
+
 function gateStrat(executorTs: string): Strategy {
   return { version: 1, notes: "t", params: {}, executorTs };
 }
