@@ -118,6 +118,37 @@ const MAX_VIOLATION_RETRIES = 2;
 // regime ごとに replications 回、実時間 sim を直列で実走し、accumulateRun で集計する。
 // 旧 collectMultiSeedStats(seed ごとに 1 回・決定論前提)の置換(ADR 0005 §1)。
 // ルール違反が検出された run は無効化して自動再実行する(ADR 0006 §5)。
+// forkUrl(ARB_RPC_URL)未設定だと resetFork が soft-reset(anvil_reset [])へ黙ってフォールバックし、
+// 前 run の市場/ポジション状態が残留する([[anvil-reset-does-not-clear-state]])。比較評価で特に危険:
+//   - LP/aave 等ポジション保持戦略は前 run のポジションを引き継ぎ netPnl が汚染(偽の益)
+//   - REP>1 は同一 regime で同一ウォレットを再利用するため汚染が確実に出る
+//   - swap 系も市場残留ノイズで C2(順位安定)が崩れ識別力を過小評価
+// silent に汚染されると誤った結論を出すため(実例: ADR 0007 初版の FAIL→PASS 誤判定)、大きく警告する。
+// 純関数(テスト可)。forkUrl があれば null(警告不要)。
+export function softResetWarning(
+  forkUrl: string | undefined,
+  regimes: number[],
+  replications: number,
+): string | null {
+  if (forkUrl) return null;
+  const totalRuns = regimes.length * replications;
+  return [
+    "",
+    "============================================================",
+    "⚠  WARNING: ARB_RPC_URL 未設定 → resetFork が soft-reset で回ります",
+    "============================================================",
+    `  比較評価(${totalRuns} run = ${regimes.length} regime × ${replications} rep)で前 run の`,
+    "  市場/ポジション状態が残留し、結果が汚染される可能性があります:",
+    "    - LP/aave 等ポジション保持戦略は netPnl が汚染(前 run のポジション引継ぎ)",
+    "    - REP>1 は同一ウォレット再利用で汚染が確実に発生",
+    "    - swap 系も市場残留ノイズで C2(順位安定)が崩れ識別力を過小評価",
+    "  → full re-fork(clean)にするには `ARB_RPC_URL` を export してから回すこと。",
+    "    例: ARB_RPC_URL=<上流 RPC> FORK_BLOCK_NUMBER=<n> npm run discrimination",
+    "============================================================",
+    "",
+  ].join("\n");
+}
+
 export async function collectReplicationStats(
   regimes: number[],
   replications: number,
@@ -132,6 +163,9 @@ export async function collectReplicationStats(
       "ERIS_RUN_BLOCKS must be > 0: 実時間 run は runBlocks 固定で長さを揃える(ADR 0005 §1)。ERIS_RUN_SECONDS だけでは run 長が wall-clock 依存でぶれる。",
     );
   }
+  // forkUrl 未設定なら soft-reset 汚染を大きく警告(silent 汚染で誤結論を防ぐ)。
+  const warning = softResetWarning(config.forkUrl, regimes, replications);
+  if (warning) console.error(warning);
   const byAgent = new Map<string, AgentAcc>();
   const runs: ReplicationRun[] = [];
   const granularities: number[] = [];
