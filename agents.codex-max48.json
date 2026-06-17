@@ -1,0 +1,845 @@
+{
+  "_comment": "codex 48 体並列の絶対上限探索。",
+  "agents": [
+    {
+      "id": "si-codex-01",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "0"
+      },
+      "description": "codex/crossvenue/off0"
+    },
+    {
+      "id": "si-codex-02",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "1"
+      },
+      "description": "codex/cvbal/off1"
+    },
+    {
+      "id": "si-codex-03",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "2"
+      },
+      "description": "codex/crossvenue/off2"
+    },
+    {
+      "id": "si-codex-04",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "3"
+      },
+      "description": "codex/cvbal/off3"
+    },
+    {
+      "id": "si-codex-05",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "5"
+      },
+      "description": "codex/crossvenue/off5"
+    },
+    {
+      "id": "si-codex-06",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "6"
+      },
+      "description": "codex/cvbal/off6"
+    },
+    {
+      "id": "si-codex-07",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "7"
+      },
+      "description": "codex/crossvenue/off7"
+    },
+    {
+      "id": "si-codex-08",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "8"
+      },
+      "description": "codex/cvbal/off8"
+    },
+    {
+      "id": "si-codex-09",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "10"
+      },
+      "description": "codex/crossvenue/off10"
+    },
+    {
+      "id": "si-codex-10",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "11"
+      },
+      "description": "codex/cvbal/off11"
+    },
+    {
+      "id": "si-codex-11",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "12"
+      },
+      "description": "codex/crossvenue/off12"
+    },
+    {
+      "id": "si-codex-12",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "13"
+      },
+      "description": "codex/cvbal/off13"
+    },
+    {
+      "id": "si-codex-13",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "15"
+      },
+      "description": "codex/crossvenue/off15"
+    },
+    {
+      "id": "si-codex-14",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "16"
+      },
+      "description": "codex/cvbal/off16"
+    },
+    {
+      "id": "si-codex-15",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "17"
+      },
+      "description": "codex/crossvenue/off17"
+    },
+    {
+      "id": "si-codex-16",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "18"
+      },
+      "description": "codex/cvbal/off18"
+    },
+    {
+      "id": "si-codex-17",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "20"
+      },
+      "description": "codex/crossvenue/off20"
+    },
+    {
+      "id": "si-codex-18",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "21"
+      },
+      "description": "codex/cvbal/off21"
+    },
+    {
+      "id": "si-codex-19",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "22"
+      },
+      "description": "codex/crossvenue/off22"
+    },
+    {
+      "id": "si-codex-20",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "23"
+      },
+      "description": "codex/cvbal/off23"
+    },
+    {
+      "id": "si-codex-21",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "25"
+      },
+      "description": "codex/crossvenue/off25"
+    },
+    {
+      "id": "si-codex-22",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "26"
+      },
+      "description": "codex/cvbal/off26"
+    },
+    {
+      "id": "si-codex-23",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "27"
+      },
+      "description": "codex/crossvenue/off27"
+    },
+    {
+      "id": "si-codex-24",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "28"
+      },
+      "description": "codex/cvbal/off28"
+    },
+    {
+      "id": "si-codex-25",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "30"
+      },
+      "description": "codex/crossvenue/off30"
+    },
+    {
+      "id": "si-codex-26",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "31"
+      },
+      "description": "codex/cvbal/off31"
+    },
+    {
+      "id": "si-codex-27",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "32"
+      },
+      "description": "codex/crossvenue/off32"
+    },
+    {
+      "id": "si-codex-28",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "33"
+      },
+      "description": "codex/cvbal/off33"
+    },
+    {
+      "id": "si-codex-29",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "35"
+      },
+      "description": "codex/crossvenue/off35"
+    },
+    {
+      "id": "si-codex-30",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "36"
+      },
+      "description": "codex/cvbal/off36"
+    },
+    {
+      "id": "si-codex-31",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "37"
+      },
+      "description": "codex/crossvenue/off37"
+    },
+    {
+      "id": "si-codex-32",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "38"
+      },
+      "description": "codex/cvbal/off38"
+    },
+    {
+      "id": "si-codex-33",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "40"
+      },
+      "description": "codex/crossvenue/off40"
+    },
+    {
+      "id": "si-codex-34",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "41"
+      },
+      "description": "codex/cvbal/off41"
+    },
+    {
+      "id": "si-codex-35",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "42"
+      },
+      "description": "codex/crossvenue/off42"
+    },
+    {
+      "id": "si-codex-36",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "43"
+      },
+      "description": "codex/cvbal/off43"
+    },
+    {
+      "id": "si-codex-37",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "45"
+      },
+      "description": "codex/crossvenue/off45"
+    },
+    {
+      "id": "si-codex-38",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "46"
+      },
+      "description": "codex/cvbal/off46"
+    },
+    {
+      "id": "si-codex-39",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "47"
+      },
+      "description": "codex/crossvenue/off47"
+    },
+    {
+      "id": "si-codex-40",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "48"
+      },
+      "description": "codex/cvbal/off48"
+    },
+    {
+      "id": "si-codex-41",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "50"
+      },
+      "description": "codex/crossvenue/off50"
+    },
+    {
+      "id": "si-codex-42",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "51"
+      },
+      "description": "codex/cvbal/off51"
+    },
+    {
+      "id": "si-codex-43",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "52"
+      },
+      "description": "codex/crossvenue/off52"
+    },
+    {
+      "id": "si-codex-44",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "53"
+      },
+      "description": "codex/cvbal/off53"
+    },
+    {
+      "id": "si-codex-45",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "55"
+      },
+      "description": "codex/crossvenue/off55"
+    },
+    {
+      "id": "si-codex-46",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "56"
+      },
+      "description": "codex/cvbal/off56"
+    },
+    {
+      "id": "si-codex-47",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "57"
+      },
+      "description": "codex/crossvenue/off57"
+    },
+    {
+      "id": "si-codex-48",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "58"
+      },
+      "description": "codex/cvbal/off58"
+    },
+    {
+      "id": "random",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/random.ts"
+      ],
+      "wallet": "AUTO",
+      "baseline": true,
+      "description": "baseline"
+    },
+    {
+      "id": "noop",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/noop.ts"
+      ],
+      "wallet": "AUTO",
+      "baseline": true,
+      "description": "baseline"
+    }
+  ]
+}
