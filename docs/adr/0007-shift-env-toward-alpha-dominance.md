@@ -4,6 +4,36 @@
 
 Proposed
 
+## 訂正（2026-06-17、重要）
+
+**本 ADR 初版の「FAIL→PASS で識別力を獲得した」という主張は測定エラーに基づく誤りだった。**
+当初の評価は `ARB_RPC_URL` を渡し忘れて全 run が **soft-reset**（`anvil_reset []`、前 run の市場状態が
+残留）で回っており、その残留ノイズが BEFORE の識別力を人為的に下げて FAIL に見せていた
+（[[anvil-reset-does-not-clear-state]] が警告していた罠）。
+
+`ARB_RPC_URL` を設定し **full re-fork（clean）** で測り直すと:
+
+| crossvenue ロスター | crossvenue | venue-arb | random | noop | C2 Spearman | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| **clean BEFORE**（default, kappa 0.02） | +897 | +600 | **+98** | 0 | 0.800 | ✅ PASS |
+| **clean AFTER**（α プロファイル, 3/4 run※） | +1210 | +1120 | **−127** | 0 | 安定 | PASS |
+| ~~soft-reset BEFORE（誤）~~ | 313 | 136 | 97 | 0 | 0.000 | FAIL |
+
+※ AFTER の 4 run 目は full re-fork 中の alchemy 接続失敗（DNS）で中断。3 run の値。
+
+**訂正後の正しい結論:**
+1. **default env（clean）は既に識別力を持つ**（cross-venue 裁定が random を有意超え・C2 安定）。
+   元々の cross-venue 裁定の識別力設計（[[discrimination-needs-delta-neutral]]）と整合。
+2. **α プロファイルは「識別力の獲得」ではなく「α 支配の強化」**: random の方向 β 運を消し
+   （+98→−127、でたらめが確実に負ける）、α 取り分を約 2 倍に拡大（skill 差を広げる）。価値はあるが救済ではない。
+3. **運用上の必須事項**: 比較評価（discrimination/evaluate/gate）は **`ARB_RPC_URL` を必ず設定**して
+   full re-fork で回すこと。さもなくば soft-reset で市場/ポジション状態が run 間に残留し、特に
+   LP 等のポジション保持戦略は netPnl が汚染、swap 系も C2 がノイズで崩れる。
+
+以下の本文（Decision/Consequences）は初版のまま残すが、**§3「実証」と Consequences の
+「FAIL→PASS」記述は上記訂正で読み替えること**。レバー自体（β 抑制 + α 注入）は clean でも有効
+（α 支配を強める）なので決定は維持する。
+
 ## Context
 
 eris-competition-poc は Anvil で Arbitrum をフォークする DeFi トレード競争シミュレータで、環境の
@@ -102,6 +132,10 @@ const wethEquiv = randomBigInt(rng, maxWethWei / 4n, maxWethWei);
 
 ### 3. 実証（同一ロスター・env のみ変更）
 
+> **⚠ 訂正注記**: 下表は **soft-reset（誤った測定）** の値。clean で測ると BEFORE は元から PASS で、
+> FAIL→PASS は成立しない。正しい clean 比較は冒頭「訂正（2026-06-17）」を見ること。
+> （clean でも α プロファイルが random を負に沈め α を拡大する効果は実在する＝α 支配の強化）。
+
 | metric | BEFORE（既定 env） | AFTER（α プロファイル） |
 |---|---|---|
 | verdict | ❌ FAIL | ✅ **PASS** |
@@ -115,6 +149,10 @@ AFTER は skilled（crossvenue, venue-arb）が両 regime で常に上位・rand
 random の方向 β 運が消えて負ける。注入は実働（spread flow ≈ 2 tx/block）。
 
 ### 4. LLM 自己改善ロスターでの確認（本丸）
+
+> **⚠ 訂正注記**: この比較も「旧 env」側は **soft-reset（誤った基準）**。clean で旧 env を測り直して
+> いないため、「FAIL→PASS」は未確認（推定 over-claim）。α プロファイル側の絶対値（si-cv 等が random を
+> 安定して上回る・rollback 発火）は LP 無しロスターのため概ね有効だが、clean 再確認は未実施（高コスト）。
 
 deterministic ロスターの機構実証に続き、**実際の LLM 自己改善 agent ロスター**
 `agents.selfimprove-discrim-strong.json`（si-cv/si-cvbal/si-venue = `claude -p` 自己改善 +
@@ -136,10 +174,13 @@ random は最下位（median +12, min −86）。**自己改善競争が regime 
 
 ### Positive
 
-- 環境の識別力が β 支配の FAIL から α 支配の PASS へ反転。優劣が **スキル（α）で regime 横断に
-  安定** して決まる土俵になった（C1/C2/C3 同時 PASS）。
+（訂正後の正しい便益。冒頭「訂正（2026-06-17）」の clean 数値が根拠）
+- **α 支配を強化**: random の方向 β 運を消し（clean で +98→−127＝でたらめが負ける）、α 取り分を
+  約 2 倍に拡大。スキル差がより鋭くなる。※「FAIL→PASS で識別力を獲得」ではない（default は元から PASS）。
 - 採点（netPnl）を変えずに達成。β の期待値を 0 に寄せたので netPnl が自然に α を選ぶ。
-- env 可変・既定 off で既存評価と互換。α プロファイルは env レシピとして本番へ配布可能。
+- env 可変・既定 off で既存評価と互換。α プロファイルは env レシピとして配布可能。
+- 多様な大ロスター（clean・11 agent）でも C2/C3 PASS で明確・安定に順位づけ（C1 は弱戦略を
+  多数含むロスターでは beatFraction 未達で FAIL ＝ 弱戦略を正しく弱いと判定）。
 
 ### Negative
 
