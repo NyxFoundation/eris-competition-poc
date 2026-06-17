@@ -21,6 +21,7 @@ import {
 } from "./claudeStrategist.js";
 import { ClaudeSubscriptionStrategist } from "./claudeSubscriptionStrategist.js";
 import { ClaudeCliStrategist } from "./claudeCliStrategist.js";
+import { CodexCliStrategist } from "./codexCliStrategist.js";
 import type { ReviseReason } from "./prompts.js";
 
 const REVIEW_EVERY_N_ROUNDS = intEnv("ERIS_LLM_REVIEW_EVERY", 10);
@@ -133,6 +134,8 @@ const helpersBase: Omit<ExecutorHelpers, "log"> = {
  *   apikey        – ClaudeStrategist using ANTHROPIC_API_KEY.
  *   cli           – ClaudeCliStrategist via `claude -p` (Claude Code OAuth/サブスク).
  *                   推奨のサブスク経路。SDK と違い nested でもハングしない。
+ *   codex         – CodexCliStrategist via `codex exec` (別 API プール)。claude -p と競合しない
+ *                   ので混成ロスターで自己改善の並走上限を上げられる。`ERIS_CODEX_MODEL` で model 上書き。
  *   subscription  – ClaudeSubscriptionStrategist via Agent SDK query()。注意: Claude Code
  *                   セッション内(別ターミナル含む)では nested 検出でハングしうる。
  *   auto (default)– cli if `claude` is reachable, else apikey if a key is set, else mock.
@@ -158,6 +161,10 @@ export function selectStrategist(): Strategist {
   if (auth === "cli") {
     emitStderr("[claude-llm] strategist=cli (claude -p, Claude Code OAuth)\n");
     return new ClaudeCliStrategist();
+  }
+  if (auth === "codex") {
+    emitStderr("[claude-llm] strategist=codex (codex exec, 別 API プール)\n");
+    return new CodexCliStrategist();
   }
   if (auth === "subscription") {
     emitStderr("[claude-llm] strategist=subscription (Agent SDK query)\n");
