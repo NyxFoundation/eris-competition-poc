@@ -8,6 +8,12 @@ import {
   sharpeRatio,
 } from "../src/perRoundValues.js";
 
+// ADR 0006 実装順序の前提: 同期ラウンド方式（runSimulation）に依存するため deprecated。
+console.error(
+  "[deprecated] `npm run leaderboard` は同期ラウンド方式に依存しており非推奨です（ADR 0006）。" +
+    "ランキング/識別力は `npm run evaluate` / `npm run discrimination` を使ってください。",
+);
+
 process.env.ROUNDS ??= "128";
 process.env.AGENTS_CONFIG ??= "agents.leaderboard.json";
 

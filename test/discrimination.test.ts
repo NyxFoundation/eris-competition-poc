@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   aggregateAgents,
+  collapseNetPnlByRegime,
   computeVerdict,
   DEFAULT_THRESHOLDS,
   evaluateC1,
@@ -113,9 +114,11 @@ test("C3 FAIL: 全 agent が同一 Sharpe レンジに潰れる", () => {
 
 test("しきい値は上書きできる（margin を上げると C1 が厳しくなる）", () => {
   const baselineIds = new Set(["random"]);
+  // 注: ADR 0005 の有意性必須化により、リスク metric が baseline と完全タイ（CI=[0,0]）の
+  // 戦略は不合格になる。margin 上書きの検証なので、リスクはわずかに上回るデータにする。
   const agents = aggregateAgents(
     byAgent({
-      s: acc([105, 106, 104], [0.3, 0.3, 0.3]),
+      s: acc([105, 106, 104], [0.31, 0.31, 0.31]),
       random: acc([100, 100, 100], [0.3, 0.3, 0.3]),
     }),
   );
@@ -161,4 +164,147 @@ test("infoRatio が無ければ総リターン Sharpe にフォールバック",
   );
   const c3 = evaluateC3(agents, DEFAULT_THRESHOLDS);
   assert.equal(c3.riskMetric, "sharpe");
+});
+
+// --- ADR 0005: 反復読み替え（unpaired 統計）の追加ケース ---
+
+test("C1 有意性(ADR 0005): median は超えたが高分散で CI が 0 を跨ぐ → 不合格", () => {
+  const baselineIds = new Set(["noop"]);
+  const agents = aggregateAgents(
+    byAgent({
+      // median 150 > 0 だが run 間のぶれが激しく、平均超過の CI 下限 ≤ 0（運の疑い）
+      lucky: acc([200, -180, 150, -160, 170], [0.5, 0.5, 0.5, 0.5, 0.5]),
+      noop: acc([0, 0, 0, 0, 0], [0, 0, 0, 0, 0]),
+    }),
+  );
+  const c1 = evaluateC1(agents, baselineIds, DEFAULT_THRESHOLDS);
+  const row = c1.strategies.find((r) => r.id === "lucky");
+  assert.ok(row);
+  assert.ok(row.pnlGap > 0, "median 比較では超えている");
+  assert.ok(row.pnlCiLow !== null && row.pnlCiLow <= 0, "CI 下限は 0 以下");
+  assert.equal(row.beats, false, "有意性必須化により不合格");
+  assert.equal(c1.pass, false);
+});
+
+test("C1 有意性: 安定して上回る戦略は CI 下限 > 0 で合格のまま", () => {
+  const baselineIds = new Set(["noop"]);
+  const agents = aggregateAgents(
+    byAgent({
+      steady: acc([300, 320, 290, 310, 305], [0.8, 0.9, 0.85, 0.8, 0.9]),
+      noop: acc([0, 0, 0, 0, 0], [0, 0, 0, 0, 0]),
+    }),
+  );
+  const c1 = evaluateC1(agents, baselineIds, DEFAULT_THRESHOLDS);
+  const row = c1.strategies[0];
+  assert.ok(row.pnlCiLow !== null && row.pnlCiLow > 0);
+  assert.equal(row.beats, true);
+  assert.equal(c1.pass, true);
+});
+
+test("C1 paired(既定): run 間分散が大きくても一貫して baseline を上回る戦略を有意検出（unpaired は見逃す）", () => {
+  const baselineIds = new Set(["random"]);
+  // 各 index = 同一 run（= 同一市場）。run 間で水準は 10→2010 と激しく動くが、
+  // 同一 run 内では strat が random を常に +10 上回る。
+  const raw = byAgent({
+    strat: acc(
+      [10, 1010, 2010, 10, 1010, 2010],
+      [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+      [0.01, 0.01, 0.01, 0.01, 0.01, 0.01],
+    ),
+    random: acc(
+      [0, 1000, 2000, 0, 1000, 2000],
+      [0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+      [0, 0, 0, 0, 0, 0],
+    ),
+  });
+  const agents = aggregateAgents(raw);
+  // paired(既定): 同一市場の対なので一貫差を有意に拾う → beats
+  const paired = evaluateC1(agents, baselineIds, DEFAULT_THRESHOLDS);
+  assert.equal(paired.paired, true);
+  const pRow = paired.strategies.find((r) => r.id === "strat");
+  assert.ok(
+    pRow && pRow.pnlCiLow !== null && pRow.pnlCiLow > 0,
+    "paired CI 下限 > 0",
+  );
+  assert.equal(pRow.beats, true);
+  // unpaired: run 間分散に埋もれ CI が 0 を跨ぐ → 見逃す
+  const unpaired = evaluateC1(agents, baselineIds, {
+    ...DEFAULT_THRESHOLDS,
+    c1Paired: false,
+  });
+  assert.equal(unpaired.paired, false);
+  const uRow = unpaired.strategies.find((r) => r.id === "strat");
+  assert.ok(
+    uRow && uRow.pnlCiLow !== null && uRow.pnlCiLow <= 0,
+    "unpaired CI 下限 ≤ 0",
+  );
+  assert.equal(uRow.beats, false);
+});
+
+test("C1 paired: 長さ不一致(リスク metric 欠落 run)があれば unpaired にフォールバックし paired=false", () => {
+  const baselineIds = new Set(["random"]);
+  // infoRatio の長さが strat(3) と random(2) で不一致 → paired 不可 → unpaired にフォールバック。
+  const raw = byAgent({
+    strat: acc([100, 110, 90], [0.5, 0.5, 0.5], [0.4, 0.45, 0.4]),
+    random: acc([10, 20, 15], [0.3, 0.3, 0.3], [0.0, 0.01]),
+  });
+  const c1 = evaluateC1(aggregateAgents(raw), baselineIds, DEFAULT_THRESHOLDS);
+  assert.equal(
+    c1.paired,
+    false,
+    "リスク CI が長さ不一致で unpaired フォールバック → paired=false",
+  );
+});
+
+test("collapseNetPnlByRegime: regime 内反復を median に畳む（C2 の代表ランク用）", () => {
+  const collapsed = collapseNetPnlByRegime(
+    byAgent({
+      a: acc([1, 3, 5, 7, 9, 11], [0, 0, 0, 0, 0, 0]),
+    }),
+    [1, 1, 1, 2, 2, 2],
+  );
+  const a = collapsed.get("a");
+  assert.ok(a);
+  assert.deepEqual(a.netPnl, [3, 9]);
+  assert.deepEqual(a.sharpe, []);
+});
+
+test("C2 regime 読み替え: regime 内の順位ノイズは畳めば消え、regime 間の安定が残る", () => {
+  // regime 内では勝者が反復ごとに入れ替わる（タイミングノイズ）が、
+  // regime 代表値(median)では常に a > b（市場が変わっても順位は安定）。
+  const raw = byAgent({
+    a: acc([100, -50, 90, 80, -40, 85], [0, 0, 0, 0, 0, 0]),
+    b: acc([-60, 95, -55, -45, 70, -50], [0, 0, 0, 0, 0, 0]),
+  });
+  const regimeOf = [1, 1, 1, 2, 2, 2];
+  // 畳まず run ごとに順位を取ると不安定
+  const noisy = evaluateC2(aggregateAgents(raw), DEFAULT_THRESHOLDS);
+  assert.ok((noisy.meanSpearman ?? 1) < DEFAULT_THRESHOLDS.minSpearman);
+  // regime 代表ランクへ畳むと安定
+  const collapsed = evaluateC2(
+    aggregateAgents(collapseNetPnlByRegime(raw, regimeOf)),
+    DEFAULT_THRESHOLDS,
+  );
+  assert.equal(collapsed.regimes, 2);
+  assert.equal(collapsed.meanSpearman, 1);
+  assert.equal(collapsed.pass, true);
+});
+
+test("computeVerdict: 単一 regime 構成では C2 は参考値（pass 判定から除外）", () => {
+  const baselineIds = new Set(["noop"]);
+  const raw = byAgent({
+    strong: acc([300, 320, 290, 310], [0.8, 0.9, 0.85, 0.8]),
+    noop: acc([0, 0, 0, 0], [0, 0, 0, 0]),
+  });
+  const agents = aggregateAgents(raw);
+  const rankAgents = aggregateAgents(collapseNetPnlByRegime(raw, [1, 1, 1, 1]));
+  const v = computeVerdict(agents, baselineIds, DEFAULT_THRESHOLDS, {
+    rankAgents,
+    regimeCount: 1,
+  });
+  assert.equal(v.c2Skipped, true);
+  assert.equal(v.c1.pass, true);
+  assert.equal(v.c3.pass, true);
+  assert.equal(v.pass, true, "C2 を除外して C1/C3 で判定");
+  assert.ok(v.hints.some((h) => h.includes("単一 regime")));
 });

@@ -25,7 +25,6 @@ import {
   mine,
   resetFork,
   sendAndMine,
-  setActiveStables,
   setEthBalance,
   snapshotForLog,
 } from "./chain.js";
@@ -41,11 +40,11 @@ import type {
   TxIntent,
   WalletRole,
 } from "./types.js";
-import { enabledAdapters, setEnabledProtocols } from "./protocols/registry.js";
+import { enabledAdapters, initProtocols } from "./protocols/registry.js";
 import type { FlowKind, FlowWallet, SimContext } from "./protocols/types.js";
 import { updateOracles } from "./protocols/oracles.js";
 import { GMX_MARKETS } from "./constants.js";
-import { FlowProcess } from "./flowProcess.js";
+import { FlowProcess, type FlowOrderWire } from "./flowProcess.js";
 import type { FlowContextWire } from "./flow/logic.js";
 import { readAaveFlowReserves } from "./protocols/aave.js";
 import {
@@ -94,13 +93,9 @@ const GAS_ONLY_WEI = 2_000_000_000_000_000_000_000_000n; // 2,000,000 ETH（admi
 
 export async function runSimulation(): Promise<void> {
   const config = loadConfig();
-  setEnabledProtocols(config.enabledProtocols);
-  const adapters = enabledAdapters();
+  // 有効 protocol の設定 + stable 統一会計の登録（registry.initProtocols に集約）
+  const adapters = initProtocols(config.enabledProtocols);
   const enabledIds = adapters.map((a) => a.id);
-  // stable 統一会計: 有効 adapter が使う stable を残高合算対象に登録
-  setActiveStables(
-    adapters.map((a) => a.stableToken).filter((t): t is Address => Boolean(t)),
-  );
 
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   const logger = new RunLogger(config.runDirRoot, runId);
@@ -157,10 +152,11 @@ export async function runSimulation(): Promise<void> {
     logger.runDir,
   );
 
-  // protocol/kind ごとの flow ウォレットを導出
+  // protocol/kind ごとの flow ウォレットを導出（spread = cross-venue 注入用。既定 off だが
+  // wallet は常に用意し、有効化時に flowOrdersToIntents が引けるようにする）
   const flowWalletMap = new Map<string, FlowWallet>();
   for (const id of enabledIds) {
-    for (const kind of ["informed", "uninformed"] as FlowKind[]) {
+    for (const kind of ["informed", "uninformed", "spread"] as FlowKind[]) {
       const key = `${id}:${kind}`;
       const privateKey = keccak256(stringToBytes(`flow:${config.seed}:${key}`));
       flowWalletMap.set(key, {
@@ -292,6 +288,7 @@ export async function runSimulation(): Promise<void> {
     }
 
     let fairPrice = await initialFairPrice(ctx, enabledIds);
+    const fairAnchor = fairPrice; // 平均回帰価格モデルの中心（初期 fair price）
     const history: AgentObservation["history"] = [];
     for (const agent of agentRuntimes) {
       agent.initial = await getBalances(
@@ -301,7 +298,7 @@ export async function runSimulation(): Promise<void> {
     }
 
     for (let round = 1; round <= config.rounds; round++) {
-      fairPrice = nextFairPrice(fairPrice, rng);
+      fairPrice = nextFairPrice(fairPrice, rng, fairAnchor);
 
       // ---- 0) EVM 時間を進める（Aave 変動金利・GMX funding が現実スケールで効くように）----
       // evm_increaseTime は「次の mine 時点での timestamp」に効くので、
@@ -578,7 +575,7 @@ export async function runSimulation(): Promise<void> {
 // 観測 / flow / submit
 // ---------------------------------------------------------------------------
 
-async function observationFor(
+export async function observationFor(
   ctx: SimContext,
   adapters: ReturnType<typeof enabledAdapters>,
   stateById: Map<ProtocolId, unknown>,
@@ -592,16 +589,21 @@ async function observationFor(
   config: SimConfig,
   enabledIds: ProtocolId[],
 ): Promise<AgentObservation> {
+  // protocol ごとの観測は独立した読取なので並列に発行する。direct モードの agent クライアント
+  // （batch=true）では同一 tick の読取が Multicall3 1 本に自動集約されるため、並列発行が
+  // そのまま往復回数の削減になる。
   const protocols: ProtocolObservations = {};
-  for (const adapter of adapters) {
-    const obs = await adapter.observe(
-      ctx,
-      stateById.get(adapter.id),
-      agentAddress,
-      fairPrice,
-    );
-    (protocols as Record<string, unknown>)[adapter.id] = obs;
-  }
+  await Promise.all(
+    adapters.map(async (adapter) => {
+      const obs = await adapter.observe(
+        ctx,
+        stateById.get(adapter.id),
+        agentAddress,
+        fairPrice,
+      );
+      (protocols as Record<string, unknown>)[adapter.id] = obs;
+    }),
+  );
   return {
     kind: "observation",
     runId,
@@ -638,15 +640,14 @@ async function observationFor(
 
 // orderflow bot プロセスに FlowContext を渡して FlowOrder[] を受け取り、TxIntent に変換する。
 // flow ウォレットの選択と tx 提出は coordinator が所有（bot は注文を決めるだけ）。
-async function requestFlowIntents(
+// FlowContext を組み立てる（poolPrices / aave reserves / limits）。realtime でも毎ブロック再利用する。
+export async function buildFlowContext(
   ctx: SimContext,
-  flowProcess: FlowProcess,
   enabledIds: ProtocolId[],
   stateById: Map<ProtocolId, unknown>,
   fairPrice: number,
   round: number,
-  timeoutMs: number,
-): Promise<TxIntent[]> {
+): Promise<FlowContextWire> {
   const poolPrices: Partial<Record<"uniswap" | "balancer" | "curve", number>> =
     {};
   for (const id of ["uniswap", "balancer", "curve"] as const) {
@@ -667,7 +668,7 @@ async function requestFlowIntents(
     };
   }
 
-  const context: FlowContextWire = {
+  return {
     round,
     fairPriceUsdcPerWeth: fairPrice,
     protocols: enabledIds,
@@ -681,11 +682,18 @@ async function requestFlowIntents(
       gmxFlowMaxSizeUsd: ctx.config.gmxFlowMaxSizeUsd.toString(),
       aaveFlowMaxWethWei: ctx.config.aaveFlowMaxWethWei.toString(),
       maxAaveBorrowUsdcUnits: ctx.config.maxAaveBorrowUsdcUnits.toString(),
+      crossVenueSpreadFlowMaxWethWei:
+        ctx.config.crossVenueSpreadFlowMaxWethWei.toString(),
       defaultPriorityFeeWei: ctx.config.defaultPriorityFeeWei.toString(),
     },
   };
+}
 
-  const orders = await flowProcess.requestOrders(context, timeoutMs);
+// bot が返した FlowOrder[] を flow ウォレット紐付けの TxIntent[] に変換する。
+export function flowOrdersToIntents(
+  ctx: SimContext,
+  orders: FlowOrderWire[],
+): TxIntent[] {
   const intents: TxIntent[] = [];
   for (const order of orders) {
     const wallet = ctx.flowWallet(order.protocol, order.kind);
@@ -702,7 +710,29 @@ async function requestFlowIntents(
   return intents;
 }
 
-async function submitIntent(
+// orderflow bot プロセスに FlowContext を渡して FlowOrder[] を受け取り、TxIntent に変換する。
+// flow ウォレットの選択と tx 提出は coordinator が所有（bot は注文を決めるだけ）。
+export async function requestFlowIntents(
+  ctx: SimContext,
+  flowProcess: FlowProcess,
+  enabledIds: ProtocolId[],
+  stateById: Map<ProtocolId, unknown>,
+  fairPrice: number,
+  round: number,
+  timeoutMs: number,
+): Promise<TxIntent[]> {
+  const context = await buildFlowContext(
+    ctx,
+    enabledIds,
+    stateById,
+    fairPrice,
+    round,
+  );
+  const orders = await flowProcess.requestOrders(context, timeoutMs);
+  return flowOrdersToIntents(ctx, orders);
+}
+
+export async function submitIntent(
   ctx: SimContext,
   intent: TxIntent,
   stateById: Map<ProtocolId, unknown>,
@@ -735,7 +765,7 @@ async function submitIntent(
   return hashes;
 }
 
-async function submitRawTxIntent(
+export async function submitRawTxIntent(
   ctx: SimContext,
   intent: RawTxIntent,
 ): Promise<Hex> {
@@ -753,7 +783,7 @@ async function submitRawTxIntent(
   });
 }
 
-async function initialFairPrice(
+export async function initialFairPrice(
   ctx: SimContext,
   enabledIds: ProtocolId[],
 ): Promise<number> {

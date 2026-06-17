@@ -1,6 +1,6 @@
-import { encodeFunctionData } from "viem";
+import { encodeFunctionData, type Hex } from "viem";
 import { TOKENS } from "../constants.js";
-import { sendAndMine } from "../chain.js";
+import { sendAndMine, sendNoMine } from "../chain.js";
 import type { SimContext } from "./types.js";
 import { mockAggregatorAbi, toAavePrice } from "./aave.js";
 
@@ -57,4 +57,65 @@ export async function updateOracles(
   }
 
   return wrote;
+}
+
+// 単純な setter の固定 gas。明示して estimateGas（EVM 実行待ち）を省く。
+const SETTER_GAS = 300_000n;
+
+// 実時間モード用：oracle 更新を mine せず mempool へ submit する。interval mining 下で
+// 次ブロックに取り込まれる。priorityFeeWei は agent 上限超を渡し、--order fees により
+// oracle 更新が agent より前（txIndex 0 付近）に来るようにする。提出した tx hash を返す。
+export async function updateOraclesMempool(
+  ctx: SimContext,
+  fairPrice: number,
+  priorityFeeWei: bigint,
+): Promise<Hex[]> {
+  const hashes: Hex[] = [];
+  const wethAgg = ctx.oracle.aaveAggregators[TOKENS.WETH.address.toLowerCase()];
+  const usdcAgg = ctx.oracle.aaveAggregators[TOKENS.USDC.address.toLowerCase()];
+  if (wethAgg) {
+    hashes.push(
+      await sendNoMine(
+        ctx.publicClient,
+        ctx.walletClient,
+        ctx.chain,
+        ctx.adminPk,
+        {
+          to: wethAgg,
+          data: encodeFunctionData({
+            abi: mockAggregatorAbi,
+            functionName: "setAnswer",
+            args: [toAavePrice(fairPrice)],
+          }),
+          gas: SETTER_GAS,
+        },
+        priorityFeeWei,
+      ),
+    );
+  }
+  if (usdcAgg) {
+    hashes.push(
+      await sendNoMine(
+        ctx.publicClient,
+        ctx.walletClient,
+        ctx.chain,
+        ctx.adminPk,
+        {
+          to: usdcAgg,
+          data: encodeFunctionData({
+            abi: mockAggregatorAbi,
+            functionName: "setAnswer",
+            args: [toAavePrice(1)],
+          }),
+          gas: SETTER_GAS,
+        },
+        priorityFeeWei,
+      ),
+    );
+  }
+  if (ctx.oracle.gmxProvider && ctx.updateGmxOracle) {
+    // GMX は内部で2本（WETH/USDC）submit する。hash は追えないが mempool には載る。
+    await ctx.updateGmxOracle(ctx, fairPrice, { noMine: true, priorityFeeWei });
+  }
+  return hashes;
 }

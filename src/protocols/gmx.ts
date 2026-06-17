@@ -19,6 +19,7 @@ import {
   mine,
   sendAndMine,
   sendAsImpersonated,
+  sendNoMine,
 } from "../chain.js";
 import type {
   AgentObservation,
@@ -564,6 +565,37 @@ function positionPnlUsd(p: Position, markPrice: number): number {
 }
 const FLOAT_PRECISION_NUM = 1e30;
 
+// ---------------------------------------------------------------------------
+// 歴史ブロック再構成（ADR 0006 §4）: blockNumber 指定 multicall で使う読取記述子と、
+// その結果から valueUsdc と同じ式でポジション価値を出す純粋関数。
+// ---------------------------------------------------------------------------
+
+export function gmxAccountPositionsCall(account: Address) {
+  return {
+    address: GMX.Reader,
+    abi: readerAbi,
+    functionName: "getAccountPositions",
+    args: [GMX.DataStore, account, 0n, 50n],
+  } as const;
+}
+
+export function gmxEthUsdPositionValueUsd(
+  positions: readonly Position[] | undefined,
+  markPrice: number,
+): number {
+  const pos = positions?.find(
+    (p) =>
+      p.addresses.market.toLowerCase() === GMX_MARKETS.ETH_USD.toLowerCase(),
+  );
+  if (!pos || pos.numbers.sizeInUsd === 0n) return 0;
+  const collateralUsd =
+    pos.addresses.collateralToken.toLowerCase() ===
+    TOKENS.WETH.address.toLowerCase()
+      ? (Number(pos.numbers.collateralAmount) / 1e18) * markPrice
+      : Number(pos.numbers.collateralAmount) / 1e6;
+  return collateralUsd + positionPnlUsd(pos, markPrice);
+}
+
 export const gmxAdapter: ProtocolAdapter = {
   id: "gmx",
   stableToken: TOKENS.USDC.address,
@@ -608,13 +640,28 @@ export const gmxAdapter: ProtocolAdapter = {
   },
 
   // 競争ブロックで作成された注文を keeper が約定する
-  async afterMine(ctx: SimContext): Promise<void> {
+  async afterMine(
+    ctx: SimContext,
+    opts?: {
+      noMine?: boolean;
+      priorityFeeWei?: bigint;
+      blockNumber?: bigint;
+      fromBlock?: bigint;
+      toBlock?: bigint;
+    },
+  ): Promise<void> {
     if (!ctx.gmx.mockProvider) return;
-    const blockNumber = await ctx.publicClient.getBlockNumber();
+    // 範囲指定なら 1 回の getLogs でまとめて走査（realtime の追いつき分をブロックごとに
+    // 呼ぶより RPC が 1/N になる）。単一 blockNumber は旧形互換。
+    const toBlock =
+      opts?.toBlock ??
+      opts?.blockNumber ??
+      (await ctx.publicClient.getBlockNumber());
+    const fromBlock = opts?.fromBlock ?? opts?.blockNumber ?? toBlock;
     const logs = await ctx.publicClient.getLogs({
       address: GMX.EventEmitter,
-      fromBlock: blockNumber,
-      toBlock: blockNumber,
+      fromBlock,
+      toBlock,
     });
     const keys = logs
       .filter(
@@ -631,8 +678,29 @@ export const gmxAdapter: ProtocolAdapter = {
       providers: [ctx.gmx.mockProvider, ctx.gmx.mockProvider],
       data: ["0x", "0x"] as Hex[],
     };
+    const fee = opts?.priorityFeeWei ?? 1_000_000_000n;
     for (const key of keys) {
       try {
+        if (opts?.noMine) {
+          // realtime: mine も increaseTime もしない。次ブロックに載せるだけ
+          //（時間は interval mining が実時間で進める）。
+          const block = await ctx.publicClient.getBlock();
+          const baseFee = block.baseFeePerGas ?? 0n;
+          await ctx.walletClient.sendTransaction({
+            account: keeper,
+            chain: ctx.chain,
+            to: GMX.OrderHandler,
+            data: encodeFunctionData({
+              abi: orderHandlerAbi,
+              functionName: "executeOrder",
+              args: [key, oracleParams],
+            }),
+            gas: 15_000_000n,
+            maxFeePerGas: baseFee + fee,
+            maxPriorityFeePerGas: fee,
+          });
+          continue;
+        }
         await increaseTime(ctx.publicClient, 2);
         const block = await ctx.publicClient.getBlock();
         const baseFee = block.baseFeePerGas ?? 0n;
@@ -657,7 +725,7 @@ export const gmxAdapter: ProtocolAdapter = {
         console.error(
           `gmx keeper executeOrder failed: key=${key} ${error instanceof Error ? error.message : String(error)}`,
         );
-        await mine(ctx.publicClient);
+        if (!opts?.noMine) await mine(ctx.publicClient);
       }
     }
   },
@@ -791,8 +859,20 @@ export const gmxAdapter: ProtocolAdapter = {
 
     ctx.gmx.mockProvider = mock;
     ctx.oracle.gmxProvider = mock;
-    ctx.updateGmxOracle = async (c, fairPrice) => {
-      await sendAndMine(c.publicClient, c.walletClient, c.chain, c.adminPk, {
+    ctx.updateGmxOracle = async (c, fairPrice, opts) => {
+      const send = (tx: { to: Address; data: Hex }): Promise<unknown> =>
+        opts?.noMine
+          ? sendNoMine(
+              c.publicClient,
+              c.walletClient,
+              c.chain,
+              c.adminPk,
+              // gas を明示して estimateGas（anvil の実行キュー待ち）を省く
+              { ...tx, gas: 300_000n },
+              opts.priorityFeeWei ?? 1_000_000_000n,
+            )
+          : sendAndMine(c.publicClient, c.walletClient, c.chain, c.adminPk, tx);
+      await send({
         to: mock,
         data: encodeFunctionData({
           abi: mockOracleProviderAbi,
@@ -804,7 +884,7 @@ export const gmxAdapter: ProtocolAdapter = {
           ],
         }),
       });
-      await sendAndMine(c.publicClient, c.walletClient, c.chain, c.adminPk, {
+      await send({
         to: mock,
         data: encodeFunctionData({
           abi: mockOracleProviderAbi,

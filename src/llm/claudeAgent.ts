@@ -21,9 +21,16 @@ import {
 } from "./claudeStrategist.js";
 import { ClaudeSubscriptionStrategist } from "./claudeSubscriptionStrategist.js";
 import { ClaudeCliStrategist } from "./claudeCliStrategist.js";
+import { CodexCliStrategist } from "./codexCliStrategist.js";
 import type { ReviseReason } from "./prompts.js";
 
 const REVIEW_EVERY_N_ROUNDS = intEnv("ERIS_LLM_REVIEW_EVERY", 10);
+// revise ウィンドウの位相オフセット(ブロック)。多数の自己改善 agent を並列で回すとき、
+// 全員が同じ round で同時に revise すると LLM API のピーク並走が agent 数になり競合する
+// (各 revise が遅くなり runway 内に終わらない)。agent ごとに別オフセットを与えて revise を
+// ずらす(stagger)と同時刻の revise が数体に減り、同じ API プールで多数の agent を収容できる。
+// 既定 0 = 従来どおり(全員同位相)。ロスターで agent 別に設定する。
+const REVIEW_OFFSET = intEnv("ERIS_LLM_REVIEW_OFFSET", 0);
 const DRAWDOWN_TRIGGER_RATIO = floatEnv("ERIS_LLM_DRAWDOWN_RATIO", 0.05);
 const HISTORY_CAPACITY = intEnv("ERIS_LLM_HISTORY_CAPACITY", 30);
 const EXECUTOR_TIMEOUT_MS = intEnv("ERIS_LLM_EXECUTOR_TIMEOUT_MS", 200);
@@ -34,13 +41,36 @@ const FREEZE_STRATEGY = process.env.ERIS_FREEZE_STRATEGY === "1";
 const SANITY_OBS_WINDOW = intEnv("ERIS_LLM_SANITY_WINDOW", 8);
 const SANITY_GATE_ENABLED = process.env.ERIS_LLM_SANITY_GATE !== "0";
 // live PnL ロールバック(ADR 0002 の rollback_condition を機構化)。revise 採用後に実現 PnL を
-// 監視し、採用時評価額から ROLLBACK_DROP 以上下落したら前版へ自動で巻き戻す(事後・反応的ガード)。
+// 監視し、(a)採用時評価額から ROLLBACK_DROP 以上下落(急落ガード)、または (b)新版の α レートが
+// 前版より明確に劣る(A/B 劣化ガード)とき前版へ自動で巻き戻す(事後・反応的ガード)。
 // sanity ゲート(実行時エラーのみ)では捕えられない「正気だが致命的」な改悪を打ち切る。
+//
+// α レートで比較する理由: 総資産の per-round 変化は市場 β(価格変動)のノイズが戦略 edge(α)を
+// 桁違いに飲み込むため、総額の前版比較では「サイズ減でゆっくり鈍る」緩やかな劣化を検出できない。
+// 在庫を固定価格(採用時 fair price)で評価して β を除き、トレード由来の α だけのレートで比較する。
 // ERIS_LLM_ROLLBACK=0 で無効化。
 const ROLLBACK_ENABLED = process.env.ERIS_LLM_ROLLBACK !== "0";
-const ROLLBACK_WINDOW = intEnv("ERIS_LLM_ROLLBACK_WINDOW", 5); // 判定までの最小経過ラウンド
-const ROLLBACK_DROP = floatEnv("ERIS_LLM_ROLLBACK_DROP", 0.04); // 採用時比の下落率しきい値
-const ROLLBACK_GRADUATE = intEnv("ERIS_LLM_ROLLBACK_GRADUATE", 24); // 監視を打ち切る経過ラウンド
+const ROLLBACK_WINDOW = intEnv("ERIS_LLM_ROLLBACK_WINDOW", 5); // 急落判定までの最小経過ラウンド
+const ROLLBACK_DROP = floatEnv("ERIS_LLM_ROLLBACK_DROP", 0.04); // 急落: 採用時比の下落率しきい値
+const ROLLBACK_AB_WINDOW = intEnv("ERIS_LLM_ROLLBACK_AB_WINDOW", 20); // A/B 劣化判定までの最小経過ラウンド
+// A/B 劣化: 前版が明確にプラスの α レートを持っていたのに新版がその ROLLBACK_KEEP_FRACTION 未満
+// しか維持できなければ巻き戻す(edge を大きく削った改悪を相対比で検出。edge が小さくても効く)。
+// 基準(前版 α レート)が小さすぎる=ノイズのときは A/B 判定しない。
+const ROLLBACK_KEEP_FRACTION = floatEnv("ERIS_LLM_ROLLBACK_KEEP_FRACTION", 0.5);
+const ROLLBACK_MIN_RATE_FRAC = floatEnv(
+  "ERIS_LLM_ROLLBACK_MIN_RATE_FRAC",
+  0.000005,
+);
+const ROLLBACK_GRADUATE = intEnv("ERIS_LLM_ROLLBACK_GRADUATE", 40); // 監視を打ち切る経過ラウンド
+
+// 在庫を固定価格で評価した「α(トレード由来 PnL)」: usdc + (weth+eth)×refPrice。
+// 価格変動による在庫の再評価(β)を除くので、戦略の取り分だけが残る。
+function alphaValueUsd(
+  inv: { usdc: number; weth: number; eth: number },
+  refPrice: number,
+): number {
+  return inv.usdc + (inv.weth + inv.eth) * refPrice;
+}
 
 function reportDirRoot(): string {
   return process.env.REPORT_DIR ?? "./runs";
@@ -64,6 +94,10 @@ export type State = {
   adoptUsd: number | null;
   adoptRound: number;
   pendingAdoption: boolean;
+  // A/B 劣化判定用: 採用時の α 評価額・固定評価価格・前版の α レート(per round)。
+  adoptAlpha: number | null;
+  refPrice: number;
+  prevAlphaRate: number | null;
 };
 
 export function createState(
@@ -86,6 +120,9 @@ export function createState(
     adoptUsd: null,
     adoptRound: -1,
     pendingAdoption: false,
+    adoptAlpha: null,
+    refPrice: 0,
+    prevAlphaRate: null,
   };
 }
 
@@ -103,6 +140,8 @@ const helpersBase: Omit<ExecutorHelpers, "log"> = {
  *   apikey        – ClaudeStrategist using ANTHROPIC_API_KEY.
  *   cli           – ClaudeCliStrategist via `claude -p` (Claude Code OAuth/サブスク).
  *                   推奨のサブスク経路。SDK と違い nested でもハングしない。
+ *   codex         – CodexCliStrategist via `codex exec` (別 API プール)。claude -p と競合しない
+ *                   ので混成ロスターで自己改善の並走上限を上げられる。`ERIS_CODEX_MODEL` で model 上書き。
  *   subscription  – ClaudeSubscriptionStrategist via Agent SDK query()。注意: Claude Code
  *                   セッション内(別ターミナル含む)では nested 検出でハングしうる。
  *   auto (default)– cli if `claude` is reachable, else apikey if a key is set, else mock.
@@ -128,6 +167,10 @@ export function selectStrategist(): Strategist {
   if (auth === "cli") {
     emitStderr("[claude-llm] strategist=cli (claude -p, Claude Code OAuth)\n");
     return new ClaudeCliStrategist();
+  }
+  if (auth === "codex") {
+    emitStderr("[claude-llm] strategist=codex (codex exec, 別 API プール)\n");
+    return new CodexCliStrategist();
   }
   if (auth === "subscription") {
     emitStderr("[claude-llm] strategist=subscription (Agent SDK query)\n");
@@ -336,11 +379,13 @@ export function whichReviseReason(
   lastReviseRound: number,
   currentUsd: number,
   initialUsd: number,
+  reviewEvery: number = REVIEW_EVERY_N_ROUNDS,
+  offset: number = REVIEW_OFFSET,
 ): ReviseReason | null {
   if (
-    round > 0 &&
+    round > offset &&
     round !== lastReviseRound &&
-    round % REVIEW_EVERY_N_ROUNDS === 0
+    (round - offset) % reviewEvery === 0
   )
     return "scheduled";
   if (
@@ -454,15 +499,30 @@ export function passesSanityGate(
 
 /**
  * live PnL ロールバック(ADR 0002 の rollback_condition を機構化)。
- * 採用直後の評価額を基準化し、ROLLBACK_WINDOW 経過後に基準から ROLLBACK_DROP 以上下落していれば
- * 前版へ巻き戻す。ROLLBACK_GRADUATE ラウンド生き延びたら「合格」として監視を解除する。
- * 注意: 市場全体の下落と revise 起因の悪化を厳密に切り分けないため、しきい値は保守的にする。
+ * 採用直後に基準(総額・α 評価額・前版の α レート)を取り、(a)総額が ROLLBACK_DROP 以上急落、
+ * または (b)新版の α レートが前版より ROLLBACK_UNDERPERFORM 以上劣る とき前版へ巻き戻す。
+ * ROLLBACK_GRADUATE ラウンド生き延びたら「合格」として監視を解除する。
+ * α(β 除去)で比較するのは、総額のノイズに緩やかな劣化が埋もれるのを避けるため(冒頭コメント参照)。
  */
 export function maybeRollback(state: State, obs: AgentObservation): void {
   // 新版が live になった最初のラウンドで基準を取る。
   if (state.pendingAdoption) {
+    const refPrice = obs.fairPriceUsdcPerWeth;
+    state.refPrice = refPrice;
     state.adoptUsd = obs.inventory.valueUsdc;
+    state.adoptAlpha = alphaValueUsd(obs.inventory, refPrice);
     state.adoptRound = obs.round;
+    // 前版の α レート(per round)を直近 ROLLBACK_AB_WINDOW ラウンドの履歴から推定。
+    const recs = state.history.recent();
+    if (recs.length >= 2) {
+      const k = Math.min(ROLLBACK_AB_WINDOW, recs.length);
+      const start = recs[recs.length - k];
+      const span = Math.max(1, obs.round - start.round);
+      const startAlpha = alphaValueUsd(start, refPrice);
+      state.prevAlphaRate = (state.adoptAlpha - startAlpha) / span;
+    } else {
+      state.prevAlphaRate = null; // 前版 track 不足 → 急落判定のみ
+    }
     state.pendingAdoption = false;
     return;
   }
@@ -470,23 +530,55 @@ export function maybeRollback(state: State, obs: AgentObservation): void {
     return;
   }
   const elapsed = obs.round - state.adoptRound;
-  if (elapsed < ROLLBACK_WINDOW) return;
-  const drop = (state.adoptUsd - obs.inventory.valueUsdc) / state.adoptUsd;
-  if (drop >= ROLLBACK_DROP) {
+  const revert = (reason: string): void => {
     const from = state.strategy?.version;
-    const to = state.prevStrategy.version;
+    const to = state.prevStrategy!.version;
     state.strategy = state.prevStrategy;
-    logRollback(state, obs.round, from ?? null, to, drop);
+    logRollback(state, obs.round, from ?? null, to, reason);
     emitStderr(
-      `[claude-llm] PnL rollback v${from}→v${to} (drop=${(drop * 100).toFixed(1)}% over ${elapsed}r) — reverted to last good version\n`,
+      `[claude-llm] rollback v${from}→v${to} (${reason} over ${elapsed}r) — reverted to last good version\n`,
     );
     state.prevStrategy = null;
     state.adoptUsd = null;
+    state.adoptAlpha = null;
+    state.prevAlphaRate = null;
     state.lastReviseRound = obs.round; // 直後の連続 revise を抑制(cooldown)
-  } else if (elapsed >= ROLLBACK_GRADUATE) {
-    // 一定期間崩れなければ合格として監視解除。
+  };
+
+  // (a) 急落ガード(総額)
+  if (elapsed >= ROLLBACK_WINDOW) {
+    const drop = (state.adoptUsd - obs.inventory.valueUsdc) / state.adoptUsd;
+    if (drop >= ROLLBACK_DROP) {
+      revert(`drop=${(drop * 100).toFixed(1)}%`);
+      return;
+    }
+  }
+  // (b) A/B 劣化ガード(新版の α レートが前版の一定割合未満)
+  if (
+    elapsed >= ROLLBACK_AB_WINDOW &&
+    state.prevAlphaRate !== null &&
+    state.adoptAlpha !== null
+  ) {
+    const minRate = state.adoptUsd * ROLLBACK_MIN_RATE_FRAC;
+    // 前版が明確にプラスの edge を持っていたときだけ比較する(基準が無いと判定不能)。
+    if (state.prevAlphaRate > minRate) {
+      const newAlphaRate =
+        (alphaValueUsd(obs.inventory, state.refPrice) - state.adoptAlpha) /
+        elapsed;
+      if (newAlphaRate < state.prevAlphaRate * ROLLBACK_KEEP_FRACTION) {
+        revert(
+          `αrate ${newAlphaRate.toFixed(1)}<${(ROLLBACK_KEEP_FRACTION * 100).toFixed(0)}% of prev ${state.prevAlphaRate.toFixed(1)}/r`,
+        );
+        return;
+      }
+    }
+  }
+  // 一定期間崩れなければ合格として監視解除。
+  if (elapsed >= ROLLBACK_GRADUATE) {
     state.prevStrategy = null;
     state.adoptUsd = null;
+    state.adoptAlpha = null;
+    state.prevAlphaRate = null;
   }
 }
 
@@ -495,12 +587,12 @@ function logRollback(
   round: number,
   fromVersion: number | null,
   toVersion: number,
-  drop: number,
+  reason: string,
 ): void {
   if (!state.rollbacksPath) return;
   appendFileSync(
     state.rollbacksPath,
-    `${JSON.stringify({ ts: new Date().toISOString(), round, fromVersion, toVersion, drop })}\n`,
+    `${JSON.stringify({ ts: new Date().toISOString(), round, fromVersion, toVersion, reason })}\n`,
   );
 }
 

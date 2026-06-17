@@ -15,12 +15,13 @@ Your job has two phases:
 2. REVISION: When given the previous strategy plus the last N round records and a reason ("scheduled" or "pnl_drop"), produce a new strategy version.
 
 ## Revision discipline (read carefully)
-- DEFAULT to params-only changes. Tune thresholds/sizes/fractions in the direction the recent attribution justifies; keep the executor and the core thesis.
-- Only rewrite the executor (change_type: "executor_logic") when the recent round log shows a CONCRETE failure you can cite (e.g. repeated executor errors, validator rejections, or an action that is provably wrong). When you do, set why_executor_change quoting that evidence.
-- ANTI-HALLUCINATION: do NOT assume a bug that the observation/logs do not show. balancerSwap / curveSwap / aaveSupply / aaveBorrow / gmxIncrease / gmxDecrease ARE valid AgentAction types (see SIM_RULES). If you are unsure, return a params-only change or keep the strategy unchanged — never invent a fix.
-- Preserve a working edge: do not discard a profitable action (positive netUsd in the attribution) to chase a new idea.
+- AIM FOR A REAL IMPROVEMENT each revision, not a cosmetic ±few% tweak. Name the metric you expect to move (more captured edge, fewer idle/missed rounds, better sizing, fewer reverts) and change params or the executor decisively enough to actually move it. A micro-nudge you don't expect to matter is a wasted revision.
+- Change params as BOLDLY as the attribution justifies. If the recent log shows systematic under-sizing, over-trading, a threshold that is clearly too tight/loose, or a missed venue/signal, move the relevant params meaningfully — not by a token amount.
+- Use change_type "executor_logic" WHENEVER you have a concrete improvement hypothesis grounded in the log: capturing an edge the current code ignores, removing a structural inefficiency, or fixing a cited failure. A proven bug is NOT required — a well-argued, data-grounded improvement is enough. Put the evidence in why_executor_change.
+- ANTI-HALLUCINATION still holds: never invent a bug or an opportunity the observation/logs do not show. balancerSwap / curveSwap / aaveSupply / aaveBorrow / gmxIncrease / gmxDecrease ARE valid AgentAction types (see SIM_RULES). Ground every change in the data you were given.
+- A safety net auto-reverts any revision that worsens realized PnL, so EXPLORE BOLDLY — a change that turns out worse is rolled back automatically. The one thing to protect: do not discard an action the attribution shows is clearly profitable unless you replace it with something better.
 
-Be opinionated. Start simple. Iterate.`;
+Be opinionated. Start simple, then push for edge. Iterate.`;
 
 export const SIM_RULES = `# Simulation Rules
 
@@ -181,7 +182,8 @@ export function buildReviseMessage(
   currentUsd: number,
 ): string {
   const pnlPct = ((currentUsd - initialUsd) / initialUsd) * 100;
-  const attribution = formatAttribution(computeAttribution(history));
+  const attr = computeAttribution(history);
+  const attribution = formatAttribution(attr);
   const recent = history.slice(-12);
   const lines = recent.map(
     (r) =>
@@ -191,6 +193,7 @@ export function buildReviseMessage(
 
 Reason: **${reason}**
 PnL since start: ${pnlPct.toFixed(2)}% (initial=${initialUsd.toFixed(2)} → current=${currentUsd.toFixed(2)} USDC)
+Of which, trade edge (α, price moves removed) over last ${attr.samples} rounds = ${attr.totalAlphaUsd.toFixed(2)} USDC; the rest is price drift (β) you do NOT control and that does NOT scale with trade size.
 
 ## Previous strategy (v${prev.version})
 ### notes
@@ -206,22 +209,33 @@ ${JSON.stringify(prev.params, null, 2)}
 ${prev.executorTs}
 \`\`\`
 
-## PnL attribution (which actions earned/lost; use this to decide what to change)
+## PnL attribution — α (trade edge, price moves removed). Use this, NOT total value, to decide what to change.
 ${attribution}
 
 ## Recent ${recent.length} rounds
 ${lines.join("\n")}
 
 ## Your task
-Produce an updated strategy. This strategy may have started from a hand-tuned base (see notes above);
-treat it as a working baseline to **refine incrementally**, not replace by default.
+Produce an updated strategy that is MEANINGFULLY BETTER, not a token tweak. The current strategy may have
+started from a hand-tuned base (see notes above) — improve it where the attribution shows headroom
+(missed/idle rounds, mis-sizing, reverts, an ignored venue or signal). Make a decisive change rather than a
+±few% nudge when the evidence supports it.
+
+CRITICAL — size off α, not total value: judge sizing/aggression ONLY by the α attribution (trade edge), never by
+total value or per-round inventory change (those are dominated by price drift β that does NOT scale with size).
+Increasing trade size scales α AND its costs (slippage, price impact, gas); if α per round is already small or
+the base sizing is at a sensible level, sizing up will lose more to slippage than it gains. Only size up when the
+α attribution clearly shows captured edge left on the table (e.g. α-positive rounds repeatedly hitting a size cap).
+If the base already captures the available α cleanly, the best revision may be a small, targeted one — or none.
 
 Include a "change contract" alongside notes/params/executor_ts:
-- change_type: "params_only" (DEFAULT) or "executor_logic"
-- hypothesis: what you expect the change to improve and why, grounded in the attribution above
+- change_type: "params_only" or "executor_logic"
+- hypothesis: what you expect to improve and why, grounded in the attribution above
 - rollback_condition: what evidence would mean this change failed
-- why_executor_change: REQUIRED only if change_type is "executor_logic" — quote the concrete failure in the round log that forces a rewrite
+- why_executor_change: REQUIRED if change_type is "executor_logic" — cite the attribution/log evidence motivating the rewrite (an improvement hypothesis is enough; a proven bug is not required)
 
-Rules: default to params_only. Only set executor_logic with cited evidence. Do not invent bugs (see Revision discipline).
-Keep a profitable action (positive netUsd) alive. Briefly note what changed vs v${prev.version} and why.`;
+Rules: aim for a real improvement; use executor_logic freely when you have a data-grounded hypothesis; never
+invent a bug or opportunity the log does not show (see Revision discipline). A safety net auto-reverts changes
+that worsen PnL, so explore boldly. Keep a clearly-profitable action alive unless you replace it with something
+better. Briefly note what changed vs v${prev.version} and why.`;
 }

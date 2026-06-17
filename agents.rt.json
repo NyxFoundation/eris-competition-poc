@@ -1,0 +1,25 @@
+{
+  "agents": [
+    {
+      "id": "rt-lo",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/rt-fee-swap.ts"],
+      "wallet": "AGENT0_PRIVATE_KEY",
+      "env": { "FEE_WEI": "100000000" }
+    },
+    {
+      "id": "rt-mid",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/rt-fee-swap.ts"],
+      "wallet": "AGENT1_PRIVATE_KEY",
+      "env": { "FEE_WEI": "1500000000" }
+    },
+    {
+      "id": "rt-hi",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/rt-fee-swap.ts"],
+      "wallet": "AGENT2_PRIVATE_KEY",
+      "env": { "FEE_WEI": "3000000000" }
+    }
+  ]
+}

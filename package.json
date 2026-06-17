@@ -6,8 +6,10 @@
   "scripts": {
     "anvil": "tsx src/cli/anvil.ts",
     "sim": "tsx src/cli/sim.ts",
+    "sim:realtime": "tsx src/cli/sim-realtime.ts",
     "leaderboard": "tsx scripts/leaderboard.ts",
     "evaluate": "tsx scripts/evaluate.ts",
+    "gate": "tsx scripts/gate.ts",
     "discrimination": "tsx scripts/discrimination.ts",
     "gen:roster": "tsx scripts/genRoster.ts",
     "agent:noop": "tsx examples/agents/noop.ts",
@@ -17,6 +19,7 @@
     "agent:lp-provider": "tsx examples/agents/lp-provider.ts",
     "flow:market-maker": "tsx examples/flow/market-maker.ts",
     "check:ordering": "tsx src/cli/checkOrdering.ts",
+    "check:strategy": "tsx scripts/checkStrategyCode.ts",
     "build:contracts": "forge build",
     "presim": "forge build",
     "typecheck": "tsc --noEmit",

@@ -13,7 +13,7 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { erc20Abi, wethAbi } from "./abis.js";
-import { TOKENS } from "./constants.js";
+import { MULTICALL3, TOKENS } from "./constants.js";
 import type { BalanceSnapshot } from "./types.js";
 
 export function makeChain(chainId: number) {
@@ -22,16 +22,34 @@ export function makeChain(chainId: number) {
     name: "arbitrum-fork",
     nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
     rpcUrls: { default: { http: ["http://127.0.0.1:8545"] } },
+    // viem の batch.multicall（同一 tick の readContract を Multicall3 1 本に自動集約）が参照する
+    contracts: { multicall3: { address: MULTICALL3 } },
   } as const;
 }
 
-export function makeClients(rpcUrl: string, chainId: number) {
+export function makeClients(
+  rpcUrl: string,
+  chainId: number,
+  opts: { batch?: boolean } = {},
+) {
   const chain = makeChain(chainId);
-  // Arbitrum フォークは GMX Reader / Aave 読み取りが重いため timeout を広げる
-  const transport = http(rpcUrl, { timeout: 120_000, retryCount: 2 });
+  // Arbitrum フォークは GMX Reader / Aave 読み取りが重いため timeout を広げる。
+  // batch=true で (1) JSON-RPC array batch（同一 tick の要求を 1 HTTP に）と
+  // (2) readContract の Multicall3 自動集約を有効化する。direct モードの agent は
+  // 毎ブロック十数本の読取を発行するため、束ねないと anvil の往復回数が律速になる
+  // （ADR 0006 Risks「anvil 律速」のレバー 1）。
+  const transport = http(rpcUrl, {
+    timeout: 120_000,
+    retryCount: 2,
+    batch: opts.batch ? true : undefined,
+  });
   return {
     chain,
-    publicClient: createPublicClient({ chain, transport }),
+    publicClient: createPublicClient({
+      chain,
+      transport,
+      batch: opts.batch ? { multicall: true } : undefined,
+    }),
     walletClient: createWalletClient({ chain, transport }),
   };
 }
@@ -162,6 +180,32 @@ export async function mine(
   await publicClient.request({
     method: "anvil_mine",
     params: [`0x${blocks.toString(16)}`],
+  } as AnvilRequest);
+}
+
+// 実時間ブロック生成：seconds 秒ごとに mempool をまとめて 1 ブロック mine する。
+// setup を高速フラッシュしたあと（no-mining + sendAndMine）、競争フェーズ開始時にこれを呼んで
+// 実 N 秒 cadence へ切り替える。--order fees はこの interval mine 時にも mempool を fee 降順整列する。
+// seconds=0 は interval mining を停止する（teardown 用）。
+export async function setIntervalMining(
+  publicClient: PublicClient,
+  seconds: number,
+): Promise<void> {
+  await publicClient.request({
+    method: "anvil_setIntervalMining",
+    params: [seconds],
+  } as AnvilRequest);
+}
+
+// automine の有効/無効。true にすると tx ごとに即 mine され、ブロック内の fee 競争が成立しなくなる
+// （各 tx が単独ブロック化する）。実時間モードでは false のまま interval mining を使うこと。
+export async function setAutomine(
+  publicClient: PublicClient,
+  enabled: boolean,
+): Promise<void> {
+  await publicClient.request({
+    method: "evm_setAutomine",
+    params: [enabled],
   } as AnvilRequest);
 }
 
@@ -302,6 +346,34 @@ export async function sendAndMine(
   await mine(publicClient);
   await publicClient.waitForTransactionReceipt({ hash });
   return hash;
+}
+
+// 実時間モード用：tx を mempool に投げるだけ（mine しない・receipt も待たない）。
+// priorityFee を指定でき、interval mining 下で次ブロックに --order fees で取り込ませる。
+// oracle 更新を agent より前(txIndex 0)に置きたいので、呼び側で agent 上限超の fee を渡す。
+// tx.gas を明示すると viem の eth_estimateGas（= EVM 実行）が省かれる。oracle 書込のような
+// 毎ブロックの定型 tx は明示し、agent 負荷で anvil の実行キューが詰まっても待たされないようにする。
+export async function sendNoMine(
+  publicClient: PublicClient,
+  walletClient: WalletClient,
+  chain: ReturnType<typeof makeChain>,
+  privateKey: Hex,
+  tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint },
+  priorityFeeWei: bigint,
+): Promise<Hex> {
+  const account = privateKeyToAccount(privateKey);
+  const block = await publicClient.getBlock();
+  const baseFee = block.baseFeePerGas ?? 0n;
+  return walletClient.sendTransaction({
+    account,
+    chain,
+    to: tx.to,
+    data: tx.data,
+    value: tx.value ?? 0n,
+    gas: tx.gas,
+    maxFeePerGas: baseFee + priorityFeeWei,
+    maxPriorityFeePerGas: priorityFeeWei,
+  });
 }
 
 // impersonated アドレスから送信（role-admin / acl-admin など）

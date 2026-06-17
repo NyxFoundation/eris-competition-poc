@@ -230,9 +230,13 @@ export async function getLpPositions(
   publicClient: PublicClient,
   owner: Address,
   fairPriceUsdcPerWeth: number,
+  // 呼び側が readState 済みの tick を渡せば pool の再読取を省く（observe の二重読み防止）
+  knownTick?: number,
 ): Promise<LpPositionObservation[]> {
-  const [{ tick }, balance] = await Promise.all([
-    getPoolState(publicClient),
+  const [tick, balance] = await Promise.all([
+    knownTick !== undefined
+      ? Promise.resolve(knownTick)
+      : getPoolState(publicClient).then((s) => s.tick),
     publicClient.readContract({
       address: UNISWAP.nonfungiblePositionManager,
       abi: nonfungiblePositionManagerAbi,
@@ -241,21 +245,33 @@ export async function getLpPositions(
     }),
   ]);
 
+  // NFT 列挙は直列にせず並列発行する（batch=true クライアントでは multicall に束なる）
+  const indices = Array.from({ length: Number(balance) }, (_, i) => BigInt(i));
+  const tokenIds = await Promise.all(
+    indices.map((i) =>
+      publicClient.readContract({
+        address: UNISWAP.nonfungiblePositionManager,
+        abi: nonfungiblePositionManagerAbi,
+        functionName: "tokenOfOwnerByIndex",
+        args: [owner, i],
+      }),
+    ),
+  );
+  const rawPositions = await Promise.all(
+    tokenIds.map((tokenId) =>
+      publicClient.readContract({
+        address: UNISWAP.nonfungiblePositionManager,
+        abi: nonfungiblePositionManagerAbi,
+        functionName: "positions",
+        args: [tokenId],
+      }),
+    ),
+  );
+
   const w0 = wethIsToken0();
   const positions: LpPositionObservation[] = [];
-  for (let i = 0n; i < balance; i++) {
-    const tokenId = await publicClient.readContract({
-      address: UNISWAP.nonfungiblePositionManager,
-      abi: nonfungiblePositionManagerAbi,
-      functionName: "tokenOfOwnerByIndex",
-      args: [owner, i],
-    });
-    const position = await publicClient.readContract({
-      address: UNISWAP.nonfungiblePositionManager,
-      abi: nonfungiblePositionManagerAbi,
-      functionName: "positions",
-      args: [tokenId],
-    });
+  for (let i = 0; i < tokenIds.length; i++) {
+    const tokenId = tokenIds[i];
     const [
       ,
       ,
@@ -269,7 +285,7 @@ export async function getLpPositions(
       ,
       tokensOwed0,
       tokensOwed1,
-    ] = position;
+    ] = rawPositions[i];
     if (!isWethUsdcPosition(token0, token1, fee)) continue;
     const amounts = liquidityToTokenAmounts({
       liquidity,
@@ -365,6 +381,57 @@ function valuePositionUsdc(
   const weth = Number(formatUnits(amountWethWei + owedWethWei, 18));
   const usdc = Number(formatUnits(amountUsdcUnits + owedUsdcUnits, 6));
   return usdc + weth * fairPriceUsdcPerWeth;
+}
+
+// 歴史ブロック再構成（ADR 0006 §4）: positions(tokenId) の生 tuple から
+// getLpPositions と同じ式で LP 価値を出す純粋関数。WETH/USDC 以外のポジションは 0。
+export function lpPositionValueUsdc(
+  position: readonly [
+    bigint,
+    Address,
+    Address,
+    Address,
+    number,
+    number,
+    number,
+    bigint,
+    bigint,
+    bigint,
+    bigint,
+    bigint,
+  ],
+  tick: number,
+  fairPriceUsdcPerWeth: number,
+): number {
+  const [
+    ,
+    ,
+    token0,
+    token1,
+    fee,
+    tickLower,
+    tickUpper,
+    liquidity,
+    ,
+    ,
+    tokensOwed0,
+    tokensOwed1,
+  ] = position;
+  if (!isWethUsdcPosition(token0, token1, fee)) return 0;
+  const amounts = liquidityToTokenAmounts({
+    liquidity,
+    tick,
+    tickLower,
+    tickUpper,
+  });
+  const w0 = wethIsToken0();
+  return valuePositionUsdc(
+    w0 ? amounts.amount0 : amounts.amount1,
+    w0 ? amounts.amount1 : amounts.amount0,
+    w0 ? tokensOwed0 : tokensOwed1,
+    w0 ? tokensOwed1 : tokensOwed0,
+    fairPriceUsdcPerWeth,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -563,7 +630,12 @@ export const uniswapAdapter: ProtocolAdapter = {
 
   async observe(ctx, state, agent, fairPrice): Promise<UniswapObservation> {
     const s = state as UniswapState;
-    const positions = await getLpPositions(ctx.publicClient, agent, fairPrice);
+    const positions = await getLpPositions(
+      ctx.publicClient,
+      agent,
+      fairPrice,
+      s.tick,
+    );
     return {
       pool: {
         pair: "WETH/USDC",

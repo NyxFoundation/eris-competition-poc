@@ -10,7 +10,9 @@ import type {
   ProtocolId,
 } from "../types.js";
 
-export type FlowKind = "informed" | "uninformed";
+// "spread" = delta-neutral cross-venue スプレッド注入（α 機会の構造的生成。flow/logic.ts）。
+// 専用ウォレットを使い、同一 venue の uninformed/informed leg と nonce/fee 順序で干渉しない。
+export type FlowKind = "informed" | "uninformed" | "spread";
 
 export interface FlowWallet {
   id: string;
@@ -51,7 +53,12 @@ export interface SimContext {
   // 競争ブロックで作成された GMX 注文キー（keeper ブロックで実行）
   pendingGmxOrders: Hex[];
   // GMX mock オラクル更新（gmx.setupGlobal が設定。oracles.updateOracles から呼ぶ）
-  updateGmxOracle?: (ctx: SimContext, fairPrice: number) => Promise<void>;
+  // opts.noMine=true で realtime 用に mine せず mempool submit（priorityFeeWei で入札）。
+  updateGmxOracle?: (
+    ctx: SimContext,
+    fairPrice: number,
+    opts?: { noMine?: boolean; priorityFeeWei?: bigint },
+  ) => Promise<void>;
   // protocol/kind ごとの flow ウォレット
   flowWallet(protocol: ProtocolId, kind: FlowKind): FlowWallet;
 }
@@ -94,7 +101,20 @@ export interface ProtocolAdapter {
   ): Promise<BuiltTx[]>;
 
   // ---- mine 後フック（GMX keeper 実行）----
-  afterMine?(ctx: SimContext): Promise<void>;
+  // 競争ブロック後の keeper 処理（GMX 注文実行など）。
+  // opts.noMine=true で realtime 用に mine せず mempool submit。
+  // 対象ブロックは fromBlock..toBlock の範囲指定（realtime の追いつき分を 1 回の getLogs で
+  // 走査するため）。blockNumber は単一ブロック指定の旧形（同期 coordinator 用に残す）。
+  afterMine?(
+    ctx: SimContext,
+    opts?: {
+      noMine?: boolean;
+      priorityFeeWei?: bigint;
+      blockNumber?: bigint;
+      fromBlock?: bigint;
+      toBlock?: bigint;
+    },
+  ): Promise<void>;
 
   // ---- PnL 寄与（USDC）----
   valueUsdc(

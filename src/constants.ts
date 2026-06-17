@@ -71,6 +71,10 @@ export const UNISWAP = {
   tickSpacing: 10,
 } as const;
 
+// Multicall3（全チェーン共通の標準デプロイ）。歴史ブロック断面の一括読取（ADR 0006 §4）に使う。
+export const MULTICALL3 =
+  "0xcA11bde05977b3631167028862bE2a173976CA11" as Address;
+
 export const WETH_USDC_FEE = UNISWAP.fee;
 export const WETH_USDC_TICK_SPACING = UNISWAP.tickSpacing;
 export const WETH_DECIMALS = 18;

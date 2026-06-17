@@ -1,3 +1,5 @@
+import type { Address } from "viem";
+import { setActiveStables } from "../chain.js";
 import type { LeafAction, ProtocolId } from "../types.js";
 import type { ProtocolAdapter } from "./types.js";
 import { uniswapAdapter } from "./uniswap.js";
@@ -37,6 +39,17 @@ export function setEnabledProtocols(ids: ProtocolId[]): void {
 
 export function enabledAdapters(): ProtocolAdapter[] {
   return enabledIds.map((id) => ALL_BY_ID.get(id)!).filter(Boolean);
+}
+
+// 有効 protocol の設定 + stable 統一会計（active stable）の登録をまとめた標準初期化。
+// 環境（coordinator）と direct モードの agent シムが同じ手順を共有する。
+export function initProtocols(ids: ProtocolId[]): ProtocolAdapter[] {
+  setEnabledProtocols(ids);
+  const adapters = enabledAdapters();
+  setActiveStables(
+    adapters.map((a) => a.stableToken).filter((t): t is Address => Boolean(t)),
+  );
+  return adapters;
 }
 
 export function getAdapter(id: ProtocolId): ProtocolAdapter {

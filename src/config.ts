@@ -49,6 +49,23 @@ export type SimConfig = {
   flashArbDemo: boolean;
   rounds: number;
   roundTimeSeconds: number;
+  // 実時間モード（src/realtime/coordinator.ts）。interval mining のブロック間隔（秒）と
+  // 実行の終了条件（実時間 or ブロック数）。同期ラウンド方式では未使用。
+  blockTimeSec: number;
+  runSeconds: number;
+  runBlocks: number;
+  // 環境とエージェント実行の分離（ADR 0006）。true なら agent は秘密鍵を受け取り
+  // チェーンを直接読み書きする（観測 push / 代理提出なし）。既定 on。
+  // ERIS_AGENT_DIRECT_TX=0 で旧 relay 方式へロールバック（run 単位で全 agent 一律）。
+  agentDirectTx: boolean;
+  // run 開始時の resetFork をスキップする（既定 false）。anvil の fork フェッチキャッシュを
+  // 前 run から温存し、cold フェッチ由来のレイテンシ（mine 中の上流取得）を切り分ける診断用。
+  // 状態は前 run から残留するため評価には使わない（ERIS_SKIP_RESET=1）。
+  skipReset: boolean;
+  // 競争開始前に flow bot だけで N block の市場ループを回し、protocol の working set を
+  // 温める（ADR 0006 Risks の anvil cold フェッチ対策）。競争フェーズの mine が上流フェッチを
+  // 踏まなくなる。0 で無効（ERIS_PREWARM_BLOCKS）。
+  prewarmBlocks: number;
   seed: number;
   runDirRoot: string;
   agentTimeoutMs: number;
@@ -74,6 +91,10 @@ export type SimConfig = {
   curveFlowMaxWethWei: bigint;
   gmxFlowMaxSizeUsd: bigint;
   aaveFlowMaxWethWei: bigint;
+  // delta-neutral cross-venue スプレッド注入の 1 leg あたり最大 WETH 相当（既定 0 = 無効）。
+  // 毎ブロック 2 venue を対称に押し開いて「2-leg 裁定(α)だけが取れる」機会を構造的に作る。
+  // 方向 β を注入せず α を増やすレバー（env を α 支配へ寄せる。discrimination-needs-delta-neutral）。
+  crossVenueSpreadFlowMaxWethWei: bigint;
   // orderflow bot（独立プロセス）の起動コマンドと決定論シード。
   flowBotCommand: string;
   flowBotArgs: string[];
@@ -119,6 +140,13 @@ export function loadConfig(env = process.env): SimConfig {
     // 1 ラウンドあたりに進める EVM 時間（秒）。Aave 変動金利の累積や GMX funding
     // を現実的なスケールで発生させるためにラウンドループで evm_increaseTime に渡す。
     roundTimeSeconds: intEnv(env.ROUND_TIME_SECONDS, 3600),
+    // 実時間モード（realtime）の設定。
+    blockTimeSec: intEnv(env.ERIS_BLOCK_TIME_SEC, 2),
+    runSeconds: intEnv(env.ERIS_RUN_SECONDS, 20),
+    runBlocks: intEnv(env.ERIS_RUN_BLOCKS, 0),
+    agentDirectTx: env.ERIS_AGENT_DIRECT_TX !== "0",
+    skipReset: env.ERIS_SKIP_RESET === "1",
+    prewarmBlocks: intEnv(env.ERIS_PREWARM_BLOCKS, 0),
     seed: intEnv(env.SEED, 1),
     runDirRoot: env.REPORT_DIR ?? "./runs",
     agentTimeoutMs: intEnv(env.AGENT_TIMEOUT_MS, 5000),
@@ -176,6 +204,11 @@ export function loadConfig(env = process.env): SimConfig {
     aaveFlowMaxWethWei: bigintEnv(
       env.AAVE_FLOW_MAX_WETH_WEI,
       2_000_000_000_000_000_000n,
+    ),
+    // 既定 0 = 無効（既存 run の flow と byte 互換を保つ）。α 支配 env プロファイルで > 0 にする。
+    crossVenueSpreadFlowMaxWethWei: bigintEnv(
+      env.CROSS_VENUE_SPREAD_FLOW_MAX_WETH_WEI,
+      0n,
     ),
     flowBotCommand: env.FLOW_BOT_COMMAND ?? "node",
     flowBotArgs:

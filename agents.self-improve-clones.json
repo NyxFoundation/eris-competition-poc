@@ -1,0 +1,64 @@
+{
+  "agents": [
+    {
+      "id": "arb-ev1",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "arb",
+        "ERIS_LLM_AUTH": "cli",
+        "ERIS_LLM_REVIEW_EVERY": "60"
+      },
+      "description": "自己改善 arb クローン #1（同一 base から出発）"
+    },
+    {
+      "id": "arb-ev2",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "arb",
+        "ERIS_LLM_AUTH": "cli",
+        "ERIS_LLM_REVIEW_EVERY": "60"
+      },
+      "description": "自己改善 arb クローン #2"
+    },
+    {
+      "id": "arb-ev3",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "arb",
+        "ERIS_LLM_AUTH": "cli",
+        "ERIS_LLM_REVIEW_EVERY": "60"
+      },
+      "description": "自己改善 arb クローン #3"
+    },
+    {
+      "id": "arb-frozen",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/arb-bot.ts"],
+      "wallet": "AUTO",
+      "env": { "BID_PROFIT_FRACTION": "0.3" },
+      "description": "凍結対照（同系の決定論 arb。自己改善なし＝改善の効果測定の基準）"
+    },
+    {
+      "id": "noop",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/noop.ts"],
+      "wallet": "AUTO",
+      "baseline": true,
+      "description": "baseline（何もしない）"
+    },
+    {
+      "id": "random",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/random.ts"],
+      "wallet": "AUTO",
+      "baseline": true,
+      "description": "baseline（ランダム）"
+    }
+  ]
+}
