@@ -1,0 +1,125 @@
+{
+  "_comment": "自己改善 agent をできるだけ多く並列で回す環境のデモロスター。2 つのレバーを併用: (1) backend を claude と codex の別 API プールに分散(互いのレート/並走と競合しない)、(2) ERIS_LLM_REVIEW_OFFSET で revise 位相をプール内でずらし(stagger)、同時刻の revise を分散させ runway 内に完了させる。REVIEW_EVERY=60 前提でオフセットを 0/15/30/45 に配置(=各プール内で 15 block=30s 間隔)。自己改善 8 体 + baseline。要 clean(ARB_RPC_URL)。",
+  "agents": [
+    {
+      "id": "si-claude-1",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "cli",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "0"
+      },
+      "description": "claude プール / crossvenue / offset 0"
+    },
+    {
+      "id": "si-claude-2",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "cli",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "15"
+      },
+      "description": "claude プール / cvbal / offset 15"
+    },
+    {
+      "id": "si-claude-3",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "cli",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "30"
+      },
+      "description": "claude プール / crossvenue / offset 30"
+    },
+    {
+      "id": "si-claude-4",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "cli",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "45"
+      },
+      "description": "claude プール / cvbal / offset 45"
+    },
+    {
+      "id": "si-codex-1",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "0"
+      },
+      "description": "codex プール / crossvenue / offset 0"
+    },
+    {
+      "id": "si-codex-2",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "15"
+      },
+      "description": "codex プール / cvbal / offset 15"
+    },
+    {
+      "id": "si-codex-3",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "30"
+      },
+      "description": "codex プール / crossvenue / offset 30"
+    },
+    {
+      "id": "si-codex-4",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "45"
+      },
+      "description": "codex プール / cvbal / offset 45"
+    },
+    {
+      "id": "random",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/random.ts"],
+      "wallet": "AUTO",
+      "baseline": true,
+      "description": "baseline（ランダム）"
+    },
+    {
+      "id": "noop",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/noop.ts"],
+      "wallet": "AUTO",
+      "baseline": true,
+      "description": "baseline（何もしない）"
+    }
+  ]
+}
