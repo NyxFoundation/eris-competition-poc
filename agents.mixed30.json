@@ -1,0 +1,485 @@
+{
+  "_comment": "30 体混成: codex 自己改善 18(3-venue swap base 循環・staggered) + frozen 固定 10(AMM 9 種 + crossvenue ceiling anchor) + baseline 2。自己改善 vs 固定戦略の競争を測る。要 clean(ARB_RPC_URL: LP frozen のポジション汚染回避)。α プロファイル env(kappa0.15/spread2e18/informed5e17)で回す想定。",
+  "agents": [
+    {
+      "id": "si-codex-01-crossvenue",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "0"
+      },
+      "description": "codex 自己改善 / base crossvenue / offset 0"
+    },
+    {
+      "id": "si-codex-02-cvbal",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "3"
+      },
+      "description": "codex 自己改善 / base cvbal / offset 3"
+    },
+    {
+      "id": "si-codex-03-venue",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "venue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "6"
+      },
+      "description": "codex 自己改善 / base venue / offset 6"
+    },
+    {
+      "id": "si-codex-04-arb",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "arb",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "10"
+      },
+      "description": "codex 自己改善 / base arb / offset 10"
+    },
+    {
+      "id": "si-codex-05-statarb",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "statarb",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "13"
+      },
+      "description": "codex 自己改善 / base statarb / offset 13"
+    },
+    {
+      "id": "si-codex-06-crossvenue",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "16"
+      },
+      "description": "codex 自己改善 / base crossvenue / offset 16"
+    },
+    {
+      "id": "si-codex-07-cvbal",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "20"
+      },
+      "description": "codex 自己改善 / base cvbal / offset 20"
+    },
+    {
+      "id": "si-codex-08-venue",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "venue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "23"
+      },
+      "description": "codex 自己改善 / base venue / offset 23"
+    },
+    {
+      "id": "si-codex-09-arb",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "arb",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "26"
+      },
+      "description": "codex 自己改善 / base arb / offset 26"
+    },
+    {
+      "id": "si-codex-10-statarb",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "statarb",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "30"
+      },
+      "description": "codex 自己改善 / base statarb / offset 30"
+    },
+    {
+      "id": "si-codex-11-crossvenue",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "33"
+      },
+      "description": "codex 自己改善 / base crossvenue / offset 33"
+    },
+    {
+      "id": "si-codex-12-cvbal",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "36"
+      },
+      "description": "codex 自己改善 / base cvbal / offset 36"
+    },
+    {
+      "id": "si-codex-13-venue",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "venue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "40"
+      },
+      "description": "codex 自己改善 / base venue / offset 40"
+    },
+    {
+      "id": "si-codex-14-arb",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "arb",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "43"
+      },
+      "description": "codex 自己改善 / base arb / offset 43"
+    },
+    {
+      "id": "si-codex-15-statarb",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "statarb",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "46"
+      },
+      "description": "codex 自己改善 / base statarb / offset 46"
+    },
+    {
+      "id": "si-codex-16-crossvenue",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "50"
+      },
+      "description": "codex 自己改善 / base crossvenue / offset 50"
+    },
+    {
+      "id": "si-codex-17-cvbal",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "53"
+      },
+      "description": "codex 自己改善 / base cvbal / offset 53"
+    },
+    {
+      "id": "si-codex-18-venue",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "venue",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "60",
+        "ERIS_LLM_REVIEW_OFFSET": "56"
+      },
+      "description": "codex 自己改善 / base venue / offset 56"
+    },
+    {
+      "id": "fix-crossvenue",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_FREEZE_STRATEGY": "1"
+      },
+      "description": "固定(frozen) crossvenue"
+    },
+    {
+      "id": "fix-cvbal",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "cvbal",
+        "ERIS_FREEZE_STRATEGY": "1"
+      },
+      "description": "固定(frozen) cvbal"
+    },
+    {
+      "id": "fix-venue",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "venue",
+        "ERIS_FREEZE_STRATEGY": "1"
+      },
+      "description": "固定(frozen) venue"
+    },
+    {
+      "id": "fix-arb",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "arb",
+        "ERIS_FREEZE_STRATEGY": "1"
+      },
+      "description": "固定(frozen) arb"
+    },
+    {
+      "id": "fix-statarb",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "statarb",
+        "ERIS_FREEZE_STRATEGY": "1"
+      },
+      "description": "固定(frozen) statarb"
+    },
+    {
+      "id": "fix-fairmm",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "fairmm",
+        "ERIS_FREEZE_STRATEGY": "1"
+      },
+      "description": "固定(frozen) fairmm"
+    },
+    {
+      "id": "fix-jitlp",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "jitlp",
+        "ERIS_FREEZE_STRATEGY": "1"
+      },
+      "description": "固定(frozen) jitlp"
+    },
+    {
+      "id": "fix-ladder",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "ladder",
+        "ERIS_FREEZE_STRATEGY": "1"
+      },
+      "description": "固定(frozen) ladder"
+    },
+    {
+      "id": "fix-lp",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "lp",
+        "ERIS_FREEZE_STRATEGY": "1"
+      },
+      "description": "固定(frozen) lp"
+    },
+    {
+      "id": "fix-crossvenue-2",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/claude-llm.ts"
+      ],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "crossvenue",
+        "ERIS_FREEZE_STRATEGY": "1"
+      },
+      "description": "固定(frozen) crossvenue"
+    },
+    {
+      "id": "random",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/random.ts"
+      ],
+      "wallet": "AUTO",
+      "baseline": true,
+      "description": "baseline"
+    },
+    {
+      "id": "noop",
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/agents/noop.ts"
+      ],
+      "wallet": "AUTO",
+      "baseline": true,
+      "description": "baseline"
+    }
+  ]
+}
