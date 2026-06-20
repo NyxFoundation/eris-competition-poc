@@ -12,7 +12,16 @@ eris-competition-poc は Anvil で Arbitrum をフォークする DeFi トレー
 - `npm run gate` — before/after の evaluate JSON を **unpaired 統計**（bootstrap CI / Welch / Mann-Whitney）で比較し受理判定（`GATE_MODE=improve|noninferior`。strategy-evolve の受理ゲート本体。ADR 0005 §3）
 - `npm run discrimination` — 多様な戦略＋ベースラインを **regime×N 反復**で回し**識別力**（C1 実力報酬（bootstrap CI 有意性つき） / C2 順位安定（regime 間） / C3 Sharpe 非潰れ）を判定（`runs/<id>/discrimination.md` + JSON。ADR 0001 P1 / ADR 0005）
 - `npm run dashboard` — **リアルタイム可視化ダッシュボード**（読取専用の独立プロセス。`http://127.0.0.1:4317`）。"Agent Mesh" デザイン（ヘッダ統計 / 左=順位 standings / 中央=円環ノードの canvas mesh + CURRENT BLOCK + LATEST BLOCKS / 右=tx フィード + agent 詳細）で run 中の順位・活動・価格スプレッドをライブ観測（ADR 0008。フロントは 2026-06-20 に Agent Mesh へ刷新、データ層・SSE 契約は不変）。env: `DASH_PORT` / `DASH_POLL_EVERY`(ブロック) / `RUN_DIR`(明示) or 最新 run を追従 / `ANVIL_RPC_URL`(anvil 本体。接続不可なら tail のみの degrade)。単一 run 前提・tx は送らず採点に干渉しない
+- `npm run stress-report` — 完了済み 1 run の **stress 評価軸**（ADR 0009 §5）を抽出（`runs/<id>/stress.md` + `stress.json`）。競技 agent の最大ドローダウン / イベント後 PnL / 生存、victim の HF<1・清算・検知遅延、liquidator の清算捕捉数（帰属は heuristic）。reconstruct のコアを無改修で再利用する読取専用ツール。env: `RUN_DIR`(明示) or 最新 run。**α 識別（discrimination C1/C2/C3）とは分離した別軸**（β 再注入が α 支配を壊すため混ぜない）
 - `npm run typecheck` / `npm run test` — 型チェック / ユニットテスト
+
+### 市場ストレスイベント（spike/crash + Aave 清算。ADR 0009。既定 off）
+
+OU の base price はそのまま進め、その上に **SEED 由来でランダム化した決定論オーバーレイ**（`src/realtime/events.ts` `EventSchedule`）を重ねて effective price を導出する。effective が PriceFeed・Aave WETH オラクル・GMX・採点へ一貫伝播し、窓外では β≈0 を保つ（ADR 0007 を毀損しない）。清算を成立させる **seed 由来 victim 群**（採点対象外）を建てる。`sim:realtime` で env 指定:
+
+- `ERIS_STRESS_EVENTS` — JSON 配列（**値でなくレンジ**を与え過学習を抑制）。例: `[{"type":"crash","magnitudeRange":[0.06,0.10],"windowFrac":[0.3,0.7],"rampBlocks":3,"holdBlocks":6,"decayBlocks":8}]`。`spike`/`crash` の台形（ramp→hold→decay）。要 `ERIS_RUN_BLOCKS>0`
+- `ERIS_STRESS_VICTIM_COUNT`(既定 0=無効) / `ERIS_STRESS_VICTIM_HF0`(既定 1.05。`m>(HF0−1)/HF0` で清算。LT/LTV≈1.04 超が必要) / `ERIS_STRESS_VICTIM_WETH_WEI`(victim 1 体の supply)。**victim を建てるには full re-fork 必須**（`ARB_RPC_URL` 設定 + `ERIS_SKIP_RESET` 不可。未満は fail-fast。soft-reset だと前 run の victim ポジが残留して HF が壊れる）
+- coordinator は `stress_schedule` / `stress_victim_hf` / `stress_liquidation` を events.jsonl へ emit（dashboard 帯表示の元データ。SSE 契約は不変）。liquidator agent には victim アドレスを `ERIS_LIQUIDATION_VICTIMS` で配布する
 
 実時間化（ADR 0005）後の評価の前提: **SEED(=regime) は市場条件のラベル**で価格パスは再現可能だが、tx タイミング/着順は非決定 → 同一 regime でも結果はぶれる。だから評価は「同一 SEED の paired 比較」ではなく **N 回反復 + unpaired 統計**（`src/stats.ts` / `src/multiSeedRun.ts`）で行う。run 長は `ERIS_RUN_BLOCKS` 固定で揃える。
 

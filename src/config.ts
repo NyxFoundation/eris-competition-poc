@@ -6,6 +6,10 @@ import {
   MAX_BUNDLE_ACTIONS,
 } from "./constants.js";
 import type { AgentSpec, AgentsFile, ProtocolId } from "./types.js";
+import {
+  parseStressEvents,
+  type StressEventConfig,
+} from "./realtime/events.js";
 
 const ALL_PROTOCOLS: ProtocolId[] = [
   "uniswap",
@@ -44,6 +48,14 @@ export type SimConfig = {
   liquidationShockBps: number; // WETH オラクル引き下げ幅(bps, 既定 1500=15%)
   liquidationShockRound: number; // 引き下げを始めるラウンド(既定 3)
   liquidationVictimSupplyWethWei: bigint; // victim が supply する WETH(既定 5)
+  // 市場ストレスイベント(ADR 0009)。OU の base price に重ねる決定論オーバーレイ。
+  // ERIS_STRESS_EVENTS の JSON 配列(レンジ指定)で spike/crash を与える。空(既定)なら従来 run と一致。
+  stressEvents: StressEventConfig[];
+  // 清算を成立させる seed 由来 victim 群(WETH supply + USDC borrow, HF≈H0)。採点対象外。
+  // count=0(既定)で無効。>0 のときは aave 有効 + full re-fork(ARB_RPC_URL 必須)が前提(ADR 0009 §4)。
+  stressVictimCount: number; // ERIS_STRESS_VICTIM_COUNT
+  stressVictimHf0: number; // ERIS_STRESS_VICTIM_HF0(目標初期 HF。既定 1.05。LT/LTV≈1.04 超が必要)
+  stressVictimSupplyWethWei: bigint; // ERIS_STRESS_VICTIM_WETH_WEI(victim 1 体あたり supply。既定 5)
   // フラッシュ arb デモ(GitHub #3)。ERIS_FLASH_ARB=1 で coordinator が FlashArb コントラクトを
   // デプロイし、flash-arb agent が利用できるようにする。uniswap+balancer+aave 有効が前提。既定 off。
   flashArbDemo: boolean;
@@ -133,6 +145,13 @@ export function loadConfig(env = process.env): SimConfig {
     liquidationShockRound: intEnv(env.ERIS_LIQUIDATION_SHOCK_ROUND, 3),
     liquidationVictimSupplyWethWei: bigintEnv(
       env.ERIS_LIQUIDATION_VICTIM_WETH_WEI,
+      5_000_000_000_000_000_000n,
+    ),
+    stressEvents: parseStressEvents(env.ERIS_STRESS_EVENTS),
+    stressVictimCount: intEnv(env.ERIS_STRESS_VICTIM_COUNT, 0),
+    stressVictimHf0: floatEnv(env.ERIS_STRESS_VICTIM_HF0, 1.05),
+    stressVictimSupplyWethWei: bigintEnv(
+      env.ERIS_STRESS_VICTIM_WETH_WEI,
       5_000_000_000_000_000_000n,
     ),
     flashArbDemo: env.ERIS_FLASH_ARB === "1",
@@ -417,6 +436,14 @@ function intEnv(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed))
     throw new Error(`Expected integer env value, got ${value}`);
+  return parsed;
+}
+
+function floatEnv(value: string | undefined, fallback: number): number {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed))
+    throw new Error(`Expected numeric env value, got ${value}`);
   return parsed;
 }
 

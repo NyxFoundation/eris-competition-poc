@@ -49,6 +49,14 @@ import { RealtimeAgentProcess } from "./agentProcess.js";
 import { RealtimeFlowProcess } from "./flowProcess.js";
 import { deployPriceFeed, updatePriceFeedMempool } from "./priceFeed.js";
 import { reconstructValueSeries } from "./reconstruct.js";
+import { EventSchedule } from "./events.js";
+import {
+  deriveStressVictims,
+  openStressVictimPositions,
+  readVictimsAccount,
+  setupStressVictims,
+  type StressVictim,
+} from "../liquidationDemo.js";
 
 const GAS_ONLY_WEI = 2_000_000_000_000_000_000_000_000n; // 2,000,000 ETH（admin/keeper のガス）
 
@@ -333,6 +341,51 @@ export async function runRealtimeSimulation(): Promise<void> {
       }
     }
 
+    // ---- stress victim 群（ADR 0009 §4）: 清算を成立させる seed 由来の被害者を建てる ----
+    // victim は agentRuntimes に含めない＝採点対象外（liquidator agent の利益源）。
+    const stressVictims: StressVictim[] = deriveStressVictims(
+      config.seed,
+      config.stressVictimCount,
+    );
+    let victimEnv: Record<string, string> | undefined;
+    if (stressVictims.length > 0) {
+      if (!enabledIds.includes("aave")) {
+        throw new Error(
+          "ERIS_STRESS_VICTIM_COUNT > 0 requires the aave protocol enabled (ADR 0009 §4)",
+        );
+      }
+      // 【ハード要件】full re-fork。soft-reset だと前 run の victim ポジが残留し HF 計算が壊れる
+      // （anvil-reset-does-not-clear-state、ADR 0007 訂正の原因）→ fail-fast。
+      if (!config.forkUrl || config.skipReset) {
+        throw new Error(
+          "stress victims require a full re-fork: set ARB_RPC_URL and do not set ERIS_SKIP_RESET (ADR 0009 §4)",
+        );
+      }
+      await setupStressVictims(ctx, stressVictims);
+      await openStressVictimPositions(
+        ctx,
+        stressVictims,
+        config.stressVictimHf0,
+      );
+      const accounts = await readVictimsAccount(ctx, stressVictims);
+      logger.event({
+        type: "stress_victims_setup",
+        hf0: config.stressVictimHf0,
+        victims: accounts.map((a) => ({
+          id: a.id,
+          address: a.address,
+          healthFactor: a.healthFactor.toString(),
+          totalCollateralBase: a.totalCollateralBase.toString(),
+          totalDebtBase: a.totalDebtBase.toString(),
+        })),
+      });
+      // liquidator agent に監視対象 victim を渡す（detection スキルの前提は維持: HF は agent が
+      // 毎ブロック走査する。アドレスはオンチェーン公開情報で、配布しても入札ゲームを増やさない）。
+      victimEnv = {
+        ERIS_LIQUIDATION_VICTIMS: stressVictims.map((v) => v.address).join(","),
+      };
+    }
+
     latestFairPrice = await initialFairPrice(ctx, enabledIds);
     for (const agent of agentRuntimes) {
       agent.initial = await getBalances(publicClient, agent.address);
@@ -380,6 +433,7 @@ export async function runRealtimeSimulation(): Promise<void> {
         directTx
           ? { privateKey: agent.privateKey, priceFeedAddress, runId }
           : undefined,
+        victimEnv,
       );
     }
 
@@ -582,12 +636,26 @@ export async function runRealtimeSimulation(): Promise<void> {
       blockTimeSec: config.blockTimeSec,
     });
     const startTime = Date.now();
-    // 平均回帰価格モデルの中心（競争開始時の fair price）。run を通して固定。
-    const fairAnchor = latestFairPrice;
+    // base/effective 分離（ADR 0009 §1）: OU の状態は base 系列で進め、stress イベントは
+    // 分離可能な歪みとして effective を導出する。窓外では従来通り β≈0（ADR 0007 を維持）。
+    let baseFair = latestFairPrice; // OU 状態。イベントで触らない。
+    // 平均回帰価格モデルの中心（競争開始時の base fair price）。run を通して固定。
+    const fairAnchor = baseFair;
+    const schedule = new EventSchedule(
+      config.stressEvents,
+      config.seed,
+      config.runBlocks,
+    );
     let processedBlocks = 0;
     let processing = false;
     let lastProcessedBlock = Number(await publicClient.getBlockNumber());
     const runStartBlock = lastProcessedBlock + 1;
+    if (schedule.hasEvents()) {
+      logger.event({ type: "stress_schedule", events: schedule.events });
+    }
+    // 清算検知用に victim ごとの直近債務（USD 8 桁）を持つ。債務の減少は liquidationCall でしか
+    // 起きない（victim は受動）→ 減少を清算シグナルとして stress_liquidation を emit する。
+    const victimLastDebt = new Map<string, bigint>();
 
     await new Promise<void>((resolve) => {
       let finished = false;
@@ -611,8 +679,13 @@ export async function runRealtimeSimulation(): Promise<void> {
           const fromBlock = lastProcessedBlock + 1;
           lastProcessedBlock = Math.max(lastProcessedBlock, bn);
 
-          // 市場を1ステップ進める（RNG の更新は 1 周に 1 回。以降の並列タスクは値だけ共有）
-          latestFairPrice = nextFairPrice(latestFairPrice, rng, fairAnchor);
+          // 市場を1ステップ進める（RNG の更新は 1 周に 1 回。以降の並列タスクは値だけ共有）。
+          // base は OU でだけ進め、stress オーバーレイ（決定論）を掛けて effective を導出する。
+          // effective が PriceFeed / Aave WETH オラクル / GMX / 採点へ一貫伝播する（ADR 0009 §1）。
+          const blockIndex = bn - runStartBlock;
+          baseFair = nextFairPrice(baseFair, rng, fairAnchor);
+          const overlay = schedule.at(blockIndex);
+          latestFairPrice = baseFair * overlay.wethMult;
 
           // keeper / oracle 書込 / state+flow は相互に独立（ウォレットも別）なので並列に走らせる。
           // tx の記録（blocks.csv）はループから外し、run 後に一括走査する（logBlock 参照）。
@@ -745,6 +818,43 @@ export async function runRealtimeSimulation(): Promise<void> {
             }
           };
 
+          // victim HF 観測（ADR 0009 §4,7）: stress イベント窓内/窓近傍だけ HF・債務を読み、
+          // events.jsonl へ emit（dashboard が帯で表示する元データ。SSE 契約は不変）。債務の減少を
+          // 清算として検知する。窓外（overlay=1）は読まずログ肥大・RPC 負荷を避ける。
+          const victimTask = async (): Promise<void> => {
+            if (stressVictims.length === 0) return;
+            const active = schedule.activeEventAt(blockIndex);
+            if (!active && overlay.wethMult === 1) return;
+            const accounts = await readVictimsAccount(ctx, stressVictims);
+            logger.event({
+              type: "stress_victim_hf",
+              blockNumber: bn,
+              blockIndex,
+              wethMult: overlay.wethMult,
+              victims: accounts.map((a) => ({
+                id: a.id,
+                healthFactor: a.healthFactor.toString(),
+                totalDebtBase: a.totalDebtBase.toString(),
+              })),
+            });
+            for (const a of accounts) {
+              const lastDebt = victimLastDebt.get(a.id);
+              if (lastDebt !== undefined && a.totalDebtBase < lastDebt) {
+                logger.event({
+                  type: "stress_liquidation",
+                  blockNumber: bn,
+                  blockIndex,
+                  victimId: a.id,
+                  victimAddress: a.address,
+                  repaidBaseUsd: (lastDebt - a.totalDebtBase).toString(),
+                  remainingDebtBase: a.totalDebtBase.toString(),
+                  healthFactor: a.healthFactor.toString(),
+                });
+              }
+              victimLastDebt.set(a.id, a.totalDebtBase);
+            }
+          };
+
           // 各タスクの所要時間を残す（環境ループの律速診断用。ADR 0006「判定指標」の実測元）
           const timed = async (task: () => Promise<void>): Promise<number> => {
             const t0 = Date.now();
@@ -752,11 +862,16 @@ export async function runRealtimeSimulation(): Promise<void> {
             return Date.now() - t0;
           };
           const roundStart = Date.now();
-          const [keeperMs, oracleMs, stateFlowMs] = await Promise.all([
+          // victim 観測は stress run でのみ走らせる（既定の no-stress run に毎ブロックの
+          // タスク/Promise を足さない）。stress run のみ round_timing に victimMs が載る。
+          const tasks = [
             timed(keeperTask),
             timed(oracleTask),
             timed(stateAndFlowTask),
-          ]);
+          ];
+          if (stressVictims.length > 0) tasks.push(timed(victimTask));
+          const [keeperMs, oracleMs, stateFlowMs, victimMs] =
+            await Promise.all(tasks);
           logger.event({
             type: "round_timing",
             blockNumber: bn,
@@ -764,6 +879,7 @@ export async function runRealtimeSimulation(): Promise<void> {
             keeperMs,
             oracleMs,
             stateFlowMs,
+            ...(victimMs !== undefined ? { victimMs } : {}),
             totalMs: Date.now() - roundStart,
           });
 

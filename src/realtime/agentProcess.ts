@@ -52,6 +52,9 @@ export class RealtimeAgentProcess {
     agentAddress: string,
     runDir: string,
     direct?: DirectAccess,
+    // 環境が全 agent に注入する追加 env（例: ADR 0009 の stress victim アドレス）。
+    // spec.env が明示すればそちらが優先される（extraEnv は既定値の位置づけ）。
+    extraEnv?: Record<string, string>,
   ) {
     const childEnv: NodeJS.ProcessEnv = { ...process.env };
     // 親 Claude Code セッションのマーカーを除去（ネスト検出でハングするのを防ぐ。AgentProcess と同様）。
@@ -63,6 +66,7 @@ export class RealtimeAgentProcess {
       )
         delete childEnv[k];
     }
+    Object.assign(childEnv, extraEnv ?? {});
     Object.assign(childEnv, spec.env ?? {});
     childEnv.NODE_ENV = process.env.NODE_ENV ?? "development";
     childEnv.ERIS_AGENT_ID = spec.id;
