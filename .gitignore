@@ -8,3 +8,4 @@ node_modules/
 dist/
 probe_tmp.mts
 .serena/
+.playwright-cli/
