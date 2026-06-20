@@ -37,11 +37,15 @@ export type StressRunData = {
   victimsSetup: { id: string; address: string; hf: number }[];
   // run 競争の開始ブロック（絶対）。stress_victim_hf の blockNumber − blockIndex から導出。
   runStartBlock: number | null;
-  // blockNumber → そのブロックの tx（owner/role/status）。liquidator 帰属の heuristic に使う。
+  // blockNumber → そのブロックの tx（owner/role/status）。liquidator 帰属の fallback heuristic に使う。
   agentTxByBlock: Map<
     number,
     { ownerId: string; role: string; status: string }[]
   >;
+  // agentId → liquidationCall（rawTx）を submit した blockSeen の昇順配列。
+  // agents/<id>.jsonl の mempool ログ由来。liquidator 帰属の一次情報（uniswap arb 等の
+  // 同ブロック swap を誤計上しない）。空なら agentTxByBlock の heuristic にフォールバック。
+  agentRawTxBlocks: Map<string, number[]>;
 };
 
 function num(v: unknown, fallback = 0): number {
@@ -58,10 +62,12 @@ function hfToFloat(v: unknown): number {
   }
 }
 
-// events.jsonl（行配列）+ blocks.csv（生文字列）を構造化する。
+// events.jsonl（行配列）+ blocks.csv（生文字列）+ agent mempool ログ（agentId → 行配列）を
+// 構造化する。agentLogs は省略可（その場合 liquidator 帰属は blocks.csv の heuristic になる）。
 export function parseStressRun(
   eventsLines: string[],
   blocksCsv: string,
+  agentLogs?: Map<string, string[]>,
 ): StressRunData {
   const agents: { id: string; baseline: boolean }[] = [];
   let schedule: ResolvedStressEvent[] = [];
@@ -153,6 +159,7 @@ export function parseStressRun(
   victimHf.sort((a, b) => a.blockNumber - b.blockNumber);
 
   const agentTxByBlock = parseBlocksCsv(blocksCsv);
+  const agentRawTxBlocks = parseAgentRawTxBlocks(agentLogs);
   return {
     agents,
     schedule,
@@ -162,7 +169,44 @@ export function parseStressRun(
     victimsSetup,
     runStartBlock,
     agentTxByBlock,
+    agentRawTxBlocks,
   };
+}
+
+// agent mempool ログから liquidationCall（rawTx）の submit ブロックを集める。
+// directShim は submitted を {kind:"mempool", event:"submitted", actionType, blockSeen} で記録する。
+// liquidator は liquidationCall を rawTx で出すため actionType==="rawTx" を清算行動の代理とする
+// （uniswap arb 等は swap/aave* を出すので混ざらない）。
+function parseAgentRawTxBlocks(
+  agentLogs?: Map<string, string[]>,
+): Map<string, number[]> {
+  const out = new Map<string, number[]>();
+  if (!agentLogs) return out;
+  for (const [agentId, lines] of agentLogs) {
+    const blocks: number[] = [];
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let ev: Record<string, unknown>;
+      try {
+        ev = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (
+        ev.kind === "mempool" &&
+        ev.event === "submitted" &&
+        ev.actionType === "rawTx" &&
+        typeof ev.blockSeen === "number"
+      ) {
+        blocks.push(ev.blockSeen);
+      }
+    }
+    if (blocks.length > 0) {
+      blocks.sort((a, b) => a - b);
+      out.set(agentId, blocks);
+    }
+  }
+  return out;
 }
 
 function parseBlocksCsv(
@@ -321,29 +365,58 @@ export function computeVictimOutcomes(run: StressRunData): VictimOutcome[] {
 }
 
 // ---- liquidator agent の清算捕捉（目的 1）----
-// 帰属は heuristic: 清算ブロックで success した agent tx をその agent の捕捉とみなす
-// （同一ブロックに複数の agent tx があれば全員に計上され得る。competent 同士の運成分は
-// N 反復で吸収する前提。ADR 0009 §6）。
 export type LiquidatorMetric = {
   agentId: string;
   captures: number;
   capturedVictims: string[];
 };
 
+// 帰属方式:
+//   "raw-tx-log"      — agent mempool ログから liquidationCall(rawTx) を出した agent に限定（一次情報）。
+//   "block-heuristic" — agent ログが無いとき、清算ブロックで success した agent tx を捕捉とみなす
+//                       （同ブロックの他 tx も計上され得る粗い近似）。
+export type LiquidatorAttribution = "raw-tx-log" | "block-heuristic";
+
+export type LiquidatorMetrics = {
+  metrics: LiquidatorMetric[];
+  attribution: LiquidatorAttribution;
+};
+
+// liquidationCall の submit→約定は次ブロック着弾なので、blockSeen は清算ブロックの少し手前に来る。
+// この窓で agent の rawTx submit と清算ブロックを対応づける。
+const LIQUIDATION_ATTRIBUTION_WINDOW = 2;
+
 export function computeLiquidatorMetrics(
   run: StressRunData,
-): LiquidatorMetric[] {
+): LiquidatorMetrics {
+  const useRawTx = run.agentRawTxBlocks.size > 0;
   const byAgent = new Map<string, Set<string>>();
+  const add = (agentId: string, victimId: string): void => {
+    const set = byAgent.get(agentId) ?? new Set<string>();
+    set.add(victimId);
+    byAgent.set(agentId, set);
+  };
+
   for (const liq of run.liquidations) {
-    const txs = run.agentTxByBlock.get(liq.blockNumber) ?? [];
-    for (const tx of txs) {
-      if (tx.role !== "agent") continue;
-      if (tx.status !== "success") continue;
-      const set = byAgent.get(tx.ownerId) ?? new Set<string>();
-      set.add(liq.victimId);
-      byAgent.set(tx.ownerId, set);
+    if (useRawTx) {
+      // rawTx(liquidationCall) を [liqBlock−W, liqBlock] に submit した agent に限定。
+      for (const [agentId, blocks] of run.agentRawTxBlocks) {
+        const hit = blocks.some(
+          (b) =>
+            b <= liq.blockNumber &&
+            b >= liq.blockNumber - LIQUIDATION_ATTRIBUTION_WINDOW,
+        );
+        if (hit) add(agentId, liq.victimId);
+      }
+    } else {
+      // フォールバック: 清算ブロックで success した agent tx（粗い近似）。
+      for (const tx of run.agentTxByBlock.get(liq.blockNumber) ?? []) {
+        if (tx.role === "agent" && tx.status === "success")
+          add(tx.ownerId, liq.victimId);
+      }
     }
   }
+
   const metrics: LiquidatorMetric[] = [];
   for (const [agentId, victims] of byAgent) {
     metrics.push({
@@ -353,7 +426,10 @@ export function computeLiquidatorMetrics(
     });
   }
   metrics.sort((a, b) => b.captures - a.captures);
-  return metrics;
+  return {
+    metrics,
+    attribution: useRawTx ? "raw-tx-log" : "block-heuristic",
+  };
 }
 
 export type StressReport = {
@@ -362,15 +438,18 @@ export type StressReport = {
   competitors: CompetitorMetric[];
   victims: VictimOutcome[];
   liquidators: LiquidatorMetric[];
+  liquidatorAttribution: LiquidatorAttribution;
 };
 
 export function buildStressReport(run: StressRunData): StressReport {
+  const liq = computeLiquidatorMetrics(run);
   return {
     runStartBlock: run.runStartBlock,
     schedule: run.schedule,
     competitors: computeCompetitorMetrics(run),
     victims: computeVictimOutcomes(run),
-    liquidators: computeLiquidatorMetrics(run),
+    liquidators: liq.metrics,
+    liquidatorAttribution: liq.attribution,
   };
 }
 
@@ -428,8 +507,8 @@ export function renderStressMarkdown(report: StressReport): string {
       ["---", "--:", "--:", ":--:", "--:", "--:", "--:"],
       report.victims.map((v) => [
         v.victimId,
-        v.setupHf?.toFixed(3) ?? "n/a",
-        v.minHf?.toFixed(3) ?? "n/a",
+        fmtHf(v.setupHf),
+        fmtHf(v.minHf),
         v.wentBelowOne ? "✓" : "✗",
         String(v.liquidatedBlock ?? "—"),
         String(v.detectionDelayBlocks ?? "—"),
@@ -440,7 +519,7 @@ export function renderStressMarkdown(report: StressReport): string {
   lines.push("");
 
   lines.push(
-    "## liquidator agent（清算ハンティング。目的 1。帰属は heuristic）",
+    `## liquidator agent（清算ハンティング。目的 1。帰属: ${report.liquidatorAttribution}）`,
   );
   lines.push("");
   if (report.liquidators.length === 0) {
@@ -477,4 +556,11 @@ function mdTable(
 
 function fmt(n: number): string {
   return n.toLocaleString("en-US", { maximumFractionDigits: 0 });
+}
+
+// HF 表示。無債務時の uint256 max sentinel(≈1e59)は ∞ と表示する（toFixed の指数表記を回避）。
+function fmtHf(hf: number | null): string {
+  if (hf === null) return "n/a";
+  if (hf > 1e6) return "∞";
+  return hf.toFixed(3);
 }

@@ -12,7 +12,13 @@
 //   ARB_RPC_URL=... ERIS_RUN_BLOCKS=80 \
 //   ERIS_STRESS_EVENTS='[{"type":"crash","magnitudeRange":[0.06,0.10],"windowFrac":[0.3,0.7],"rampBlocks":3,"holdBlocks":6,"decayBlocks":8}]' \
 //   ERIS_STRESS_VICTIM_COUNT=3 AGENTS_CONFIG=agents.local.json npm run sim:realtime
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   buildStressReport,
@@ -20,6 +26,18 @@ import {
   renderStressMarkdown,
 } from "../src/stressMetrics.js";
 import { safeStringify } from "../src/logger.js";
+
+// agents/<id>.jsonl を agentId → 行配列で読む（liquidator 帰属の一次情報。ADR 0009 §6）。
+function readAgentLogs(agentsDir: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  if (!existsSync(agentsDir) || !statSync(agentsDir).isDirectory()) return out;
+  for (const f of readdirSync(agentsDir)) {
+    if (!f.endsWith(".jsonl")) continue;
+    const agentId = f.replace(/\.jsonl$/, "");
+    out.set(agentId, readFileSync(join(agentsDir, f), "utf8").split("\n"));
+  }
+  return out;
+}
 
 function latestRunDir(runsDir: string): string | null {
   if (!existsSync(runsDir)) return null;
@@ -47,8 +65,9 @@ function main(): void {
   const blocksCsv = existsSync(join(runDir, "blocks.csv"))
     ? readFileSync(join(runDir, "blocks.csv"), "utf8")
     : "";
+  const agentLogs = readAgentLogs(join(runDir, "agents"));
 
-  const run = parseStressRun(eventsLines, blocksCsv);
+  const run = parseStressRun(eventsLines, blocksCsv, agentLogs);
   if (run.schedule.length === 0) {
     console.error(
       `[stress-report] ${runDir} に stress_schedule がありません（ERIS_STRESS_EVENTS 無しの run）。指標は出ますが event 依存の値は空になります。`,

@@ -137,16 +137,22 @@ HF≈1 のレバレッジ保有者がいないと清算は起きない。`liquid
 
 **較正（自由パラメータではない）**: WETH 担保・USDC 債務の victim は
 `HF = (W·P·LT)/D`。HF0=H0 で建てると、crash 後の HF は `H0·(1−m)`。よって
-**`m > (H0−1)/H0` で清算**される。競技 agent の巻き添えを避けるため、victim の buffer を薄く・
-magnitude を中庸にする:
+**`m > (H0−1)/H0` で清算**される。ただし victim を**建てられる**には借入が LTV 上限に収まる必要が
+あり、実装の縁マージン（availableBorrows の 97%）込みで **`H0 ≳ LT/(0.97·LTV)`** が要る。
+実測 Arbitrum WETH は **LT=0.84 / LTV=0.80 → LT/LTV=1.05**（＝ build 下限ちょうど）なので、
+**H0=1.05 は LTV 縁に張り付き 3 体目以降が margin で revert する**（初版の 1.05 は撤回）。
+margin を取った既定へ更新する:
 
 ```
-victim:   HF0 ≈ 1.05  → 清算に必要な m > (1.05−1)/1.05 ≈ 4.8%
-crash:    m ∈ [6%,10%] → victim は確実に清算
-agent:    HF 1.30 の健全レバレッジは m=10% でも HF→1.17 で生存（巻き添えにしない）
+victim:   HF0 = 1.10  → build 下限 LT/(0.97·LTV)≈1.08 を満たす / 清算に必要な m > (1.10−1)/1.10 ≈ 9.1%
+crash:    m ∈ [12%,16%] → victim は確実に清算（HF→1.10·0.88≈0.97）
+agent:    HF 1.30 の健全レバレッジは m=16% でも HF→1.09 で生存（巻き添えにしない）
 ```
 
-（初版ドラフトの「HF≈1.02 + magnitude 18%」は過大で全員巻き添えになるため撤回。）
+（初版ドラフトの「HF≈1.02 + magnitude 18%」は過大で全員巻き添え、第二版の「HF0=1.05 + m∈[6%,10%]」は
+LT/LTV=1.05 の build 下限に張り付き victim が建たないため、いずれも撤回。実測で確定。）
+borrow は LTV 縁から離して送り、borrow 後に debt>0 を検証してサイレント revert を fail-fast する。
+crash magnitude が victim を割れない設定は `stress_calibration_warning` を emit する。
 
 - 個数・H0・型を config 化、victim 鍵は `seed` 由来で regime ごとに決定論再現。
 - オラクル更新は §1 の effective 経由で mempool に載るため、既存 `applyOracleShock` の同期

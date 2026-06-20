@@ -167,13 +167,52 @@ test("computeVictimOutcomes: HF<1 検知と検知遅延", () => {
   assert.ok(Math.abs(v0.totalRepaidBaseUsd - USD8(500)) < 1);
 });
 
-test("computeLiquidatorMetrics: success agent tx のみ帰属", () => {
+test("computeLiquidatorMetrics(block-heuristic): agent ログ無しは success agent tx で近似", () => {
   const run = parseStressRun(buildEvents(), BLOCKS_CSV);
   const l = computeLiquidatorMetrics(run);
-  assert.equal(l.length, 1); // lev は reverted なので除外
-  assert.equal(l[0].agentId, "liq");
-  assert.equal(l[0].captures, 1);
-  assert.deepEqual(l[0].capturedVictims, ["victim-0"]);
+  assert.equal(l.attribution, "block-heuristic");
+  assert.equal(l.metrics.length, 1); // lev は reverted なので除外
+  assert.equal(l.metrics[0].agentId, "liq");
+  assert.equal(l.metrics[0].captures, 1);
+  assert.deepEqual(l.metrics[0].capturedVictims, ["victim-0"]);
+});
+
+test("computeLiquidatorMetrics(raw-tx-log): liquidationCall を出した agent に限定", () => {
+  // simple は同ブロックに swap success を持つが rawTx は出さない → 誤計上しない。
+  const agentLogs = new Map<string, string[]>([
+    [
+      "liq",
+      [
+        JSON.stringify({
+          kind: "mempool",
+          event: "submitted",
+          actionType: "rawTx",
+          blockSeen: 109,
+        }),
+      ],
+    ],
+    [
+      "simple",
+      [
+        JSON.stringify({
+          kind: "mempool",
+          event: "submitted",
+          actionType: "swap",
+          blockSeen: 110,
+        }),
+      ],
+    ],
+  ]);
+  // simple の success swap を清算ブロックに追加（heuristic なら誤計上されるはずの罠）
+  const csv = `${BLOCKS_CSV}\n110,110,2,0xh4,0xsimple,2000000000,success,simple,agent,swap,,`;
+  const run = parseStressRun(buildEvents(), csv, agentLogs);
+  const l = computeLiquidatorMetrics(run);
+  assert.equal(l.attribution, "raw-tx-log");
+  assert.deepEqual(
+    l.metrics.map((m) => m.agentId),
+    ["liq"],
+  ); // simple は除外される
+  assert.equal(l.metrics[0].captures, 1);
 });
 
 test("buildStressReport + renderStressMarkdown が成立", () => {
@@ -182,6 +221,7 @@ test("buildStressReport + renderStressMarkdown が成立", () => {
   assert.equal(report.competitors.length, 3);
   assert.equal(report.victims.length, 1);
   assert.equal(report.liquidators.length, 1);
+  assert.equal(report.liquidatorAttribution, "block-heuristic");
   const md = renderStressMarkdown(report);
   assert.match(md, /Stress 評価レポート/);
   assert.match(md, /victim-0/);

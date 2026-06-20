@@ -54,7 +54,7 @@ export type SimConfig = {
   // 清算を成立させる seed 由来 victim 群(WETH supply + USDC borrow, HF≈H0)。採点対象外。
   // count=0(既定)で無効。>0 のときは aave 有効 + full re-fork(ARB_RPC_URL 必須)が前提(ADR 0009 §4)。
   stressVictimCount: number; // ERIS_STRESS_VICTIM_COUNT
-  stressVictimHf0: number; // ERIS_STRESS_VICTIM_HF0(目標初期 HF。既定 1.05。LT/LTV≈1.04 超が必要)
+  stressVictimHf0: number; // ERIS_STRESS_VICTIM_HF0(目標初期 HF。既定 1.10。LT/(0.97·LTV)≈1.08 超が必要)
   stressVictimSupplyWethWei: bigint; // ERIS_STRESS_VICTIM_WETH_WEI(victim 1 体あたり supply。既定 5)
   // フラッシュ arb デモ(GitHub #3)。ERIS_FLASH_ARB=1 で coordinator が FlashArb コントラクトを
   // デプロイし、flash-arb agent が利用できるようにする。uniswap+balancer+aave 有効が前提。既定 off。
@@ -149,7 +149,7 @@ export function loadConfig(env = process.env): SimConfig {
     ),
     stressEvents: parseStressEvents(env.ERIS_STRESS_EVENTS),
     stressVictimCount: intEnv(env.ERIS_STRESS_VICTIM_COUNT, 0),
-    stressVictimHf0: floatEnv(env.ERIS_STRESS_VICTIM_HF0, 1.05),
+    stressVictimHf0: floatEnv(env.ERIS_STRESS_VICTIM_HF0, 1.1),
     stressVictimSupplyWethWei: bigintEnv(
       env.ERIS_STRESS_VICTIM_WETH_WEI,
       5_000_000_000_000_000_000n,

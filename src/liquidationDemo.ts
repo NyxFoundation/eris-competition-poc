@@ -188,58 +188,115 @@ export async function setupStressVictims(
   }
 }
 
+// borrow を LTV 縁から離す余裕（read→execute 間の僅かな状態変化で revert しないように）。
+// availableBorrowsBase の 97% を上限とする。これ未満に targetUsdc が収まらない HF0 は LTV 縁に
+// 張り付くので feasibility エラーにする（旧コードは 99% にサイレントにクランプし、3 体目以降が
+// margin で revert → debt=0 のまま競争に入る不具合があった。ADR 0009 §4 訂正）。
+const VICTIM_LTV_HEADROOM_BPS = 9_700n;
+
+// 1 victim 分の口座データ（getUserAccountData）。
+async function victimAccountData(
+  ctx: SimContext,
+  address: Address,
+): Promise<readonly bigint[]> {
+  return (await ctx.publicClient.readContract({
+    address: AAVE.Pool,
+    abi: aavePoolAbi,
+    functionName: "getUserAccountData",
+    args: [address],
+  })) as readonly bigint[];
+}
+
+// tx を送って効果がチェーンに載ったかを検証し、未反映なら 1 回リトライする。
+// full re-fork setup 下では sendAndMine が稀に取りこぼす（毎回別 victim が落ちる transient な
+// mining race を実測）。sendAndMine は tx status を見ないため、効果を再読取で確認するのが確実。
+async function sendVerified(
+  ctx: SimContext,
+  victim: StressVictim,
+  data: Hex,
+  landed: (acc: readonly bigint[]) => boolean,
+  failMessage: string,
+): Promise<readonly bigint[]> {
+  const { publicClient, walletClient, chain } = ctx;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await sendAndMine(publicClient, walletClient, chain, victim.privateKey, {
+      to: AAVE.Pool,
+      data,
+    });
+    const acc = await victimAccountData(ctx, victim.address);
+    if (landed(acc)) return acc;
+  }
+  throw new Error(`stress victim ${victim.id}: ${failMessage}`);
+}
+
 // 各 victim が WETH を supply → 目標 HF（hf0）になるよう USDC を borrow する。
 // 較正（ADR 0009 §4。自由パラメータではない）:
 //   WETH 担保・USDC 債務の victim は HF = (W·P·LT)/D。目標債務 D* = C·LT/HF0 で建てると HF≈HF0。
 //   crash 後の HF は HF0·(1−m) なので m > (HF0−1)/HF0 で清算。
-//   ただし HF0 は LTV 上限（D ≤ C·LTV）を満たす必要があり HF0 > LT/LTV(≈1.04) でないと建てられない。
+//   ただし HF0 は LTV 上限（D ≤ C·LTV）を満たす必要があり、余裕込みで
+//   HF0 ≳ LT/(0.97·LTV)（実測 Arbitrum WETH の LT=0.84/LTV=0.80 では ≈1.08）でないと建てられない。
+//   この境界を割ると借入が LTV 縁に張り付いて revert するため、満たせない HF0 は fail-fast する。
 export async function openStressVictimPositions(
   ctx: SimContext,
   victims: StressVictim[],
   hf0: number,
 ): Promise<void> {
-  const { publicClient, walletClient, chain, config } = ctx;
+  const { config } = ctx;
   const h0Bps = BigInt(Math.round(hf0 * 10_000));
   for (const v of victims) {
-    await sendAndMine(publicClient, walletClient, chain, v.privateKey, {
-      to: AAVE.Pool,
-      data: encodeFunctionData({
-        abi: aavePoolAbi,
-        functionName: "supply",
-        args: [
-          TOKENS.WETH.address,
-          config.stressVictimSupplyWethWei,
-          v.address,
-          0,
-        ],
-      }),
-    });
-    const acc = (await publicClient.readContract({
-      address: AAVE.Pool,
+    // supply（担保が載ったかを検証し、transient 取りこぼしは 1 回リトライ）
+    const supplyData = encodeFunctionData({
       abi: aavePoolAbi,
-      functionName: "getUserAccountData",
-      args: [v.address],
-    })) as readonly bigint[];
+      functionName: "supply",
+      args: [
+        TOKENS.WETH.address,
+        config.stressVictimSupplyWethWei,
+        v.address,
+        0,
+      ],
+    });
+    const acc = await sendVerified(
+      ctx,
+      v,
+      supplyData,
+      (a) => a[0] > 0n,
+      "WETH supply did not register (collateral=0 after retry). " +
+        "Likely a transient setup mining race or a reverted supply (check reserve caps/flags). ADR 0009 §4",
+    );
     // acc: [totalCollateralBase, totalDebtBase, availableBorrowsBase,
     //       currentLiquidationThreshold(bps), ltv(bps), healthFactor(1e18)]（USD は 8 桁）
     const collateralUsd8 = acc[0];
     const availUsd8 = acc[2];
     const ltBps = acc[3];
+    const ltvBps = acc[4];
     // 目標債務(USD8) = C·LT/HF0 → USDC(6桁)へ /1e2
     const targetUsdc = (collateralUsd8 * ltBps) / h0Bps / 100n;
-    // LTV 上限（availableBorrowsBase）を 99% に抑えてクランプ（feasibility 保証）
-    const maxUsdc = ((availUsd8 / 100n) * 99n) / 100n;
-    const borrowUsdc = targetUsdc < maxUsdc ? targetUsdc : maxUsdc;
-    if (borrowUsdc > 0n) {
-      await sendAndMine(publicClient, walletClient, chain, v.privateKey, {
-        to: AAVE.Pool,
-        data: encodeFunctionData({
-          abi: aavePoolAbi,
-          functionName: "borrow",
-          args: [AAVE_STABLE, borrowUsdc, VARIABLE_RATE, 0, v.address],
-        }),
-      });
+    // LTV 上限を VICTIM_LTV_HEADROOM_BPS まで（縁から離す）。
+    const maxUsdc = (availUsd8 * VICTIM_LTV_HEADROOM_BPS) / 10_000n / 100n;
+    if (targetUsdc <= 0n || targetUsdc > maxUsdc) {
+      const ltOverLtv =
+        ltvBps > 0n ? Number(ltBps) / Number(ltvBps) : Number.NaN;
+      throw new Error(
+        `stress victim ${v.id}: HF0=${hf0} is infeasible to build on this reserve ` +
+          `(LT=${ltBps} / LTV=${ltvBps} bps; need HF0 ≳ ${(ltOverLtv / 0.97).toFixed(3)}). ` +
+          "Raise ERIS_STRESS_VICTIM_HF0 (and crash magnitude so m > (HF0−1)/HF0). ADR 0009 §4",
+      );
     }
+    // borrow（債務が載ったかを検証し、transient 取りこぼしは 1 回リトライ）
+    const borrowData = encodeFunctionData({
+      abi: aavePoolAbi,
+      functionName: "borrow",
+      args: [AAVE_STABLE, targetUsdc, VARIABLE_RATE, 0, v.address],
+    });
+    await sendVerified(
+      ctx,
+      v,
+      borrowData,
+      (a) => a[1] > 0n,
+      "borrow did not register (debt=0 after retry). The borrow tx likely reverted " +
+        "(reserve borrow cap / liquidity / LTV edge). Lower victim count or supply, " +
+        "or adjust ERIS_STRESS_VICTIM_HF0. ADR 0009 §4",
+    );
   }
 }
 

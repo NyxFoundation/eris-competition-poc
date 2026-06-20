@@ -348,6 +348,8 @@ export async function runRealtimeSimulation(): Promise<void> {
       config.stressVictimCount,
     );
     let victimEnv: Record<string, string> | undefined;
+    // setup 直後の最小 victim HF（無債務 sentinel は除外）。crash 較正の警告に使う（§2）。
+    let minVictimHf0: number | null = null;
     if (stressVictims.length > 0) {
       if (!enabledIds.includes("aave")) {
         throw new Error(
@@ -368,6 +370,12 @@ export async function runRealtimeSimulation(): Promise<void> {
         config.stressVictimHf0,
       );
       const accounts = await readVictimsAccount(ctx, stressVictims);
+      for (const a of accounts) {
+        const hf = Number(a.healthFactor) / 1e18;
+        // 無債務（HF が uint256 max sentinel ≈ 1e59）は較正の対象外。
+        if (hf < 1e6 && (minVictimHf0 === null || hf < minVictimHf0))
+          minVictimHf0 = hf;
+      }
       logger.event({
         type: "stress_victims_setup",
         hf0: config.stressVictimHf0,
@@ -652,10 +660,44 @@ export async function runRealtimeSimulation(): Promise<void> {
     const runStartBlock = lastProcessedBlock + 1;
     if (schedule.hasEvents()) {
       logger.event({ type: "stress_schedule", events: schedule.events });
+      // 較正チェック（§2）: 各 crash の realized magnitude が victim を割れるか
+      // （m > (HF0−1)/HF0）。割れないなら警告（victim は清算されず stress 軸が空になる）。
+      if (minVictimHf0 !== null) {
+        const breachThreshold = (minVictimHf0 - 1) / minVictimHf0;
+        for (const ev of schedule.events) {
+          if (ev.type === "crash" && ev.magnitude <= breachThreshold) {
+            logger.event({
+              type: "stress_calibration_warning",
+              reason: "crash magnitude may not breach victim HF",
+              minVictimHf0,
+              breachThreshold,
+              crashMagnitude: ev.magnitude,
+            });
+          }
+        }
+      }
     }
     // 清算検知用に victim ごとの直近債務（USD 8 桁）を持つ。債務の減少は liquidationCall でしか
     // 起きない（victim は受動）→ 減少を清算シグナルとして stress_liquidation を emit する。
     const victimLastDebt = new Map<string, bigint>();
+
+    // stress run（イベントあり）は EventSchedule が runBlocks>0 を要求するため、ブロック数で
+    // 終了させる（時間制限 ERIS_RUN_SECONDS が先に切れて crash 窓へ到達しない footgun を回避。§4）。
+    const stressRun = schedule.hasEvents() || stressVictims.length > 0;
+    const effectiveRunSeconds =
+      stressRun && config.runBlocks > 0 ? 0 : config.runSeconds;
+    if (
+      stressRun &&
+      config.runBlocks > 0 &&
+      config.runSeconds > 0 &&
+      effectiveRunSeconds === 0
+    ) {
+      logger.event({
+        type: "stress_run_time_limit_disabled",
+        runSeconds: config.runSeconds,
+        runBlocks: config.runBlocks,
+      });
+    }
 
     await new Promise<void>((resolve) => {
       let finished = false;
@@ -668,8 +710,8 @@ export async function runRealtimeSimulation(): Promise<void> {
         resolve();
       };
       const timer =
-        config.runSeconds > 0
-          ? setTimeout(finish, config.runSeconds * 1000)
+        effectiveRunSeconds > 0
+          ? setTimeout(finish, effectiveRunSeconds * 1000)
           : undefined;
 
       const onBlock = async (bn: number): Promise<void> => {
