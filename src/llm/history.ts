@@ -13,6 +13,14 @@ export type RoundRecord = {
   executorLogs: string[];
   executorOk: boolean;
   executorReason?: string;
+  // priority-fee オークションの結果（ADR 0011。competition シグナルがある direct モードのみ）。
+  // revise が「先約定されて revert していないか／積みすぎていないか」を見て入札を調整できるようにする。
+  bidding?: {
+    bidWei: string; // この round に積んだ priority fee
+    competitorMaxWei: string; // 直近ブロックの競合最高入札
+    lastTxIndex: number | null; // 自分の直近 included tx の txIndex（0=先頭）
+    recentRevertRate: number; // 直近 included tx の revert 率 0..1
+  };
 };
 
 /**
@@ -107,5 +115,21 @@ export function buildRoundRecord(
     executorLogs,
     executorOk,
     executorReason,
+    bidding: obs.competition
+      ? {
+          bidWei:
+            extractBidWei(action) ?? obs.limits.defaultPriorityFeePerGasWei,
+          competitorMaxWei: obs.competition.maxCompetitorPriorityFeeWei,
+          lastTxIndex: obs.competition.lastTxIndex,
+          recentRevertRate: obs.competition.recentRevertRate,
+        }
+      : undefined,
   };
+}
+
+// action が積んだ priority fee（無指定は undefined → 既定にフォールバック）。
+function extractBidWei(action: AgentAction): string | undefined {
+  if ("maxPriorityFeePerGasWei" in action && action.maxPriorityFeePerGasWei)
+    return String(action.maxPriorityFeePerGasWei);
+  return undefined;
 }

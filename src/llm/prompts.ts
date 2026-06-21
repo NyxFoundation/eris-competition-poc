@@ -193,10 +193,23 @@ export function buildReviseMessage(
   const attr = computeAttribution(history);
   const attribution = formatAttribution(attr);
   const recent = history.slice(-12);
+  const gwei = (wei: string): string => (Number(BigInt(wei)) / 1e9).toFixed(1);
+  const bidStr = (r: RoundRecord): string =>
+    r.bidding
+      ? ` | bid=${gwei(r.bidding.bidWei)}gw vs comp=${gwei(r.bidding.competitorMaxWei)}gw txi=${r.bidding.lastTxIndex ?? "-"} revert=${(r.bidding.recentRevertRate * 100).toFixed(0)}%`
+      : "";
   const lines = recent.map(
     (r) =>
-      `  r${r.round}: pool=${r.poolPrice.toFixed(2)} fair=${r.fairPrice.toFixed(2)} usd=${r.inventoryUsd.toFixed(2)} action=${r.action.type}${r.action.summary ? ` (${r.action.summary})` : ""}${r.executorOk ? "" : ` [ERR: ${r.executorReason ?? ""}]`}`,
+      `  r${r.round}: pool=${r.poolPrice.toFixed(2)} fair=${r.fairPrice.toFixed(2)} usd=${r.inventoryUsd.toFixed(2)} action=${r.action.type}${r.action.summary ? ` (${r.action.summary})` : ""}${r.executorOk ? "" : ` [ERR: ${r.executorReason ?? ""}]`}${bidStr(r)}`,
   );
+  // 入札データがあるとき、revise に priority-fee オークションの調整を促す（ADR 0011）。
+  const hasBidding = recent.some((r) => r.bidding);
+  const biddingHint = hasBidding
+    ? `\n## Priority-fee auction feedback (per round above: bid vs comp = your fee vs the best competitor fee; txi = your tx position, 0=first; revert% = recent reverts)
+- revert% high with txi>0 → you were FRONT-RUN (someone bid above you and took the arb); your swap reverted and wasted gas. Raise your bid ABOVE comp.
+- bid >> comp with low revert → you are OVERPAYING (winning by far more than needed); every extra gwei is burned PnL. Lower toward comp + a small margin.
+- The target is the MINIMUM bid that wins, capped at the trade's value. Tune your maxPriorityFeePerGasWei logic in executor_ts using obs.competition.\n`
+    : "";
   return `# Strategy revision request
 
 Reason: **${reason}**
@@ -222,7 +235,7 @@ ${attribution}
 
 ## Recent ${recent.length} rounds
 ${lines.join("\n")}
-
+${biddingHint}
 ## Your task
 Produce an updated strategy that is MEANINGFULLY BETTER, not a token tweak. The current strategy may have
 started from a hand-tuned base (see notes above) — improve it where the attribution shows headroom

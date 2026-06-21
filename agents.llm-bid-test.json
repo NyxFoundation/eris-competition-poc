@@ -1,0 +1,40 @@
+{
+  "_comment": "ADR 0011 Stage2: 自己改善 LLM(arb-evolver)が competition シグナル + auction guidance + revise の bidding feedback を使って priority-fee 入札を最適化するか。over-bidder(greedy 0.6)/under-bidder(flat 0.0)の場で競争させ、evolver の strategy version 履歴で『revise が入札ロジック(maxPriorityFeePerGasWei)を触るか』を観測する。要 economicGas=1 + contested(cross-venue spread)。backend は ERIS_LLM_AUTH(codex/cli)。",
+  "agents": [
+    {
+      "id": "arb-evolver",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "arb",
+        "ERIS_LLM_AUTH": "codex",
+        "ERIS_LLM_REVIEW_EVERY": "15"
+      },
+      "description": "arb ベースから出発し competition feedback で入札を自己改善"
+    },
+    {
+      "id": "arb-greedy",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/arb-bot.ts"],
+      "wallet": "AUTO",
+      "env": { "BID_PROFIT_FRACTION": "0.6" },
+      "description": "過剰入札の場(over-bidder)"
+    },
+    {
+      "id": "arb-flat",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/arb-bot.ts"],
+      "wallet": "AUTO",
+      "env": { "BID_PROFIT_FRACTION": "0.0" },
+      "description": "入札しない場(under-bidder)"
+    },
+    {
+      "id": "noop",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/noop.ts"],
+      "wallet": "AUTO",
+      "baseline": true
+    }
+  ]
+}
