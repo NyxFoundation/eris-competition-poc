@@ -158,6 +158,20 @@ function startDirectShim(): void {
     sendQueue = sendQueue.then(task, task);
   };
 
+  // ---- 競争シグナル（ADR 0011）: 自分の直近 tx の着順/成否を追い、直近ブロックから競合の最高入札を読む。
+  // env 特権でなく agent が公開チェーンから自己導出する（現実の MEV searcher が直近ブロックを見るのと同じ）。
+  type OwnTx = {
+    hash: Hex;
+    actionType?: string;
+    status?: "success" | "reverted";
+    txIndex?: number;
+  };
+  const ownTxs: OwnTx[] = []; // 直近のみ保持（ring buffer）
+  const pushOwnTx = (hash: Hex, actionType?: string): void => {
+    ownTxs.push({ hash, actionType });
+    if (ownTxs.length > 24) ownTxs.shift();
+  };
+
   const sendBuiltTx = async (
     tx: { to: Address; data?: Hex; value?: bigint },
     priorityFeeWei: bigint,
@@ -178,6 +192,7 @@ function startDirectShim(): void {
         maxFeePerGas: baseFee * 2n + priorityFeeWei,
         maxPriorityFeePerGas: priorityFeeWei,
       });
+      pushOwnTx(hash, meta.actionType as string | undefined);
       logMempool({
         event: "submitted",
         hash,
@@ -277,6 +292,66 @@ function startDirectShim(): void {
         }
       });
     }
+  };
+
+  // ---- 競争シグナルを直近ブロックから導出（ADR 0011）----
+  const computeCompetition = async (
+    bn: number,
+  ): Promise<AgentObservation["competition"]> => {
+    // 1. 自分の直近 tx の receipt を解決（txIndex + status）。未 mine はスキップ。
+    await Promise.all(
+      ownTxs
+        .filter((t) => t.status === undefined)
+        .map(async (t) => {
+          try {
+            const r = await publicClient.getTransactionReceipt({
+              hash: t.hash,
+            });
+            t.status = r.status === "success" ? "success" : "reverted";
+            t.txIndex = r.transactionIndex;
+          } catch {
+            // まだ mine されていない
+          }
+        }),
+    );
+    // 取引 tx のみで revert 率・着順を測る（gas 補充の unwrap/swap は競争分析から除外）。
+    const resolved = ownTxs.filter(
+      (t) =>
+        t.status !== undefined &&
+        !String(t.actionType ?? "").startsWith("gasRefill"),
+    );
+    const recentSampleSize = resolved.length;
+    const reverts = resolved.filter((t) => t.status === "reverted").length;
+    const recentRevertRate = recentSampleSize ? reverts / recentSampleSize : 0;
+    const lastWithIdx = [...resolved]
+      .reverse()
+      .find((t) => t.txIndex !== undefined);
+    const lastTxIndex = lastWithIdx?.txIndex ?? null;
+    // 2. 直近ブロックの競合最高入札（自分以外の最高 maxPriorityFeePerGas）。
+    let maxComp = 0n;
+    let maxAll = 0n;
+    try {
+      const block = await publicClient.getBlock({
+        blockNumber: BigInt(bn),
+        includeTransactions: true,
+      });
+      for (const tx of block.transactions) {
+        if (typeof tx === "string") continue;
+        const fee = tx.maxPriorityFeePerGas ?? 0n;
+        if (fee > maxAll) maxAll = fee;
+        if (tx.from.toLowerCase() !== address.toLowerCase() && fee > maxComp)
+          maxComp = fee;
+      }
+    } catch {
+      // block 取得失敗は signal 無しで継続
+    }
+    return {
+      maxCompetitorPriorityFeeWei: maxComp.toString(),
+      maxBlockPriorityFeeWei: maxAll.toString(),
+      lastTxIndex,
+      recentRevertRate,
+      recentSampleSize,
+    };
   };
 
   // ---- action 行の処理（relay の handleAgentAction と同じ検証 → 直接送信）----
@@ -394,6 +469,9 @@ function startDirectShim(): void {
         config,
         enabledIds,
       );
+      // 競争シグナル（ADR 0011）を直近ブロックから導出して観測に載せる（priority-fee オークションを
+      // 実力化する。economicGas で特に重要だが signal 自体は profile 非依存で常に付与する）。
+      observation.competition = await computeCompetition(bn);
       latestObservation = observation;
       latestBalances = balances;
       latestStateById = stateById;

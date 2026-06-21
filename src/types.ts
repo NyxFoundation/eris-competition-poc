@@ -257,6 +257,22 @@ export type AgentObservation = {
     maxAaveBorrowUsdcUnits: string;
   };
   protocols: ProtocolObservations;
+  // 競争シグナル（ADR 0011。economicGas で priority-fee オークションを実力化する観測）。
+  // direct モードで agent が直近ブロックから自己導出する（env 特権でなく、現実の MEV searcher が
+  // 直近ブロックを見るのと同じ）。relay モードや観測初期は undefined。
+  competition?: {
+    // 直近ブロックで観測した「自分以外」の最高 priority fee（wei, decimal string）。
+    // これを僅かに上回れば順序で勝てる目安。0 = 競合の入札 tx が無かった。
+    maxCompetitorPriorityFeeWei: string;
+    // 直近ブロック全体（自分含む）の最高 priority fee（wei）。
+    maxBlockPriorityFeeWei: string;
+    // 自分の直近 included tx の txIndex（0=先頭が理想。null=直近で included 無し）。
+    lastTxIndex: number | null;
+    // 直近 included tx の revert 率（先約定/slippage で失敗した割合 0..1）。高い=積み負けの兆候。
+    recentRevertRate: number;
+    // revert 率の母数（直近 included tx 数）。
+    recentSampleSize: number;
+  };
 };
 
 export type AgentSpec = {

@@ -60,6 +60,14 @@ type AgentObservation = {
     maxOpenPositions: number;
     maxGmxSizeUsd: string; maxAaveSupplyWethWei: string; maxAaveBorrowUsdcUnits: string;
   };
+  // Priority-fee auction signal (present in direct mode). Use it to win contested ordering cheaply.
+  competition?: {
+    maxCompetitorPriorityFeeWei: string; // highest priority fee by OTHERS in the last block (wei)
+    maxBlockPriorityFeeWei: string;       // highest priority fee overall last block (wei)
+    lastTxIndex: number | null;           // your last included tx's position (0 = first; lower is better)
+    recentRevertRate: number;             // 0..1 fraction of your recent txs that reverted
+    recentSampleSize: number;             // sample size behind recentRevertRate
+  };
 };
 \`\`\`
 
@@ -227,6 +235,17 @@ Increasing trade size scales α AND its costs (slippage, price impact, gas); if 
 the base sizing is at a sensible level, sizing up will lose more to slippage than it gains. Only size up when the
 α attribution clearly shows captured edge left on the table (e.g. α-positive rounds repeatedly hitting a size cap).
 If the base already captures the available α cleanly, the best revision may be a small, targeted one — or none.
+
+PRIORITY-FEE AUCTION (set maxPriorityFeePerGasWei per action): the block orders txs by priority fee, descending.
+If a competitor lands before you on the SAME opportunity, the arb is already gone and YOUR swap REVERTS — you pay
+gas and capture nothing. So bidding is not optional for contested trades. BUT do not just bid the maximum:
+- Read obs.competition. To win ordering, bid just ABOVE competition.maxCompetitorPriorityFeeWei (a small margin),
+  NOT far above — every extra wei of fee is burned ETH that comes straight out of your PnL.
+- Cap your bid at the opportunity's value: never bid more priority fee than the trade's expected profit. Overbidding
+  to win a tiny edge nets less than conceding it.
+- Use the feedback: high competition.recentRevertRate (you are being front-run) → raise your margin. lastTxIndex
+  consistently > 0 with low revert → you may be fine; lastTxIndex high with high revert → bid more or skip. The skill
+  is bidding the MINIMUM that wins, not the most.
 
 Include a "change contract" alongside notes/params/executor_ts:
 - change_type: "params_only" or "executor_logic"
