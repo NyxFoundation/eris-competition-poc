@@ -33,7 +33,11 @@ import type {
   ProtocolAdapter,
   SimContext,
 } from "../protocols/types.js";
-import { updateOracles, updateOraclesMempool } from "../protocols/oracles.js";
+import {
+  updateOracles,
+  updateOraclesMempool,
+  writeAaveOraclesStorage,
+} from "../protocols/oracles.js";
 import { GMX_MARKETS } from "../constants.js";
 import {
   buildFlowContext,
@@ -47,7 +51,11 @@ import {
 import { FlowProcess, type FlowOrderWire } from "../flowProcess.js";
 import { RealtimeAgentProcess } from "./agentProcess.js";
 import { RealtimeFlowProcess } from "./flowProcess.js";
-import { deployPriceFeed, updatePriceFeedMempool } from "./priceFeed.js";
+import {
+  deployPriceFeed,
+  updatePriceFeedMempool,
+  writePriceFeedStorage,
+} from "./priceFeed.js";
 import { reconstructValueSeries } from "./reconstruct.js";
 import { EventSchedule } from "./events.js";
 import {
@@ -156,11 +164,36 @@ type SubmittedMeta = {
 // agent はチェーンの読み書きだけで知覚・行動する（direct モード = 既定。ERIS_AGENT_DIRECT_TX=0 で
 // 旧 relay 方式へロールバック）。ブロック内順序は anvil --order fees が fee 降順で決める。
 // 採点（per-agent 価値系列）は run 終了直後に歴史ブロック読取で一括再構成する（§4）。
+// 経済化（ADR 0011）の endowment 下限。1 tx ~1.5M gas、控えめな tip でも初手で gas 切れさせない
+// ための floor（~数十 tx ぶん）。最終的な endowment 値は較正実測で決める（ADR「決めていないこと」）。
+const MIN_ECONOMIC_GAS_ETH_WEI = 500_000_000_000_000_000n; // 0.5 ETH
+
 export async function runRealtimeSimulation(): Promise<void> {
   const config = loadConfig();
   const adapters = initProtocols(config.enabledProtocols);
   const enabledIds = adapters.map((a) => a.id);
   const directTx = config.agentDirectTx;
+
+  // 経済化（ADR 0011）の前提検証（fail-fast）。
+  if (config.economicGas) {
+    // gas マネージャは directShim（agent 側プロセス）に在る。relay モードには無いため
+    // endowment 縮小が naive 戦略をサイレント gas 切れさせる → 経済化は direct 前提。
+    if (!directTx) {
+      throw new Error(
+        "ERIS_ECONOMIC_GAS=1 requires direct mode (ERIS_AGENT_DIRECT_TX!=0); " +
+          "gas マネージャは directShim にあり relay モードでは補充できない（ADR 0011 §4）",
+      );
+    }
+    // endowment が「最低限の gas 余力」を割っていないか（過小だと初手で gas 切れ → run 空転。
+    // ADR 0011 Risks）。1 tx ~1.5M gas、控えめな tip でも数十 tx ぶんの ETH は要る。
+    const minGasEthWei = MIN_ECONOMIC_GAS_ETH_WEI;
+    if (config.initialEthWei < minGasEthWei) {
+      throw new Error(
+        `ERIS_ECONOMIC_GAS=1: initialEthWei=${config.initialEthWei} is below the minimum ` +
+          `gas headroom (${minGasEthWei}); INITIAL_ETH_WEI を引き上げてください（ADR 0011 Risks）`,
+      );
+    }
+  }
 
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   const logger = new RunLogger(config.runDirRoot, runId);
@@ -631,11 +664,27 @@ export async function runRealtimeSimulation(): Promise<void> {
       });
     };
 
-    // oracle/PriceFeed 更新の fee は agent 上限超にして --order fees で txIndex 0 に置く。
-    // keeper はその僅か下に置き、同一ブロック内で「oracle 更新 → 注文約定」の順を固定する
-    // （並列提出しても到着順に依らず fee で順序が決まる）。
-    const oracleFee = config.maxPriorityFeeWei + 1_000_000_000n;
-    const keeperFee = config.maxPriorityFeeWei + 500_000_000n;
+    // ADR 0010 プロファイル: oracle/PriceFeed 更新の fee は agent 上限超にして --order fees で
+    // txIndex 0 に置く。keeper はその僅か下に置き、同一ブロック内で「oracle 更新 → 注文約定」の順を
+    // 固定する（並列提出しても到着順に依らず fee で順序が決まる）。
+    // ADR 0011 経済化プロファイル（economicGas）: 価格確定は storage 直書きへ移り（front-run 対象が
+    // 機構的に消える）env の fee 順序保証は不要。keeper は agent 注文配置の後に走ればよく最前列固定も
+    // 不要なので、env tx は通常 fee（defaultPriorityFeeWei）で出す。
+    const economicGas = config.economicGas;
+    const oracleFee = economicGas
+      ? config.defaultPriorityFeeWei
+      : config.maxPriorityFeeWei + 1_000_000_000n;
+    const keeperFee = economicGas
+      ? config.defaultPriorityFeeWei
+      : config.maxPriorityFeeWei + 500_000_000n;
+    if (economicGas) {
+      logger.event({
+        type: "economic_gas_enabled",
+        note: "ADR 0011: priority-fee 上限執行を退役・価格確定を state-write 化",
+        oracleFeeWei: oracleFee.toString(),
+        keeperFeeWei: keeperFee.toString(),
+      });
+    }
 
     // ---- 競争フェーズ開始：実 N 秒ごとの interval mining へ ----
     await setIntervalMining(publicClient, config.blockTimeSec);
@@ -761,10 +810,29 @@ export async function runRealtimeSimulation(): Promise<void> {
             }
           };
 
-          // fair price をオンチェーン配布（PriceFeed）+ oracle を mempool 更新（aave/gmx）。
-          // 次ブロックに fee 先頭で載る。
+          // fair price をオンチェーン配布（PriceFeed）+ oracle 更新（aave/gmx）。
+          // 経済化（ADR 0011）: PriceFeed と Aave オラクルは storage 直書きで block 境界に確定する
+          //   （tx 無し → front-run 対象なし）。GMX は realtime で keeper が執行しないため front-run 面で
+          //   なく、mapping storage の直書きを避け通常 fee の mempool tx のままにする（決めていないこと）。
+          // 0010: PriceFeed/oracle を fee 先頭の mempool tx で次ブロックへ載せる。
           const oracleTask = async (): Promise<void> => {
             try {
+              if (economicGas) {
+                await writePriceFeedStorage(
+                  publicClient,
+                  priceFeedAddress,
+                  latestFairPrice,
+                  BigInt(bn),
+                );
+                await writeAaveOraclesStorage(ctx, latestFairPrice);
+                if (ctx.oracle.gmxProvider && ctx.updateGmxOracle) {
+                  await ctx.updateGmxOracle(ctx, latestFairPrice, {
+                    noMine: true,
+                    priorityFeeWei: oracleFee,
+                  });
+                }
+                return;
+              }
               const feedHash = await updatePriceFeedMempool(
                 ctx,
                 priceFeedAddress,
@@ -988,11 +1056,17 @@ export async function runRealtimeSimulation(): Promise<void> {
     }
 
     // ---- 事後ルール検査（ADR 0006 §5）: fee 上限超過は run 無効化の根拠になる ----
-    const violations = checkRunFeeViolations(
-      logger.runDir,
-      config.maxPriorityFeeWei,
-    );
-    if (violations.length > 0) {
+    // 経済化（ADR 0011 §2）では priority-fee 上限執行を退役する（agent は機会評価に応じ自由に
+    // 入札し、高く評価した者が先に約定する = realistic priority gas auction）→ 違反は空配列。
+    const violations = config.economicGas
+      ? []
+      : checkRunFeeViolations(logger.runDir, config.maxPriorityFeeWei);
+    if (config.economicGas) {
+      logger.event({
+        type: "fee_cap_enforcement_disabled",
+        note: "ADR 0011 §2: economic gas プロファイルでは priority-fee 上限を執行しない",
+      });
+    } else if (violations.length > 0) {
       logger.event({ type: "rule_violations_detected", violations });
     }
 

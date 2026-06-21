@@ -22,12 +22,13 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import type { Address, Hex } from "viem";
+import { encodeFunctionData, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { wethAbi } from "../../../src/abis.js";
 import { parseAction, validateAction } from "../../../src/action.js";
 import { getBalances, makeClients } from "../../../src/chain.js";
 import { loadConfig } from "../../../src/config.js";
-import { GMX_MARKETS } from "../../../src/constants.js";
+import { GMX_MARKETS, TOKENS } from "../../../src/constants.js";
 import { observationFor } from "../../../src/coordinator.js";
 import { safeStringify } from "../../../src/logger.js";
 import { initProtocols } from "../../../src/protocols/registry.js";
@@ -191,6 +192,90 @@ function startDirectShim(): void {
     }
   };
 
+  // ---- gas マネージャ（ADR 0011 §4。economicGas プロファイルのみ）----
+  // endowment を絞ると naive 戦略がサイレント gas 切れする。ETH 残が「最低 N tx 分」を割ったら
+  // WETH→ETH unwrap（スリッページ 0）で自動補充し、WETH も尽きたら USDC→WETH swap（uniswap。
+  // スリッページ = 現実の treasury 管理コスト）で繋ぐ。得た WETH は次ブロックの unwrap で ETH 化する。
+  // headroom を維持するので補充 tx 自身の gas は常に賄える（初手 gas 切れは setup の下限検証で排除）。
+  const GAS_REFILL_TX_HEADROOM = 24n; // 維持する ETH 余力（tx 本数換算）
+  const GAS_LIMIT_ESTIMATE = 1_500_000n; // 1 tx の gas 上限見積り
+  const GAS_REFILL_COOLDOWN_BLOCKS = 3; // 補充 tx が mine され残高へ反映されるまでの待ち
+  let lastGasRefillBlock = -GAS_REFILL_COOLDOWN_BLOCKS;
+  const maybeRefillGas = async (
+    bn: number,
+    balances: BalanceSnapshot,
+    fairPrice: number,
+  ): Promise<void> => {
+    if (!config.economicGas) return;
+    if (bn - lastGasRefillBlock < GAS_REFILL_COOLDOWN_BLOCKS) return;
+    let baseFee: bigint;
+    try {
+      baseFee = (await publicClient.getBlock()).baseFeePerGas ?? 0n;
+    } catch {
+      return;
+    }
+    const tip = config.defaultPriorityFeeWei;
+    const perTxCost = GAS_LIMIT_ESTIMATE * (baseFee * 2n + tip);
+    const target = perTxCost * GAS_REFILL_TX_HEADROOM;
+    if (balances.ethWei >= target) return;
+    const deficit = target - balances.ethWei;
+
+    if (balances.wethWei > 0n) {
+      // WETH→ETH unwrap（1:1、スリッページ 0）。不足分まで（在庫上限で頭打ち）。
+      const amount = deficit < balances.wethWei ? deficit : balances.wethWei;
+      lastGasRefillBlock = bn;
+      enqueueSend(() =>
+        sendBuiltTx(
+          {
+            to: TOKENS.WETH.address,
+            data: encodeFunctionData({
+              abi: wethAbi,
+              functionName: "withdraw",
+              args: [amount],
+            }),
+          },
+          tip,
+          { actionType: "gasRefillUnwrap", amountWei: amount.toString() },
+        ),
+      );
+      return;
+    }
+
+    if (balances.usdcUnits > 0n && fairPrice > 0) {
+      // USDC→WETH swap（uniswap）。得た WETH は次回 unwrap で ETH 化する。
+      const adapter = adapters.find((a) => a.id === "uniswap");
+      if (!adapter) return;
+      // deficit(ETH wei) 相当の USDC を概算 + slippage バッファ 1.3x（USDC は 6 桁）。
+      const deficitWeth = Number(deficit) / 1e18;
+      const usdcNeeded = BigInt(Math.ceil(deficitWeth * fairPrice * 1.3 * 1e6));
+      const amountIn =
+        usdcNeeded < balances.usdcUnits ? usdcNeeded : balances.usdcUnits;
+      if (amountIn <= 0n) return;
+      lastGasRefillBlock = bn;
+      enqueueSend(async () => {
+        let txs;
+        try {
+          txs = await adapter.buildTxs(
+            ctx,
+            address,
+            { type: "swap", tokenIn: "USDC", amountIn: amountIn.toString() },
+            latestStateById.get("uniswap"),
+          );
+        } catch (error) {
+          logMempool({
+            event: "submit_failed",
+            actionType: "gasRefillSwap",
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return;
+        }
+        for (const tx of txs) {
+          await sendBuiltTx(tx, tip, { actionType: "gasRefillSwap" });
+        }
+      });
+    }
+  };
+
   // ---- action 行の処理（relay の handleAgentAction と同じ検証 → 直接送信）----
   onActionLine = (line) => {
     let action;
@@ -310,6 +395,8 @@ function startDirectShim(): void {
       latestBalances = balances;
       latestStateById = stateById;
       lastBlock = bn;
+      // gas マネージャ: 観測を流す前に ETH 残を点検し、低ければ補充 tx を enqueue（economicGas のみ）。
+      void maybeRefillGas(bn, balances, fairPrice);
       fakeStdin.write(`${safeStringify(observation)}\n`);
     } catch (error) {
       process.stderr.write(

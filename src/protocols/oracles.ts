@@ -1,6 +1,11 @@
 import { encodeFunctionData, type Hex } from "viem";
 import { TOKENS } from "../constants.js";
-import { sendAndMine, sendNoMine } from "../chain.js";
+import {
+  bigintToStorageWord,
+  sendAndMine,
+  sendNoMine,
+  setStorageAt,
+} from "../chain.js";
 import type { SimContext } from "./types.js";
 import { mockAggregatorAbi, toAavePrice } from "./aave.js";
 
@@ -118,4 +123,36 @@ export async function updateOraclesMempool(
     await ctx.updateGmxOracle(ctx, fairPrice, { noMine: true, priorityFeeWei });
   }
   return hashes;
+}
+
+// MockAggregator.sol のストレージ slot。`int256 private _answer` = slot 0
+// （`uint8 public constant decimals` は slot を消費せず、_roundId/_updatedAt は slot1/2 だが
+// AaveOracle.getAssetPrice は latestAnswer() のみ参照するため answer 直書きで十分）。
+const AGG_ANSWER_SLOT = `0x${"0".repeat(64)}` as Hex;
+
+// ADR 0011 §1: Aave WETH/USDC オラクル価格を mempool tx でなく storage 直書きで確定する。
+// PriceFeed と同じく block 境界で在るため front-run 対象が消え、priority-fee 上限に依存しない。
+// 経済化プロファイル（economicGas）でのみ使う。aggregator 未デプロイ（aave 無効）なら no-op。
+export async function writeAaveOraclesStorage(
+  ctx: SimContext,
+  fairPrice: number,
+): Promise<void> {
+  const wethAgg = ctx.oracle.aaveAggregators[TOKENS.WETH.address.toLowerCase()];
+  const usdcAgg = ctx.oracle.aaveAggregators[TOKENS.USDC.address.toLowerCase()];
+  if (wethAgg) {
+    await setStorageAt(
+      ctx.publicClient,
+      wethAgg,
+      AGG_ANSWER_SLOT,
+      bigintToStorageWord(toAavePrice(fairPrice)),
+    );
+  }
+  if (usdcAgg) {
+    await setStorageAt(
+      ctx.publicClient,
+      usdcAgg,
+      AGG_ANSWER_SLOT,
+      bigintToStorageWord(toAavePrice(1)),
+    );
+  }
 }

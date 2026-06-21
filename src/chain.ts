@@ -255,7 +255,7 @@ export async function resetFork(
   }
 }
 
-async function setStorageAt(
+export async function setStorageAt(
   publicClient: PublicClient,
   token: Address,
   slotKey: Hex,
@@ -265,6 +265,13 @@ async function setStorageAt(
     method: "anvil_setStorageAt",
     params: [token, slotKey, value],
   } as AnvilRequest);
+}
+
+// bigint を 32-byte ストレージワードへエンコード（int256 の負値は two's complement）。
+// anvil_setStorageAt 用。env の価格 state-write（ADR 0011 §1）が利用する。
+export function bigintToStorageWord(value: bigint): Hex {
+  const masked = value < 0n ? (1n << 256n) + value : value;
+  return pad32(masked);
 }
 
 function balanceSlotKey(holder: Address, mappingSlot: number): Hex {

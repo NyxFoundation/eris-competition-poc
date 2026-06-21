@@ -8,7 +8,7 @@ import {
   type Hex,
   type PublicClient,
 } from "viem";
-import { sendNoMine } from "../chain.js";
+import { bigintToStorageWord, sendNoMine, setStorageAt } from "../chain.js";
 import { deployContract } from "../protocols/deploy.js";
 import type { SimContext } from "../protocols/types.js";
 
@@ -72,6 +72,37 @@ export async function updatePriceFeedMempool(
       gas: SETTER_GAS,
     },
     priorityFeeWei,
+  );
+}
+
+// PriceFeed.sol のストレージ slot。`address public immutable owner` は immutable のため
+// バイトコードに格納され slot を消費しない → `int256 private _answer` = slot 0、
+// `uint256 private _updatedAtBlock` = slot 1（`uint8 public constant decimals` も slot を消費しない）。
+const ANSWER_SLOT = `0x${"0".repeat(64)}` as Hex;
+const UPDATED_AT_BLOCK_SLOT = `0x${"0".repeat(63)}1` as Hex;
+
+// ADR 0011 §1: fair price を mempool tx でなく PriceFeed の storage へ直接書く（cheatcode）。
+// 価格は block 境界で storage に在るため block 内に env の price tx が無く、agent が
+// front-run する対象が機構的に消える（priority-fee 上限に依存しない順序保証）。価格配布は env
+// 機構であり agent 動作ではないため cheatcode 利用は現実性を毀損しない。agent の読み口
+// （readFairPrice = latestAnswer）は不変なので体験・submission 互換は変わらない。
+export async function writePriceFeedStorage(
+  publicClient: PublicClient,
+  address: Address,
+  fairPrice: number,
+  blockNumber: bigint,
+): Promise<void> {
+  await setStorageAt(
+    publicClient,
+    address,
+    ANSWER_SLOT,
+    bigintToStorageWord(toPriceFeedAnswer(fairPrice)),
+  );
+  await setStorageAt(
+    publicClient,
+    address,
+    UPDATED_AT_BLOCK_SLOT,
+    bigintToStorageWord(blockNumber),
   );
 }
 

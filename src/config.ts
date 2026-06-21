@@ -87,6 +87,12 @@ export type SimConfig = {
   initialUsdcUnits: bigint;
   defaultPriorityFeeWei: bigint;
   maxPriorityFeeWei: bigint;
+  // gas 経済コスト化（ADR 0011。ADR 0010 を Supersede）。true で priority-fee 上限執行を退役し、
+  // env の価格確定を mempool tx（cap+premium ordering）から PriceFeed/Aave オラクルの storage 直書き
+  // （cheatcode）へ移して上限非依存にする。agent は機会評価に応じ自由に priority fee を積み、高く
+  // 評価した者が先に約定する（realistic priority gas auction）。既定 false で ADR 0010 プロファイルを
+  // 完全再現する（ロールバック先）。run 単位スイッチ（ERIS_ECONOMIC_GAS）。
+  economicGas: boolean;
   maxAgentWethInWei: bigint;
   maxAgentUsdcInUnits: bigint;
   maxBundleActions: number;
@@ -129,6 +135,14 @@ export type SimConfig = {
 
 export function loadConfig(env = process.env): SimConfig {
   const anvilPort = env.ANVIL_PORT ?? "8545";
+  // 経済化（ADR 0011）では endowment を絞って gas を実コスト化する。INITIAL_ETH_WEI 未指定なら
+  // 控えめな placeholder（3 ETH）を既定にする（gas を機会価値に対し意味あるコストにしつつ、
+  // directShim gas マネージャ + 下限検証で gas 切れを防ぐ）。最終値は較正実測で決める
+  // （ADR「決めていないこと」）。既定 0010 プロファイル（economicGas=false）は 100 ETH のまま不変。
+  const economicGas = env.ERIS_ECONOMIC_GAS === "1";
+  const initialEthWeiDefault = economicGas
+    ? 3_000_000_000_000_000_000n
+    : 100_000_000_000_000_000_000n;
   return {
     rpcUrl: env.ANVIL_RPC_URL ?? `http://127.0.0.1:${anvilPort}`,
     chainId: intEnv(env.CHAIN_ID, CHAIN_ID),
@@ -170,7 +184,7 @@ export function loadConfig(env = process.env): SimConfig {
     runDirRoot: env.REPORT_DIR ?? "./runs",
     agentTimeoutMs: intEnv(env.AGENT_TIMEOUT_MS, 5000),
     agentsConfigPath: env.AGENTS_CONFIG ?? "agents.local.json",
-    initialEthWei: bigintEnv(env.INITIAL_ETH_WEI, 100_000_000_000_000_000_000n),
+    initialEthWei: bigintEnv(env.INITIAL_ETH_WEI, initialEthWeiDefault),
     initialWethWei: bigintEnv(
       env.INITIAL_WETH_WEI,
       10_000_000_000_000_000_000n,
@@ -181,6 +195,7 @@ export function loadConfig(env = process.env): SimConfig {
       100_000_000n,
     ),
     maxPriorityFeeWei: bigintEnv(env.MAX_PRIORITY_FEE_WEI, 5_000_000_000n),
+    economicGas,
     maxAgentWethInWei: bigintEnv(
       env.MAX_AGENT_WETH_IN_WEI,
       1_000_000_000_000_000_000n,

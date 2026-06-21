@@ -9,6 +9,7 @@ export const erc20Abi = parseAbi([
 
 export const wethAbi = parseAbi([
   "function deposit() payable",
+  "function withdraw(uint256 wad)",
   "function balanceOf(address owner) view returns (uint256)",
   "function approve(address spender, uint256 amount) returns (bool)",
 ]);
