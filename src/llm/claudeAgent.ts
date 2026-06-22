@@ -2,7 +2,12 @@ import { createInterface } from "node:readline";
 import { mkdirSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { encodeFunctionData, parseUnits, formatUnits } from "viem";
+import {
+  encodeFunctionData,
+  encodeAbiParameters,
+  parseUnits,
+  formatUnits,
+} from "viem";
 import type { AgentAction, AgentObservation } from "../types.js";
 import { History, buildRoundRecord } from "./history.js";
 import { getBaseStrategy } from "./baseStrategies.js";
@@ -12,6 +17,7 @@ import {
   type ExecutorHelpers,
   type Strategy,
 } from "./strategy.js";
+import { FLASH_ARB_ADDRESS } from "../flashArbDemo.js";
 import {
   ClaudeStrategist,
   MockStrategist,
@@ -130,7 +136,14 @@ const helpersBase: Omit<ExecutorHelpers, "log"> = {
   parseUnits,
   formatUnits,
   encodeFunctionData,
-  ADDRESSES: DEFAULT_ADDRESSES,
+  encodeAbiParameters,
+  // FlashArb は ERIS_FLASH_ARB=1(coordinator が FlashArb をデプロイする run)のときだけアドレスを
+  // 注入する。未設定なら flasharb base は self-guard で noop になり、未デプロイ環境で revert tx を
+  // 浪費しない(aave base が obs.protocols.aave で self-guard するのと同じ発想の env 版)。
+  ADDRESSES:
+    process.env.ERIS_FLASH_ARB === "1"
+      ? { ...DEFAULT_ADDRESSES, FLASH_ARB: FLASH_ARB_ADDRESS }
+      : DEFAULT_ADDRESSES,
 };
 
 /**

@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { encodeFunctionData, formatUnits, parseUnits } from "viem";
+import {
+  encodeAbiParameters,
+  encodeFunctionData,
+  formatUnits,
+  parseUnits,
+} from "viem";
 import {
   DEFAULT_ADDRESSES,
   checkExecutorSyntax,
@@ -15,6 +20,7 @@ const helpersBase: Omit<ExecutorHelpers, "log"> = {
   parseUnits,
   formatUnits,
   encodeFunctionData,
+  encodeAbiParameters,
   ADDRESSES: DEFAULT_ADDRESSES,
 };
 
@@ -220,7 +226,12 @@ test("parseStrategyFromToolInput: prev あり・change_type 既定(params_only)�
 test("parseStrategyFromToolInput: change_type=executor_logic は新 executor を採用", () => {
   const newExec = `return { type: "swap", tokenIn: "USDC", amountIn: "1" };`;
   const out = parseStrategyFromToolInput(
-    { notes: "rewrite", params: {}, executor_ts: newExec, change_type: "executor_logic" },
+    {
+      notes: "rewrite",
+      params: {},
+      executor_ts: newExec,
+      change_type: "executor_logic",
+    },
     2,
     PREV,
   );
@@ -229,7 +240,11 @@ test("parseStrategyFromToolInput: change_type=executor_logic は新 executor を
 });
 
 test("parseStrategyFromToolInput: params_only かつ prev ありなら executor_ts 省略可", () => {
-  const out = parseStrategyFromToolInput({ notes: "tune", params: { gap: 0.003 } }, 2, PREV);
+  const out = parseStrategyFromToolInput(
+    { notes: "tune", params: { gap: 0.003 } },
+    2,
+    PREV,
+  );
   assert.equal(out.ok, true);
   if (out.ok) assert.equal(out.strategy.executorTs, PREV.executorTs);
 });

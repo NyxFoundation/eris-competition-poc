@@ -42,6 +42,55 @@ helpers.log("venue=" + best.swapType + " gap=" + (bestGap * 10000).toFixed(1) + 
 return { type: best.swapType, tokenIn: tokenIn, amountIn: amountIn.toString(), maxPriorityFeePerGasWei: bid.toString(), slippageBps: params.slippageBps };
 `.trim();
 
+// adaptivearb: arb と同じ最大乖離 venue swap だが、入札を「競争シグナル(ADR 0011)で勝てる最小限を
+// 機会価値の範囲で」決める。obs.competition の競合最高入札を僅かに上回るだけ積み(margin)、ただし
+// profit×ceilFraction/gas の機会価値上限で頭打ちにする(過剰入札を罰せられない)。front-run が多い
+// (recentRevertRate 高)なら margin を上げて確実に前へ。revise で margin / ceilFraction を磨く。
+// (examples/agents/adaptive-arb.ts の executor 移植。経済ガス土俵で arb の固定割合入札を上回る狙い)
+const ADAPTIVE_ARB_EXECUTOR = `
+const p = obs.protocols || {};
+const fair = obs.fairPriceUsdcPerWeth;
+if (!(fair > 0)) return { type: "noop", reason: "invalid fair" };
+const venues = [];
+if (p.uniswap && p.uniswap.pool && p.uniswap.pool.priceUsdcPerWeth > 0) venues.push({ swapType: "swap", price: p.uniswap.pool.priceUsdcPerWeth });
+if (p.balancer && p.balancer.priceUsdcPerWeth > 0) venues.push({ swapType: "balancerSwap", price: p.balancer.priceUsdcPerWeth });
+if (p.curve && p.curve.priceUsdcPerWeth > 0) venues.push({ swapType: "curveSwap", price: p.curve.priceUsdcPerWeth });
+if (venues.length === 0) return { type: "noop", reason: "no venue" };
+let best = null; let bestGap = 0;
+for (let i = 0; i < venues.length; i++) { const g = fair / venues[i].price - 1; if (Math.abs(g) > Math.abs(bestGap)) { bestGap = g; best = venues[i]; } }
+if (!best || Math.abs(bestGap) < params.gapThreshold) return { type: "noop", reason: "gap too small" };
+const tokenIn = bestGap > 0 ? "USDC" : "WETH";
+const maxLimit = BigInt(tokenIn === "WETH" ? obs.limits.maxWethInWei : obs.limits.maxUsdcInUnits);
+const balance = BigInt(tokenIn === "WETH" ? obs.balances.wethWei : obs.balances.usdcUnits);
+const cap = balance < maxLimit ? balance : maxLimit;
+const sizeBps = Math.min(params.maxSizeBps, Math.max(params.minSizeBps, Math.floor(Math.abs(bestGap) * params.sizeGain)));
+const amountIn = (cap * BigInt(sizeBps)) / 10000n;
+if (amountIn <= 0n) return { type: "noop", reason: "computed size zero" };
+const ONE_GWEI = 1000000000n;
+// 機会価値(per gas)の上限 = profit × ceilFraction / gas。これを超えて積むと net を削る。
+const sizeUsdc = tokenIn === "USDC" ? Number(amountIn) / 1e6 : (Number(amountIn) / 1e18) * fair;
+const profitUsdc = sizeUsdc * Math.abs(bestGap);
+const profitWei = BigInt(Math.max(0, Math.floor((profitUsdc / fair) * 1e9))) * ONE_GWEI;
+const ceilNum = BigInt(Math.max(0, Math.floor(params.ceilFraction * 10000)));
+const gasUnits = BigInt(Math.max(1, Math.floor(params.gasUnitsEstimate)));
+const ceilingPerGas = (profitWei * ceilNum) / 10000n / gasUnits;
+// 競争シグナル: 競合の最高入札を margin% だけ上回る(勝てる最小限)。front-run 多発なら margin↑。
+const comp = obs.competition;
+const competitorMax = BigInt((comp && comp.maxCompetitorPriorityFeeWei) || "0");
+const revertRate = (comp && comp.recentRevertRate) || 0;
+const marginPct = BigInt(Math.floor(revertRate > params.frontrunRevertThreshold ? params.marginPctFrontrun : params.marginPctNormal));
+let margin = (competitorMax * marginPct) / 100n;
+if (margin < ONE_GWEI) margin = ONE_GWEI;
+let bid = competitorMax + margin;
+if (bid > ceilingPerGas) bid = ceilingPerGas;
+const minBid = BigInt(obs.limits.defaultPriorityFeePerGasWei);
+const maxBid = BigInt(obs.limits.maxPriorityFeePerGasWei);
+if (bid < minBid) bid = minBid;
+if (bid > maxBid) bid = maxBid;
+helpers.log("venue=" + best.swapType + " gap=" + (bestGap * 10000).toFixed(1) + "bps size=" + sizeBps + " bid=" + bid.toString() + " comp=" + competitorMax.toString());
+return { type: best.swapType, tokenIn: tokenIn, amountIn: amountIn.toString(), maxPriorityFeePerGasWei: bid.toString(), slippageBps: params.slippageBps };
+`.trim();
+
 // lp: 現在 tick の周りに集中流動性を供給する素朴な v1。既にポジションがあれば hold。
 // (シードなので簡素。LP の高度化は revise / offline ゲートに委ねる)
 const LP_EXECUTOR = `
@@ -493,6 +542,33 @@ if (aave) {
 return { type: "noop", reason: "LP + idle parked" };
 `.trim();
 
+// flasharb: Aave flashLoanSimple で自己資金上限を超えるサイズの uniswap↔balancer cross-venue 裁定を
+// 1 tx で実行する(GitHub #3、資本制約を外すレバレッジ裁定)。割安 venue で買い割高で売り、返済段で利益
+// 不足なら atomic revert(gas のみ損)。executor は FlashArb を起動する rawTx を組む。**要 ERIS_FLASH_ARB=1**
+// (coordinator が FlashArb をデプロイし claudeAgent が helpers.ADDRESSES.FLASH_ARB を注入。未注入なら noop)。
+// (examples/agents/flash-arb.ts + examples/lib/flash.ts の executor 移植。calldata を sandbox 内で構築)
+const FLASH_ARB_EXECUTOR = `
+const p = obs.protocols || {};
+const uni = (p.uniswap && p.uniswap.pool) ? p.uniswap.pool.priceUsdcPerWeth : 0;
+const bal = p.balancer ? p.balancer.priceUsdcPerWeth : 0;
+if (!(uni > 0) || !(bal > 0)) return { type: "noop", reason: "need uniswap+balancer prices" };
+const flashAddr = helpers.ADDRESSES.FLASH_ARB;
+if (!flashAddr) return { type: "noop", reason: "FlashArb not deployed (needs ERIS_FLASH_ARB=1)" };
+const spread = Math.abs(uni / bal - 1);
+if (spread < params.spreadThreshold) return { type: "noop", reason: "spread too small" };
+const flashUsdc = Math.max(0, Math.floor(params.flashUsdc));
+if (flashUsdc <= 0) return { type: "noop", reason: "flashUsdc zero" };
+const mode = uni < bal ? 0 : 1;
+const amount = BigInt(flashUsdc) * 1000000n;
+const paramsType = [{ type: "tuple", components: [ { name: "mode", type: "uint8" }, { name: "wethMinOut", type: "uint256" }, { name: "usdcMinOut", type: "uint256" }, { name: "profitTo", type: "address" } ] }];
+const encoded = helpers.encodeAbiParameters(paramsType, [{ mode: mode, wethMinOut: 0n, usdcMinOut: 0n, profitTo: obs.agentAddress }]);
+const flashAbi = [{ type: "function", name: "flashLoanSimple", stateMutability: "nonpayable", inputs: [ { name: "receiverAddress", type: "address" }, { name: "asset", type: "address" }, { name: "amount", type: "uint256" }, { name: "params", type: "bytes" }, { name: "referralCode", type: "uint16" } ], outputs: [] }];
+const data = helpers.encodeFunctionData({ abi: flashAbi, functionName: "flashLoanSimple", args: [flashAddr, helpers.ADDRESSES.USDC, amount, encoded, 0] });
+const fee = obs.limits.defaultPriorityFeePerGasWei;
+helpers.log("flash mode=" + mode + " spread=" + (spread * 10000).toFixed(1) + "bps usdc=" + flashUsdc);
+return { type: "rawTx", tx: { to: helpers.ADDRESSES.AAVE_POOL, data: data }, maxPriorityFeePerGasWei: fee };
+`.trim();
+
 // id → ベース戦略(version を除いた雛形)。
 const BASE_STRATEGIES: Record<string, Omit<Strategy, "version">> = {
   arb: {
@@ -507,6 +583,23 @@ const BASE_STRATEGIES: Record<string, Omit<Strategy, "version">> = {
       slippageBps: 75,
     },
     executorTs: ARB_EXECUTOR,
+  },
+  adaptivearb: {
+    notes:
+      "Base strategy **adaptivearb**: arb と同じ最大乖離 venue swap だが、入札を競争シグナル(ADR 0011)で『勝てる最小限を機会価値の範囲で』決める。競合最高入札を marginPct% 上回り、profit×ceilFraction/gas で頭打ち。front-run 多発(recentRevertRate 高)なら margin↑。revise で marginPct / ceilFraction / gapThreshold を磨く。経済ガス土俵(ERIS_ECONOMIC_GAS)で arb の固定割合入札を上回る狙い。",
+    params: {
+      gapThreshold: 0.0005,
+      minSizeBps: 250,
+      maxSizeBps: 5000,
+      sizeGain: 200000,
+      ceilFraction: 0.8,
+      gasUnitsEstimate: 180000,
+      marginPctNormal: 20,
+      marginPctFrontrun: 60,
+      frontrunRevertThreshold: 0.4,
+      slippageBps: 75,
+    },
+    executorTs: ADAPTIVE_ARB_EXECUTOR,
   },
   lp: {
     notes:
@@ -673,6 +766,15 @@ const BASE_STRATEGIES: Record<string, Omit<Strategy, "version">> = {
       slippageBps: 75,
     },
     executorTs: LPYIELD_EXECUTOR,
+  },
+  flasharb: {
+    notes:
+      "Base strategy **flasharb** (GitHub #3): Aave flashLoanSimple で自己資金上限を超えるサイズの uniswap↔balancer cross-venue 裁定を 1 tx で実行(資本制約を外すレバレッジ裁定)。割安 venue で買い割高で売り、返済段で利益不足なら atomic revert(gas のみ損)。revise で spreadThreshold / flashUsdc を磨く。**要 ERIS_FLASH_ARB=1**(未設定なら self-guard で noop)。uniswap+balancer 有効時のみ。",
+    params: {
+      spreadThreshold: 0.003,
+      flashUsdc: 15000,
+    },
+    executorTs: FLASH_ARB_EXECUTOR,
   },
 };
 

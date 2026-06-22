@@ -1,7 +1,13 @@
 import { Script, createContext } from "node:vm";
-import { encodeFunctionData, parseUnits, formatUnits } from "viem";
+import {
+  encodeFunctionData,
+  encodeAbiParameters,
+  parseUnits,
+  formatUnits,
+} from "viem";
 import type { AgentAction, AgentObservation } from "../types.js";
 import { parseAction } from "../action.js";
+import { TOKENS, UNISWAP, AAVE } from "../constants.js";
 
 export type Strategy = {
   version: number;
@@ -14,6 +20,7 @@ export type ExecutorHelpers = {
   parseUnits: typeof parseUnits;
   formatUnits: typeof formatUnits;
   encodeFunctionData: typeof encodeFunctionData;
+  encodeAbiParameters: typeof encodeAbiParameters;
   ADDRESSES: {
     USDC: `0x${string}`;
     WETH: `0x${string}`;
@@ -22,18 +29,24 @@ export type ExecutorHelpers = {
     QUOTER_V2: `0x${string}`;
     NFT_POSITION_MANAGER: `0x${string}`;
     AAVE_POOL: `0x${string}`;
+    // FlashArb の決定論アドレス。ERIS_FLASH_ARB=1 のときだけ claudeAgent が注入する。
+    // 未注入(undefined)なら flasharb base は self-guard で noop になる(未デプロイ環境保護)。
+    FLASH_ARB?: `0x${string}`;
   };
   log: (msg: string) => void;
 };
 
+// src/constants.ts(システム全体の単一ソース)から導出する。executor helpers に Arbitrum アドレスを
+// 直書きすると mainnet 値とドリフトしうる(ADR 0002 の既知バグの再発源)ため、constants と同じ値を必ず
+// 使う。rawTx を組む flasharb base が正しい calldata を作るのに load-bearing。
 export const DEFAULT_ADDRESSES: ExecutorHelpers["ADDRESSES"] = {
-  USDC: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-  WETH: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-  UNIV3_POOL_500: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
-  SWAP_ROUTER: "0xE592427A0AEce92De3Edee1F18E0157C05861564",
-  QUOTER_V2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e",
-  NFT_POSITION_MANAGER: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88",
-  AAVE_POOL: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+  USDC: TOKENS.USDC.address,
+  WETH: TOKENS.WETH.address,
+  UNIV3_POOL_500: UNISWAP.poolWethUsdc500,
+  SWAP_ROUTER: UNISWAP.swapRouter,
+  QUOTER_V2: UNISWAP.quoterV2,
+  NFT_POSITION_MANAGER: UNISWAP.nonfungiblePositionManager,
+  AAVE_POOL: AAVE.Pool,
 };
 
 export type StrategyParseError = { ok: false; reason: string };

@@ -10,14 +10,29 @@ import {
   runExecutor,
 } from "../src/llm/strategy.js";
 import { createState, seedStrategy } from "../src/llm/claudeAgent.js";
-import { encodeFunctionData, formatUnits, parseUnits } from "viem";
+import {
+  encodeAbiParameters,
+  encodeFunctionData,
+  formatUnits,
+  parseUnits,
+} from "viem";
 import type { AgentObservation } from "../src/types.js";
 
 const helpers = {
   parseUnits,
   formatUnits,
   encodeFunctionData,
+  encodeAbiParameters,
   ADDRESSES: DEFAULT_ADDRESSES,
+};
+
+// flasharb 用: FLASH_ARB を注入した helpers(ERIS_FLASH_ARB=1 相当)。未注入版は self-guard で noop。
+const helpersFlash = {
+  ...helpers,
+  ADDRESSES: {
+    ...DEFAULT_ADDRESSES,
+    FLASH_ARB: "0x000000000000000000000000000000000000fa5b" as `0x${string}`,
+  },
 };
 
 // executor が読むフィールドを満たす最小の観測。
@@ -586,6 +601,93 @@ test("lpyield ベース: LP 無→mint、LP 有+遊休USDC→Aave supply", () =>
     assert.equal(rb.action.type, "aaveSupply");
     if (rb.action.type === "aaveSupply") assert.equal(rb.action.asset, "USDC");
   }
+});
+
+test("adaptivearb ベース: gap があれば swap し competition 無しでも最低入札を出す", () => {
+  const s = getBaseStrategy("adaptivearb");
+  assert.ok(s);
+  const r = runExecutor(s, syntheticObs(), helpers); // pool 1690 < fair 1700
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "swap");
+    if (r.action.type === "swap") {
+      assert.equal(r.action.tokenIn, "USDC");
+      assert.ok(BigInt(r.action.amountIn) > 0n);
+      // competition 無し → margin 下限 1gwei 以上(>= defaultPriorityFee)
+      assert.ok(BigInt(r.action.maxPriorityFeePerGasWei ?? "0") > 0n);
+    }
+  }
+});
+
+test("adaptivearb ベース: 競合の最高入札を上回る bid を積む", () => {
+  const s = getBaseStrategy("adaptivearb");
+  assert.ok(s);
+  const obs = syntheticObs({
+    competition: {
+      maxCompetitorPriorityFeeWei: "2000000000", // 2 gwei
+      maxBlockPriorityFeeWei: "2000000000",
+      lastTxIndex: 1,
+      recentRevertRate: 0,
+      recentSampleSize: 5,
+    },
+  });
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok && r.action.type === "swap") {
+    // 競合 2gwei を margin だけ上回る(ceiling/maxBid で頭打ちされるまで)
+    assert.ok(BigInt(r.action.maxPriorityFeePerGasWei ?? "0") >= 2000000000n);
+  }
+});
+
+test("adaptivearb ベース: gap が小さければ noop", () => {
+  const s = getBaseStrategy("adaptivearb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.protocols.uniswap!.pool.priceUsdcPerWeth = 1700; // gap 0
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.action.type, "noop");
+});
+
+test("flasharb ベース: FLASH_ARB 未注入(未デプロイ)なら self-guard で noop", () => {
+  const s = getBaseStrategy("flasharb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.protocols.balancer = { priceUsdcPerWeth: 1600 }; // uni 1690 vs bal 1600 → spread 大
+  const r = runExecutor(s, obs, helpers); // helpers は FLASH_ARB 未注入
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.action.type, "noop");
+});
+
+test("flasharb ベース: spread 超 + FLASH_ARB 注入で flashLoanSimple の rawTx を組む", () => {
+  const s = getBaseStrategy("flasharb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.protocols.balancer = { priceUsdcPerWeth: 1600 }; // spread ~5.6% > 0.3%
+  const r = runExecutor(s, obs, helpersFlash);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "rawTx");
+    if (r.action.type === "rawTx") {
+      // to は Aave Pool、data は flashLoanSimple calldata
+      assert.equal(
+        r.action.tx.to.toLowerCase(),
+        DEFAULT_ADDRESSES.AAVE_POOL.toLowerCase(),
+      );
+      assert.ok(r.action.tx.data.startsWith("0x"));
+      assert.ok(r.action.tx.data.length > 10);
+    }
+  }
+});
+
+test("flasharb ベース: spread が小さければ noop", () => {
+  const s = getBaseStrategy("flasharb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.protocols.balancer = { priceUsdcPerWeth: 1690 }; // uni 1690 = bal 1690 → spread 0
+  const r = runExecutor(s, obs, helpersFlash);
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.action.type, "noop");
 });
 
 test("getBaseStrategy: 未知 id / undefined は null", () => {
