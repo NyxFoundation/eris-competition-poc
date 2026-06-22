@@ -157,6 +157,42 @@ test("validateAction expands bundle intents in order", () => {
   assert.equal(result.intents[0].priorityFeeWei, 12n);
 });
 
+test("validateAction: USDC-only でも 買い→売り bundle は通る（ADR 0011 スワップ出力 credit）", () => {
+  // wethWei=0（USDC-only 配布で初期 β を消す）。買い leg(USDC→WETH)の出力 WETH を credit するので
+  // 売り leg(WETH→USDC)が残高 0 で reject されない（純 α を測れる）。
+  const usdcOnly: BalanceSnapshot = {
+    ethWei: 1n,
+    wethWei: 0n,
+    usdcUnits: 100n,
+  };
+  const result = validateAction(
+    parseAction({
+      type: "bundle",
+      actions: [
+        { type: "swap", tokenIn: "USDC", amountIn: "90" },
+        { type: "swap", tokenIn: "WETH", amountIn: "10" },
+      ],
+    }),
+    observation,
+    usdcOnly,
+  );
+  assert.equal(result.ok, true);
+});
+
+test("validateAction: USDC-only で単発の WETH 売りは残高不足で reject（credit 元が無い）", () => {
+  const usdcOnly: BalanceSnapshot = {
+    ethWei: 1n,
+    wethWei: 0n,
+    usdcUnits: 100n,
+  };
+  const result = validateAction(
+    parseAction({ type: "swap", tokenIn: "WETH", amountIn: "10" }),
+    observation,
+    usdcOnly,
+  );
+  assert.equal(result.ok, false);
+});
+
 test("parseAction rejects nested bundle and validateAction rejects oversized bundle", () => {
   assert.throws(
     () =>

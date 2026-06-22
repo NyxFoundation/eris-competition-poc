@@ -243,7 +243,7 @@ function validateLeafItems(
       }
       newLpPositions++;
     }
-    applyLeafSpend(work, item, adapter.stableToken);
+    applyLeafSpend(work, item, observation, adapter.stableToken);
 
     intents.push({
       action: item,
@@ -256,10 +256,27 @@ function validateLeafItems(
   return { ok: true, action: original, intents, rawIntents: [] };
 }
 
-// leaf が消費する WETH / stable を working 残高から差し引く（bundle 累積検証用）。
+// swap leg が執行される venue の価格（USDC per WETH）。bundle 内のスワップ出力見積りに使う。
+function swapVenuePrice(obs: AgentObservation, item: LeafAction): number {
+  if (item.type === "swap")
+    return (
+      obs.protocols.uniswap?.pool.priceUsdcPerWeth ?? obs.fairPriceUsdcPerWeth
+    );
+  if (item.type === "balancerSwap")
+    return obs.protocols.balancer?.priceUsdcPerWeth ?? obs.fairPriceUsdcPerWeth;
+  if (item.type === "curveSwap")
+    return obs.protocols.curve?.priceUsdcPerWeth ?? obs.fairPriceUsdcPerWeth;
+  return obs.fairPriceUsdcPerWeth;
+}
+
+// leaf が消費する WETH / stable を working 残高から差し引き、スワップは出力トークンを見積って戻す
+// （bundle 累積検証用）。出力 credit が無いと「USDC→WETH 買い → WETH→USDC 売り」の 2-leg 裁定が
+// 売り leg で WETH 残高 0 と判定され reject される（USDC-only 配布で純 α を測る前提を壊す）。
+// 見積りは venue 価格ベース。実際の slippage はオンチェーンで検査される（validator は粗い over-spend だけ防ぐ）。
 function applyLeafSpend(
   work: BalanceSnapshot,
   item: LeafAction,
+  observation: AgentObservation,
   stableToken?: Address,
 ): void {
   const stableKey = (stableToken ?? "").toLowerCase();
@@ -273,16 +290,36 @@ function applyLeafSpend(
       work.stables[stableKey] = cur > amount ? cur - amount : 0n;
     }
   };
+  const creditWeth = (amount: bigint) => {
+    work.wethWei += amount;
+  };
+  const creditStable = (amount: bigint) => {
+    work.usdcUnits += amount;
+    if (work.stables && stableKey in work.stables)
+      work.stables[stableKey] += amount;
+  };
   const currentStable = (): bigint =>
     work.stables?.[stableKey] ?? work.usdcUnits;
 
   switch (item.type) {
     case "swap":
     case "balancerSwap":
-    case "curveSwap":
-      if (item.tokenIn === "WETH") spendWeth(BigInt(item.amountIn));
-      else spendStable(BigInt(item.amountIn));
+    case "curveSwap": {
+      const amt = BigInt(item.amountIn);
+      const price = swapVenuePrice(observation, item);
+      if (item.tokenIn === "WETH") {
+        spendWeth(amt);
+        // WETH→stable: 出力 stable ≈ amountWeth × price
+        if (price > 0)
+          creditStable(BigInt(Math.floor((Number(amt) / 1e18) * price * 1e6)));
+      } else {
+        spendStable(amt);
+        // stable→WETH: 出力 WETH ≈ amountStable / price
+        if (price > 0)
+          creditWeth(BigInt(Math.floor((Number(amt) / 1e6 / price) * 1e18)));
+      }
       break;
+    }
     case "mintLiquidity":
       spendWeth(BigInt(item.amountWethDesired));
       spendStable(BigInt(item.amountUsdcDesired));
