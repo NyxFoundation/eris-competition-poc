@@ -1,0 +1,44 @@
+{
+  "_comment": "ADR 0011: rent dissipation 検証。機会価値に近く積む arb(BID_PROFIT_FRACTION=0.9) を 3 体ぶつけ、深い priority-fee 競争で裁定利益が gas に食い尽くされる(各 net→0/負、敗者は revert で gas を捨てる)かを見る。対照に flat(入札せず uncontested を拾う)。要 economicGas=1 + contested。仮説: h1/h2/h3 の net は薄競争時(greedy 0.6 が +689 を保持)より大幅に縮む/負になる。",
+  "agents": [
+    {
+      "id": "arb-h1",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/arb-bot.ts"],
+      "wallet": "AUTO",
+      "env": { "BID_PROFIT_FRACTION": "0.9" },
+      "description": "機会価値の90%を積む攻撃 arb #1"
+    },
+    {
+      "id": "arb-h2",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/arb-bot.ts"],
+      "wallet": "AUTO",
+      "env": { "BID_PROFIT_FRACTION": "0.9" },
+      "description": "攻撃 arb #2(同条件)"
+    },
+    {
+      "id": "arb-h3",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/arb-bot.ts"],
+      "wallet": "AUTO",
+      "env": { "BID_PROFIT_FRACTION": "0.9" },
+      "description": "攻撃 arb #3(同条件)"
+    },
+    {
+      "id": "arb-flat",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/arb-bot.ts"],
+      "wallet": "AUTO",
+      "env": { "BID_PROFIT_FRACTION": "0.0" },
+      "description": "入札せず uncontested を拾う対照"
+    },
+    {
+      "id": "noop",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/noop.ts"],
+      "wallet": "AUTO",
+      "baseline": true
+    }
+  ]
+}
