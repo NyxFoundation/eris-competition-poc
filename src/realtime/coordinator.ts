@@ -49,6 +49,7 @@ import {
   submitRawTxIntent,
 } from "../coordinator.js";
 import { FlowProcess, type FlowOrderWire } from "../flowProcess.js";
+import { deployFlashArb, FLASH_ARB_ADDRESS } from "../flashArbDemo.js";
 import { RealtimeAgentProcess } from "./agentProcess.js";
 import { RealtimeFlowProcess } from "./flowProcess.js";
 import {
@@ -435,6 +436,20 @@ export async function runRealtimeSimulation(): Promise<void> {
     // ---- fair price のオンチェーン配布経路（ADR 0006 §3）。常設し毎ブロック書き込む ----
     const priceFeedAddress = await deployPriceFeed(ctx, latestFairPrice);
     logger.event({ type: "price_feed_deployed", address: priceFeedAddress });
+
+    // ---- フラッシュ arb デモ(GitHub #3, env gate): FlashArb をデプロイ（同期 coordinator と同じ gate）----
+    // flasharb base(ADR 0012)が rawTx で起動する FlashArb をここでデプロイする。setup フェーズの 1 回
+    // きりのデプロイで interval mining / mempool 順序には影響しない（deployPriceFeed と同性質）。未デプロイ
+    // だと receiver にコードが無く flashLoanSimple が revert する（realtime に欠けていたのを実走で発覚）。
+    if (
+      config.flashArbDemo &&
+      enabledIds.includes("aave") &&
+      enabledIds.includes("uniswap") &&
+      enabledIds.includes("balancer")
+    ) {
+      await deployFlashArb(ctx);
+      logger.event({ type: "flash_arb_deployed", address: FLASH_ARB_ADDRESS });
+    }
 
     // agent レジストリを 1 行 emit（ADR 0008 P0）。ダッシュボードがファイル tail だけで
     // 全 agent（id/アドレス/分類ヒント）を即座に把握できる（1 件も行動しない agent や

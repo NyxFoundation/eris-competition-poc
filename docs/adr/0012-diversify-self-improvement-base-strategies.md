@@ -181,6 +181,10 @@ BASE_STRATEGIES.adaptivearb = { notes: "…", params: { …, bidMarginBps }, exe
   - **修正は coordinator のメインループ順序制御**（executeOrder を oracle 確定後の次ブロックで receipt 確認付き実行）で、env デーモンの中核に触る。ADR 0006/0009/0011 の順序保証（oracle 最前列）への**回帰テストと anvil 実走での revert reason 確認**が前提。回帰環境を整える前の盲目編集は評価基盤を壊すため行わない → **実走デバッグを次ステップとする**。
 - **aave 整備**: `ENABLED_PROTOCOLS=uniswap,balancer,curve,aave` で aave アダプタが有効化され `aave/aaveloop/lpyield` base が動く下地は実装済み。ただし **aave supply は WETH 担保が要り、USDC-only（`INITIAL_WETH_WEI=0`）の α-clean 方針と衝突**するため、`INITIAL_WETH_WEI` で担保を配る専用プロファイル `agents.aave-eval.json` を用意した。realtime での実効性は **anvil 実走で要検証**。
 
+### 実走検証（2026-06-22、anvil Arbitrum fork、20 block 単発 sim:realtime）
+- **adaptivearb**: ✅ frozen で実走。20 ラウンド全て swap、入札ロジックが動作（`comp=1gwei→bid=2gwei` margin / `comp=0→bid=1gwei` floor / `comp=6gwei→bid=5gwei` ceiling 頭打ち）。netPnl +753 USDC、violations なし、再構成 failedReads 0。
+- **flasharb**: executor は正しい calldata（to=Aave Pool / flashLoanSimple / receiver=FlashArb / asset=USDC / amount / profitTo）を生成したが、**realtime coordinator に FlashArb デプロイが欠けていた**（同期 `coordinator.ts:279-288` にはあるが realtime に未移植）ことを実走で発見。receiver にコードが無く flashLoanSimple が revert（全 tx submit_failed）。`src/realtime/coordinator.ts` の setup に同期版と同じ gate（`flashArbDemo && aave && uniswap && balancer`）で `deployFlashArb` を追加 → `ENABLED_PROTOCOLS=...,aave ERIS_FLASH_ARB=1` で再走し **rawTx 2 件着弾・revert 0・netPnl +3294 USDC** で完全動作。setup フェーズの 1 回デプロイで interval mining / 順序保証には不干渉（gmx keeper の mempool 順序問題とは別性質）。**flasharb は ENABLED_PROTOCOLS に aave を含める必要**がある（FlashArb の gate と Aave Pool flashLoan のため）。
+
 ## Notes
 
 ### 参考資料
