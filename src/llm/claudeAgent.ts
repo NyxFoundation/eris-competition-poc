@@ -28,6 +28,7 @@ import {
 import { ClaudeSubscriptionStrategist } from "./claudeSubscriptionStrategist.js";
 import { ClaudeCliStrategist } from "./claudeCliStrategist.js";
 import { CodexCliStrategist } from "./codexCliStrategist.js";
+import { OllamaStrategist } from "./ollamaStrategist.js";
 import type { ReviseReason } from "./prompts.js";
 
 const REVIEW_EVERY_N_ROUNDS = intEnv("ERIS_LLM_REVIEW_EVERY", 60);
@@ -169,9 +170,11 @@ const helpersBase: Omit<ExecutorHelpers, "log"> = {
  *                   推奨のサブスク経路。SDK と違い nested でもハングしない。
  *   codex         – CodexCliStrategist via `codex exec` (別 API プール)。claude -p と競合しない
  *                   ので混成ロスターで自己改善の並走上限を上げられる。`ERIS_CODEX_MODEL` で model 上書き。
+ *   ollama        – OllamaStrategist via direct Ollama Cloud API (`https://ollama.com/api`).
+ *                   `OLLAMA_API_KEY` 必須。`ERIS_OLLAMA_MODEL`/`ERIS_LLM_MODEL` で model 上書き。
  *   subscription  – ClaudeSubscriptionStrategist via Agent SDK query()。注意: Claude Code
  *                   セッション内(別ターミナル含む)では nested 検出でハングしうる。
- *   auto (default)– cli if `claude` is reachable, else apikey if a key is set, else mock.
+ *   auto (default)– cli if `claude` is reachable, else apikey/ollama if a key is set, else mock.
  */
 export function selectStrategist(): Strategist {
   const auth = (process.env.ERIS_LLM_AUTH ?? "auto").toLowerCase();
@@ -199,6 +202,16 @@ export function selectStrategist(): Strategist {
     emitStderr("[claude-llm] strategist=codex (codex exec, 別 API プール)\n");
     return new CodexCliStrategist();
   }
+  if (auth === "ollama") {
+    if (!process.env.ERIS_OLLAMA_API_KEY && !process.env.OLLAMA_API_KEY) {
+      emitStderr(
+        "[claude-llm] strategist=mock (ERIS_LLM_AUTH=ollama but OLLAMA_API_KEY unset)\n",
+      );
+      return new MockStrategist();
+    }
+    emitStderr("[claude-llm] strategist=ollama (Ollama Cloud API)\n");
+    return new OllamaStrategist();
+  }
   if (auth === "subscription") {
     emitStderr("[claude-llm] strategist=subscription (Agent SDK query)\n");
     return new ClaudeSubscriptionStrategist();
@@ -214,8 +227,14 @@ export function selectStrategist(): Strategist {
     );
     return new ClaudeStrategist();
   }
+  if (process.env.ERIS_OLLAMA_API_KEY || process.env.OLLAMA_API_KEY) {
+    emitStderr(
+      "[claude-llm] strategist=ollama (auto: no claude/anthropic, OLLAMA_API_KEY present)\n",
+    );
+    return new OllamaStrategist();
+  }
   emitStderr(
-    "[claude-llm] strategist=mock (auto: no claude binary, no ANTHROPIC_API_KEY)\n",
+    "[claude-llm] strategist=mock (auto: no claude binary, no ANTHROPIC_API_KEY, no OLLAMA_API_KEY)\n",
   );
   return new MockStrategist();
 }

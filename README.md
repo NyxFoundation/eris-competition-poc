@@ -122,23 +122,26 @@ Example single-protocol configs: `agents.aave-test.json`, `agents.gmx-test.json`
 
 ## LLM-driven autonomous agent
 
-`examples/agents/claude-llm.ts` is an agent whose strategy is generated and revised by Claude Sonnet 4.6 at runtime. There is no hand-written trading logic — Claude writes both the natural-language plan and a TypeScript executor function that runs each round in a `vm.Script` sandbox.
+`examples/agents/claude-llm.ts` is an agent whose strategy is generated and revised by an LLM at runtime. There is no hand-written trading logic — the model writes both the natural-language plan and a TypeScript executor function that runs each round in a `vm.Script` sandbox.
 
 ### Architecture
-- **Slow tier (Claude API)**: called once at startup to design an initial strategy, then again every `ERIS_LLM_REVIEW_EVERY` rounds (default 10) or when realized PnL drops below `1 - ERIS_LLM_DRAWDOWN_RATIO` of starting USD (default 5%). Calls run in the background and never block the round response.
+- **Slow tier (LLM API/CLI)**: called once at startup to design an initial strategy, then again every `ERIS_LLM_REVIEW_EVERY` rounds (default 10) or when realized PnL drops below `1 - ERIS_LLM_DRAWDOWN_RATIO` of starting USD (default 5%). Calls run in the background and never block the round response.
 - **Fast tier (vm.Script)**: each round, the current executor body is evaluated against the observation with a 200 ms timeout. If the strategy is not yet ready (first ~10 sec while init is in flight) or the executor throws / returns an invalid action, the agent emits `noop` for that round and continues.
 - Strategies are written to `runs/<run_id>/agent-<id>/strategy-vN.{md,params.json,executor.ts}` so you can read what Claude is thinking. Per-round decisions and API call telemetry land in `decisions.jsonl` and `claude-calls.jsonl` in the same directory.
 
-### Three backends
+### Backends
 
-`ERIS_LLM_AUTH` selects which Claude transport to use. `auto` (the default) picks the best available, never crashes on missing credentials.
+`ERIS_LLM_AUTH` selects which transport to use. `auto` (the default) picks the best available, never crashes on missing credentials.
 
 | Mode | Auth | Use when |
 |---|---|---|
+| `cli` | Claude Pro/Max OAuth via `claude -p` | Local subscription runs with the most reliable Claude Code path |
+| `codex` | Codex CLI auth via `codex exec` | Parallel self-improvement on a separate API pool |
+| `ollama` | `OLLAMA_API_KEY` or `ERIS_OLLAMA_API_KEY` | Direct Ollama Cloud API calls to `https://ollama.com/api/chat` |
 | `subscription` | Claude Pro/Max OAuth (via Claude Code CLI) | You already have `claude` installed and logged in — zero per-token cost |
 | `apikey` | `ANTHROPIC_API_KEY` | CI, parallel sim runs, or when you want exact per-call billing |
 | `mock` | none | Offline smoke tests — always returns a noop strategy |
-| `auto` *(default)* | tries subscription → apikey → mock | Local dev where Claude Code is installed |
+| `auto` *(default)* | tries `cli` → `apikey` → `ollama` → `mock` | Local dev where available credentials vary |
 
 ### Run it (subscription, no API key)
 
@@ -161,6 +164,26 @@ AGENTS_CONFIG=agents.claude-llm.json ERIS_LLM_AUTH=apikey npm run sim
 
 `AGENT_TIMEOUT_MS` only matters if you want headroom — the LLM call is async and never holds up `requestAction`, so the default 5000 ms is fine in practice.
 
+### Run it (Ollama Cloud API)
+
+Use Ollama's direct Cloud API endpoint, not a local `localhost:11434` server. Direct Cloud API model names are the normal model ids, for example `gpt-oss:120b` rather than a local `-cloud` alias.
+
+```bash
+export OLLAMA_API_KEY=ollama-...
+AGENTS_CONFIG=agents.claude-llm.json \
+  ERIS_LLM_AUTH=ollama \
+  ERIS_LLM_MODEL=gpt-oss:120b \
+  npm run sim
+```
+
+Optional overrides:
+
+```bash
+export ERIS_OLLAMA_BASE_URL=https://ollama.com/api
+export ERIS_OLLAMA_MODEL=gpt-oss:120b
+export ERIS_OLLAMA_MAX_RETRIES=3
+```
+
 ### Offline mock
 
 Set `ERIS_LLM_MOCK=1` (or `ERIS_LLM_AUTH=mock`) to skip Claude entirely and use a hard-coded noop strategy. Useful for smoke-testing the harness without spending tokens or having any auth:
@@ -175,8 +198,11 @@ Environment variables (set in the parent shell — `agentProcess.ts` forwards `A
 
 | Variable | Default | Effect |
 |---|---|---|
-| `ERIS_LLM_AUTH` | `auto` | `subscription` \| `apikey` \| `mock` \| `auto` — see backend table above |
-| `ERIS_LLM_MODEL` | `sonnet` (subscription) / `claude-sonnet-4-6` (apikey) | Claude model alias or id |
+| `ERIS_LLM_AUTH` | `auto` | `cli` \| `codex` \| `ollama` \| `subscription` \| `apikey` \| `mock` \| `auto` — see backend table above |
+| `ERIS_LLM_MODEL` | backend-specific | Model alias or id. Ollama default is `gpt-oss:120b` |
+| `OLLAMA_API_KEY` / `ERIS_OLLAMA_API_KEY` | unset | Bearer token for `ERIS_LLM_AUTH=ollama` |
+| `ERIS_OLLAMA_BASE_URL` | `https://ollama.com/api` | Direct Ollama Cloud API base URL |
+| `ERIS_OLLAMA_MAX_RETRIES` | `3` | Retries for Ollama `429` and transient `5xx` responses |
 | `ERIS_LLM_REVIEW_EVERY` | `10` | Scheduled revision cadence in rounds |
 | `ERIS_LLM_DRAWDOWN_RATIO` | `0.05` | Fractional PnL drop that triggers an off-schedule revision |
 | `ERIS_LLM_HISTORY_CAPACITY` | `30` | How many recent rounds to keep in the revision prompt |
@@ -189,6 +215,7 @@ Cost / latency comparison per call:
 |---|---|---|---|---|
 | `apikey` | ~1–2s | ~$0.05 per 128-round run | ephemeral on `SIM_RULES` block | API tier |
 | `subscription` | ~4–8s (CLI cold start + harness prompt) | $0 — subscription absorbs | per-process; long-lived `query` not yet wired | Max weekly / 5h caps |
+| `ollama` | model/API dependent | Ollama Cloud account billing | none | Ollama Cloud limits |
 | `mock` | <1ms | $0 | n/a | n/a |
 
 Subscription mode is best for local dev and ad-hoc runs; switch to `apikey` for unattended / parallel / CI runs that risk hitting Max weekly caps.
