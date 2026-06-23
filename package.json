@@ -14,6 +14,7 @@
     "discrimination": "tsx scripts/discrimination.ts",
     "stress-report": "tsx scripts/stressReport.ts",
     "gen:roster": "tsx scripts/genRoster.ts",
+    "gen:local-constants": "tsx scripts/genLocalConstants.ts",
     "agent:noop": "tsx examples/agents/noop.ts",
     "agent:random": "tsx examples/agents/random.ts",
     "agent:simple": "tsx examples/agents/simple-rule.ts",

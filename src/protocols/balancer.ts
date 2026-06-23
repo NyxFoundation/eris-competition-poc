@@ -239,6 +239,11 @@ export const balancerAdapter: ProtocolAdapter = {
 
   // フォーク時点で枯渇しているため admin が join して seed する
   async setupGlobal(ctx: SimContext): Promise<void> {
+    // ローカルデプロイでは eris-app-deployer が既に WETH/USDC プールを seed 済み
+    // (2 トークン 80/20)。poc 側の 3 トークン INIT join は不要かつ構成不一致で壊れるためスキップ。
+    if (ctx.config.localDeploy) {
+      return;
+    }
     const admin = accountAddress(ctx.adminPk);
     // admin に seed トークンを用意（WETH は wrap、stable は deal）
     await sendAndMine(

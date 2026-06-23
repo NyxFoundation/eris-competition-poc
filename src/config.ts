@@ -74,6 +74,11 @@ export type SimConfig = {
   // 前 run から温存し、cold フェッチ由来のレイテンシ（mine 中の上流取得）を切り分ける診断用。
   // 状態は前 run から残留するため評価には使わない（ERIS_SKIP_RESET=1）。
   skipReset: boolean;
+  // ローカル(非fork)デプロイ済み anvil を使うモード（ERIS_LOCAL_DEPLOY=1）。fork が無いため
+  // run 間リセットは anvil_reset でなく evm_snapshot/evm_revert を使う。アドレスは
+  // constants.local.ts（gen:local-constants 生成）を overlay。fork 上流が無いので
+  // FORK_BLOCK_NUMBER 固定・whale 等は不要。
+  localDeploy: boolean;
   // 競争開始前に flow bot だけで N block の市場ループを回し、protocol の working set を
   // 温める（ADR 0006 Risks の anvil cold フェッチ対策）。競争フェーズの mine が上流フェッチを
   // 踏まなくなる。0 で無効（ERIS_PREWARM_BLOCKS）。
@@ -179,6 +184,7 @@ export function loadConfig(env = process.env): SimConfig {
     runBlocks: intEnv(env.ERIS_RUN_BLOCKS, 0),
     agentDirectTx: env.ERIS_AGENT_DIRECT_TX !== "0",
     skipReset: env.ERIS_SKIP_RESET === "1",
+    localDeploy: env.ERIS_LOCAL_DEPLOY === "1",
     prewarmBlocks: intEnv(env.ERIS_PREWARM_BLOCKS, 0),
     seed: intEnv(env.SEED, 1),
     runDirRoot: env.REPORT_DIR ?? "./runs",

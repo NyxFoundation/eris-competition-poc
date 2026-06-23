@@ -216,17 +216,39 @@ export type ResetForkOptions = {
   forkUrl?: string;
   // 再フォーク先ブロック（FORK_BLOCK_NUMBER）。固定すると再実行が完全再現可能。
   forkBlockNumber?: number;
+  // ローカル(非fork)デプロイモード。fork し直さず evm_snapshot/evm_revert でリセットする。
+  localDeploy?: boolean;
 };
 
 // 同一プロセス内で一度捕捉した再フォーク先ブロック。multiSeedRun は 1 プロセスで全 SEED を
 // 回すため、ここで固定して全 seed が同一フォークブロック（=同一の DeFi 流動性基準）を共有する。
 let capturedForkBlock: number | undefined;
 
+// ローカルデプロイモードの snapshot ID（プロセス内で run 間に revert→再 snapshot する）。
+let localSnapshotId: Hex | undefined;
+
 export async function resetFork(
   publicClient: PublicClient,
   options: ResetForkOptions = {},
 ): Promise<void> {
-  const { forkUrl, forkBlockNumber } = options;
+  const { forkUrl, forkBlockNumber, localDeploy } = options;
+  if (localDeploy) {
+    // 非fork: 上流が無いため anvil_reset でフォークし直せない。代わりに evm_snapshot/
+    // evm_revert で「デプロイ直後のクリーン断面」へ戻す。初回は snapshot を取るだけ、
+    // 2 回目以降は直前 snapshot へ revert してから再 snapshot する（同一プロセス内 = multiSeedRun）。
+    // 前提: poc は freshly deployed な deployer anvil に接続している（初回 snapshot = クリーン基準）。
+    if (localSnapshotId) {
+      await publicClient.request({
+        method: "evm_revert",
+        params: [localSnapshotId],
+      } as AnvilRequest);
+    }
+    localSnapshotId = (await publicClient.request({
+      method: "evm_snapshot",
+      params: [],
+    } as AnvilRequest)) as Hex;
+    return;
+  }
   if (!forkUrl) {
     // 上流 RPC 不明 → soft reset。状態が完全にはクリアされないため、複数 run/seed を
     // 同一 anvil で回す場合は anvil を都度再起動するか forkUrl を設定すること。

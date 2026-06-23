@@ -222,6 +222,7 @@ export async function runRealtimeSimulation(): Promise<void> {
     await resetFork(publicClient, {
       forkUrl: config.forkUrl,
       forkBlockNumber: config.forkBlockNumber,
+      localDeploy: config.localDeploy,
     });
   }
 
