@@ -150,6 +150,16 @@ const suppliedWeth = BigInt((aave.supplied && aave.supplied.WETH) || "0");
 const borrowedUsdc = BigInt((aave.borrowed && aave.borrowed.USDC) || "0");
 const wethWei = BigInt(obs.balances.wethWei);
 const fee = obs.limits.defaultPriorityFeePerGasWei;
+// USDC-only 配布対応: 担保供給用の WETH が無ければ先に USDC→WETH swap で調達する。
+if (suppliedWeth === 0n && wethWei === 0n) {
+  const fair = obs.fairPriceUsdcPerWeth; const usdcUnits = BigInt(obs.balances.usdcUnits);
+  const maxSupplyW = BigInt(obs.limits.maxAaveSupplyWethWei);
+  if (fair > 0 && usdcUnits > 0n && maxSupplyW > 0n) {
+    const wantUsdc = BigInt(Math.ceil((Number(maxSupplyW) / 1e18) * fair * params.supplyFraction * 1.05 * 1e6));
+    const maxIn = BigInt(obs.limits.maxUsdcInUnits); let amt = wantUsdc < usdcUnits ? wantUsdc : usdcUnits; if (amt > maxIn) amt = maxIn;
+    if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: 75, maxPriorityFeePerGasWei: fee };
+  }
+}
 if (suppliedWeth === 0n && wethWei > 0n) {
   const maxSupply = BigInt(obs.limits.maxAaveSupplyWethWei);
   const half = wethWei / 2n;
@@ -239,6 +249,17 @@ const fee = obs.limits.defaultPriorityFeePerGasWei;
 if (!uni || !uni.pool) return { type: "noop", reason: "uniswap disabled" };
 const positions = uni.positions || [];
 if (positions.length === 0) {
+  // USDC-only 配布対応: LP 用 WETH が無ければ先に USDC→WETH swap で調達する。
+  const needWeth = BigInt(obs.limits.maxLpWethWei) / 2n;
+  const wethWei = BigInt(obs.balances.wethWei);
+  if (wethWei < needWeth) {
+    const fair = obs.fairPriceUsdcPerWeth; const usdcUnits = BigInt(obs.balances.usdcUnits);
+    if (fair > 0 && usdcUnits > 0n) {
+      const wantUsdc = BigInt(Math.ceil((Number(needWeth - wethWei) / 1e18) * fair * 1.05 * 1e6));
+      const maxIn = BigInt(obs.limits.maxUsdcInUnits); let amt = wantUsdc < usdcUnits ? wantUsdc : usdcUnits; if (amt > maxIn) amt = maxIn;
+      if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: 75, maxPriorityFeePerGasWei: fee };
+    }
+  }
   const spacing = uni.pool.tickSpacing;
   const center = Math.floor(uni.pool.tick / spacing) * spacing;
   const w = Math.max(1, Math.floor(params.rangeSpacings)) * spacing;
@@ -276,6 +297,16 @@ const sizeRaw = BigInt(Math.max(0, Math.round(params.sizeUsd))) * (10n ** 30n);
 const maxSize = BigInt(obs.limits.maxGmxSizeUsd);
 const sizeUsd = sizeRaw < maxSize ? sizeRaw : maxSize;
 if (collWei <= 0n || sizeUsd <= 0n) return { type: "noop", reason: "computed size zero" };
+// USDC-only 配布対応: collateral 用 WETH が無ければ先に USDC→WETH swap で調達する。
+const wethWei = BigInt(obs.balances.wethWei);
+if (wethWei < collWei) {
+  const fair = obs.fairPriceUsdcPerWeth; const usdcUnits = BigInt(obs.balances.usdcUnits);
+  if (fair > 0 && usdcUnits > 0n) {
+    const wantUsdc = BigInt(Math.ceil((Number(collWei - wethWei) / 1e18) * fair * 1.05 * 1e6));
+    const maxIn = BigInt(obs.limits.maxUsdcInUnits); let amt = wantUsdc < usdcUnits ? wantUsdc : usdcUnits; if (amt > maxIn) amt = maxIn;
+    if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: 75, maxPriorityFeePerGasWei: fee };
+  }
+}
 return { type: "gmxIncrease", isLong: params.isLong !== false, collateral: "WETH", collateralAmount: collWei.toString(), sizeDeltaUsd: sizeUsd.toString(), maxPriorityFeePerGasWei: fee };
 `.trim();
 
@@ -312,6 +343,16 @@ const sizeUsd = sizeRaw < maxSize ? sizeRaw : maxSize;
 const collWei = BigInt(Math.max(0, Math.round(params.collateralWeth * 1000))) * (10n ** 15n);
 if (sizeUsd <= 0n) return { type: "noop", reason: "computed size zero" };
 helpers.log("dev=" + (dev * 10000).toFixed(1) + "bps long=" + (dev < 0));
+// USDC-only 配布対応: collateral 用 WETH が無ければ先に USDC→WETH swap で調達する。
+const wethWei = BigInt(obs.balances.wethWei);
+if (wethWei < collWei) {
+  const usdcUnits = BigInt(obs.balances.usdcUnits);
+  if (usdcUnits > 0n) {
+    const wantUsdc = BigInt(Math.ceil((Number(collWei - wethWei) / 1e18) * price * 1.05 * 1e6));
+    const maxIn = BigInt(obs.limits.maxUsdcInUnits); let amt = wantUsdc < usdcUnits ? wantUsdc : usdcUnits; if (amt > maxIn) amt = maxIn;
+    if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: 75, maxPriorityFeePerGasWei: fee };
+  }
+}
 return { type: "gmxIncrease", isLong: dev < 0, collateral: "WETH", collateralAmount: collWei.toString(), sizeDeltaUsd: sizeUsd.toString(), maxPriorityFeePerGasWei: fee };
 `.trim();
 
@@ -348,6 +389,16 @@ const sizeUsd = sizeRaw < maxSize ? sizeRaw : maxSize;
 const collWei = BigInt(Math.max(0, Math.round(params.collateralWeth * 1000))) * (10n ** 15n);
 if (sizeUsd <= 0n) return { type: "noop", reason: "computed size zero" };
 helpers.log("trend=" + (trend * 10000).toFixed(1) + "bps up=" + upTrend);
+// USDC-only 配布対応: collateral 用 WETH が無ければ先に USDC→WETH swap で調達する。
+const wethWei = BigInt(obs.balances.wethWei);
+if (wethWei < collWei) {
+  const fair = obs.fairPriceUsdcPerWeth; const usdcUnits = BigInt(obs.balances.usdcUnits);
+  if (fair > 0 && usdcUnits > 0n) {
+    const wantUsdc = BigInt(Math.ceil((Number(collWei - wethWei) / 1e18) * fair * 1.05 * 1e6));
+    const maxIn = BigInt(obs.limits.maxUsdcInUnits); let amt = wantUsdc < usdcUnits ? wantUsdc : usdcUnits; if (amt > maxIn) amt = maxIn;
+    if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: 75, maxPriorityFeePerGasWei: fee };
+  }
+}
 return { type: "gmxIncrease", isLong: upTrend, collateral: "WETH", collateralAmount: collWei.toString(), sizeDeltaUsd: sizeUsd.toString(), maxPriorityFeePerGasWei: fee };
 `.trim();
 
@@ -451,6 +502,11 @@ const coll = Number(aave.totalCollateralBase) / 1e8;
 const debt = Number(aave.totalDebtBase) / 1e8;
 const avail = Number(aave.availableBorrowsBase) / 1e8;
 const underTarget = coll === 0 || debt / coll < params.targetLtv;
+// 0) USDC-only 配布対応: 未開始(担保ゼロ・手元 WETH ゼロ)なら USDC→WETH swap で carry の種を作る。
+if (coll === 0 && wethWei === 0n && usdcUnits > 1000000n) {
+  const amountIn = usdcUnits < maxIn ? usdcUnits : maxIn;
+  if (amountIn > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amountIn.toString(), slippageBps: params.slippageBps, maxPriorityFeePerGasWei: fee };
+}
 // 1) 手元 WETH を supply して担保を積む(初期 WETH + swap で得た WETH。carry の土台)
 if (wethWei > 0n && underTarget) {
   const maxSupply = BigInt(obs.limits.maxAaveSupplyWethWei);
@@ -523,6 +579,13 @@ if (live === 0) {
   const frac = BigInt(Math.max(0, Math.min(10000, Math.floor(params.depositFraction * 10000))));
   const wethWei = BigInt(obs.balances.wethWei); const usdcUnits = BigInt(obs.balances.usdcUnits);
   const maxW = BigInt(obs.limits.maxLpWethWei); const maxU = BigInt(obs.limits.maxLpUsdcUnits);
+  // USDC-only 配布対応: LP 用 WETH が無ければ先に USDC→WETH swap で調達する。
+  if (wethWei === 0n && usdcUnits > 0n) {
+    const want = (maxW * frac) / 10000n;
+    const wantUsdc = BigInt(Math.ceil((Number(want) / 1e18) * fair * 1.05 * 1e6));
+    const maxInLp = BigInt(obs.limits.maxUsdcInUnits); let amt = wantUsdc < usdcUnits ? wantUsdc : usdcUnits; if (amt > maxInLp) amt = maxInLp;
+    if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: params.slippageBps, maxPriorityFeePerGasWei: fee };
+  }
   const wd = ((wethWei < maxW ? wethWei : maxW) * frac) / 10000n;
   const ud = ((usdcUnits < maxU ? usdcUnits : maxU) * frac) / 10000n;
   if (wd > 0n || ud > 0n) return { type: "mintLiquidity", tickLower: center - w, tickUpper: center + w, amountWethDesired: wd.toString(), amountUsdcDesired: ud.toString(), maxPriorityFeePerGasWei: fee, slippageBps: params.slippageBps };

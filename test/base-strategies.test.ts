@@ -690,6 +690,99 @@ test("flasharb ベース: spread が小さければ noop", () => {
   if (r.ok) assert.equal(r.action.type, "noop");
 });
 
+// USDC-only 配布(wethWei=0)対応: WETH 前提の base が先に USDC→WETH swap で調達するか。
+function assertUsdcToWethSwap(r: ReturnType<typeof runExecutor>) {
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "swap");
+    if (r.action.type === "swap") {
+      assert.equal(r.action.tokenIn, "USDC");
+      assert.ok(BigInt(r.action.amountIn) > 0n);
+    }
+  }
+}
+
+test("gmxperp(USDC-only): WETH 無しなら collateral 用に USDC→WETH swap", () => {
+  const s = getBaseStrategy("gmxperp");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.limits.maxGmxSizeUsd = "100000000000000000000000000000000000";
+  obs.protocols.gmx = { marketPriceUsd: 1700 };
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("gmxrev(USDC-only): open 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("gmxrev");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.limits.maxGmxSizeUsd = "100000000000000000000000000000000000";
+  obs.protocols.gmx = { marketPriceUsd: 1700 };
+  obs.fairPriceUsdcPerWeth = 1700;
+  obs.history = Array.from({ length: 12 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: 1690,
+    fairPriceUsdcPerWeth: 1690, // MA 1690 < price 1700 → open、ただし WETH 無し→swap
+  }));
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("gmxtrend(USDC-only): open 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("gmxtrend");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.limits.maxGmxSizeUsd = "100000000000000000000000000000000000";
+  obs.protocols.gmx = { marketPriceUsd: 1700 };
+  obs.history = Array.from({ length: 8 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: 1680 + i * 8,
+    fairPriceUsdcPerWeth: 1680 + i * 8, // 上昇トレンド→open、ただし WETH 無し→swap
+  }));
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("dnlp(USDC-only): LP mint 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("dnlp");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.protocols.gmx = { marketPriceUsd: 1700 };
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers)); // LP 無 → 調達 swap
+});
+
+test("aave(USDC-only): supply 用 WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("aave");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.limits.maxAaveSupplyWethWei = "5000000000000000000";
+  obs.limits.maxAaveBorrowUsdcUnits = "5000000000";
+  obs.protocols.aave = emptyAave();
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("aaveloop(USDC-only): 未開始で WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("aaveloop");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.balances.usdcUnits = "10000000000"; // 10000 USDC
+  obs.limits.maxAaveSupplyWethWei = "5000000000000000000";
+  obs.protocols.aave = emptyAave();
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("lpyield(USDC-only): LP mint 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("lpyield");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.protocols.aave = emptyAave();
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers)); // LP 無 → 調達 swap
+});
+
 test("getBaseStrategy: 未知 id / undefined は null", () => {
   assert.equal(getBaseStrategy("nope"), null);
   assert.equal(getBaseStrategy(undefined), null);
