@@ -79,6 +79,8 @@ export type SimConfig = {
   // constants.local.ts（gen:local-constants 生成）を overlay。fork 上流が無いので
   // FORK_BLOCK_NUMBER 固定・whale 等は不要。
   localDeploy: boolean;
+  // ローカルモードの snapshot ID 永続化ファイル（cross-process でクリーン断面を共有）。
+  localSnapshotFile: string;
   // 競争開始前に flow bot だけで N block の市場ループを回し、protocol の working set を
   // 温める（ADR 0006 Risks の anvil cold フェッチ対策）。競争フェーズの mine が上流フェッチを
   // 踏まなくなる。0 で無効（ERIS_PREWARM_BLOCKS）。
@@ -185,6 +187,7 @@ export function loadConfig(env = process.env): SimConfig {
     agentDirectTx: env.ERIS_AGENT_DIRECT_TX !== "0",
     skipReset: env.ERIS_SKIP_RESET === "1",
     localDeploy: env.ERIS_LOCAL_DEPLOY === "1",
+    localSnapshotFile: env.ERIS_LOCAL_SNAPSHOT_FILE ?? ".local-snapshot",
     prewarmBlocks: intEnv(env.ERIS_PREWARM_BLOCKS, 0),
     seed: intEnv(env.SEED, 1),
     runDirRoot: env.REPORT_DIR ?? "./runs",

@@ -9,3 +9,6 @@ dist/
 probe_tmp.mts
 .serena/
 .playwright-cli/
+
+# ローカルデプロイモードの snapshot ID
+.local-snapshot

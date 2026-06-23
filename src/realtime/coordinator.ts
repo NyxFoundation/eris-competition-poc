@@ -10,6 +10,7 @@ import {
   mine,
   resetFork,
   sendAndMine,
+  setAutomine,
   setEthBalance,
   setIntervalMining,
 } from "../chain.js";
@@ -223,7 +224,16 @@ export async function runRealtimeSimulation(): Promise<void> {
       forkUrl: config.forkUrl,
       forkBlockNumber: config.forkBlockNumber,
       localDeploy: config.localDeploy,
+      localSnapshotFile: config.localSnapshotFile,
     });
+  }
+
+  // ローカルモードの mining 整合: deployer anvil は auto-mine 起動だが、別プロセスの run は
+  // 前 run の teardown(setIntervalMining 0)後の状態を継承し setup tx が mine されずハングする。
+  // setup フェーズは auto-mine を明示 ON にして全 setup tx を確実に mine する（fork は --no-mining
+  // 起動なので不要。competition 開始時に OFF へ戻して fee 競争を成立させる = 後述）。
+  if (config.localDeploy) {
+    await setAutomine(publicClient, true);
   }
 
   // ---- agent ウォレット（プロセスは setup 完了後に起動する）----
@@ -703,6 +713,11 @@ export async function runRealtimeSimulation(): Promise<void> {
     }
 
     // ---- 競争フェーズ開始：実 N 秒ごとの interval mining へ ----
+    // ローカルモードは setup 用に auto-mine を ON にしたので、ここで OFF に戻す。
+    // auto-mine が残ると tx ごとに単独ブロック化して fee 競争が壊れる（fork は元から OFF）。
+    if (config.localDeploy) {
+      await setAutomine(publicClient, false);
+    }
     await setIntervalMining(publicClient, config.blockTimeSec);
     logger.event({
       type: "interval_mining_started",

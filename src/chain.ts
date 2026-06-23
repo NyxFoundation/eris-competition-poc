@@ -12,6 +12,7 @@ import {
   type WalletClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { erc20Abi, wethAbi } from "./abis.js";
 import { MULTICALL3, TOKENS } from "./constants.js";
 import type { BalanceSnapshot } from "./types.js";
@@ -218,6 +219,8 @@ export type ResetForkOptions = {
   forkBlockNumber?: number;
   // ローカル(非fork)デプロイモード。fork し直さず evm_snapshot/evm_revert でリセットする。
   localDeploy?: boolean;
+  // ローカルモードの snapshot ID 永続化ファイル。別プロセスの run 間でクリーン断面を共有する。
+  localSnapshotFile?: string;
 };
 
 // 同一プロセス内で一度捕捉した再フォーク先ブロック。multiSeedRun は 1 プロセスで全 SEED を
@@ -231,22 +234,39 @@ export async function resetFork(
   publicClient: PublicClient,
   options: ResetForkOptions = {},
 ): Promise<void> {
-  const { forkUrl, forkBlockNumber, localDeploy } = options;
+  const { forkUrl, forkBlockNumber, localDeploy, localSnapshotFile } = options;
   if (localDeploy) {
     // 非fork: 上流が無いため anvil_reset でフォークし直せない。代わりに evm_snapshot/
-    // evm_revert で「デプロイ直後のクリーン断面」へ戻す。初回は snapshot を取るだけ、
-    // 2 回目以降は直前 snapshot へ revert してから再 snapshot する（同一プロセス内 = multiSeedRun）。
-    // 前提: poc は freshly deployed な deployer anvil に接続している（初回 snapshot = クリーン基準）。
-    if (localSnapshotId) {
-      await publicClient.request({
-        method: "evm_revert",
-        params: [localSnapshotId],
-      } as AnvilRequest);
+    // evm_revert で「デプロイ直後のクリーン断面」へ戻す。snapshot は revert 直後に取り直すので
+    // 必ずクリーン断面を指す。
+    //
+    // cross-process: snapshot ID をファイル永続化し、別プロセスの run も前プロセスが残した
+    // クリーン snapshot へ revert して始める（逐次起動を想定）。優先順: プロセス内メモリ >
+    // 永続ファイル。stale id（anvil 再起動）は evm_revert が false を返すので現状態を base にする
+    // (self-healing。前提 = freshly deployed anvil なら現状態はクリーン)。
+    let revertTo = localSnapshotId;
+    if (!revertTo && localSnapshotFile && existsSync(localSnapshotFile)) {
+      const persisted = readFileSync(localSnapshotFile, "utf8").trim();
+      if (persisted) revertTo = persisted as Hex;
+    }
+    if (revertTo) {
+      await publicClient
+        .request({ method: "evm_revert", params: [revertTo] } as AnvilRequest)
+        .catch(() => {
+          /* stale id: 現状態を base にする */
+        });
     }
     localSnapshotId = (await publicClient.request({
       method: "evm_snapshot",
       params: [],
     } as AnvilRequest)) as Hex;
+    if (localSnapshotFile) {
+      try {
+        writeFileSync(localSnapshotFile, localSnapshotId);
+      } catch {
+        /* 永続化に失敗してもプロセス内は動く */
+      }
+    }
     return;
   }
   if (!forkUrl) {
