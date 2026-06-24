@@ -1,0 +1,29 @@
+{
+  "_comment": "Focused local realtime smoke for FlashArb rawTx path and Aave pool-liquidity cap behavior.",
+  "agents": [
+    {
+      "id": "flasharb-standalone",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/flash-arb.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "FLASH_ARB_SPREAD": "0.0001",
+        "FLASH_ARB_USDC": "5000",
+        "FLASH_ARB_MAX_USDC": "5000",
+        "FLASH_ARB_PRICE_IMPACT_BPS": "0",
+        "FLASH_ARB_MIN_PROFIT_USDC": "0",
+        "FLASH_ARB_POOL_LIQUIDITY_RESERVE_BPS": "1000",
+        "FLASH_ARB_MIN_LIQUIDITY_USDC": "1000"
+      },
+      "description": "standalone flasharb liquidity-cap smoke"
+    },
+    {
+      "id": "noop",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/noop.ts"],
+      "wallet": "AUTO",
+      "baseline": true,
+      "description": "noop baseline"
+    }
+  ]
+}

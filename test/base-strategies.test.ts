@@ -11,6 +11,7 @@ import {
 } from "../src/llm/strategy.js";
 import { createState, seedStrategy } from "../src/llm/claudeAgent.js";
 import {
+  decodeFunctionData,
   encodeAbiParameters,
   encodeFunctionData,
   formatUnits,
@@ -34,6 +35,22 @@ const helpersFlash = {
     FLASH_ARB: "0x000000000000000000000000000000000000fa5b" as `0x${string}`,
   },
 };
+
+const flashLoanSimpleAbi = [
+  {
+    type: "function",
+    name: "flashLoanSimple",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "receiverAddress", type: "address" },
+      { name: "asset", type: "address" },
+      { name: "amount", type: "uint256" },
+      { name: "params", type: "bytes" },
+      { name: "referralCode", type: "uint16" },
+    ],
+    outputs: [],
+  },
+] as const;
 
 // executor が読むフィールドを満たす最小の観測。
 function syntheticObs(
@@ -696,6 +713,59 @@ test("flasharb ベース: spread 超 + FLASH_ARB 注入で flashLoanSimple の r
       );
       assert.ok(r.action.tx.data.startsWith("0x"));
       assert.ok(r.action.tx.data.length > 10);
+    }
+  }
+});
+
+test("flasharb ベース: Aave pool liquidity が薄ければ noop", () => {
+  const s = getBaseStrategy("flasharb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.protocols.balancer = { priceUsdcPerWeth: 1400 };
+  obs.protocols.aave = {
+    healthFactor: "0",
+    totalCollateralBase: "0",
+    totalDebtBase: "0",
+    availableBorrowsBase: "0",
+    supplied: {},
+    borrowed: {},
+    poolLiquidity: { USDC: "500000000" },
+  };
+  const r = runExecutor(s, obs, helpersFlash);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "noop");
+    if (r.action.type === "noop") {
+      assert.match(r.action.reason ?? "", /flash liquidity too low/);
+    }
+  }
+});
+
+test("flasharb ベース: Aave pool liquidity で flashUsdc を cap する", () => {
+  const s = getBaseStrategy("flasharb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.protocols.balancer = { priceUsdcPerWeth: 1400 };
+  obs.protocols.aave = {
+    healthFactor: "0",
+    totalCollateralBase: "0",
+    totalDebtBase: "0",
+    availableBorrowsBase: "0",
+    supplied: {},
+    borrowed: {},
+    poolLiquidity: { USDC: "10000000000" },
+  };
+  const r = runExecutor(s, obs, helpersFlash);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "rawTx");
+    if (r.action.type === "rawTx") {
+      const decoded = decodeFunctionData({
+        abi: flashLoanSimpleAbi,
+        data: r.action.tx.data as `0x${string}`,
+      });
+      assert.equal(decoded.functionName, "flashLoanSimple");
+      assert.equal(decoded.args[2], 9000000000n);
     }
   }
 });

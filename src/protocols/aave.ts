@@ -8,11 +8,13 @@ import {
 import { AAVE, TOKENS, stableBalanceOf } from "../constants.js";
 import {
   accountAddress,
+  fundWallet,
   increaseTime,
   mine,
   sendAndMine,
   sendAsImpersonated,
 } from "../chain.js";
+import { erc20Abi } from "../abis.js";
 import type {
   AaveObservation,
   AgentObservation,
@@ -286,6 +288,7 @@ async function reserveLastUpdate(
 // resetFork が forking 付き再フォークを行えば block.timestamp は通常 lastUpdate より後に
 // なるためここは発火しないが、フォークブロック次第で稀に逆転するため防御として残す。
 const AAVE_WARP_BUFFER_SECONDS = 3600n; // 1h。発火時に dt>0 を安定させる余裕。
+const LOCAL_FLASH_LIQUIDITY_USDC_UNITS = 100_000n * 10n ** 6n;
 async function warpPastReserveLastUpdate(ctx: SimContext): Promise<void> {
   const [wethUpdate, usdcUpdate] = await Promise.all([
     reserveLastUpdate(ctx.publicClient, TOKENS.WETH.address),
@@ -326,6 +329,49 @@ async function enableLocalFlashLoaning(ctx: SimContext): Promise<void> {
   }
 }
 
+async function seedLocalFlashLoanLiquidity(ctx: SimContext): Promise<void> {
+  if (!ctx.config.localDeploy) return;
+  const current = (await ctx.publicClient.readContract({
+    address: AAVE_STABLE,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: [AAVE.Pool],
+  })) as bigint;
+  if (current >= LOCAL_FLASH_LIQUIDITY_USDC_UNITS) return;
+  const missing = LOCAL_FLASH_LIQUIDITY_USDC_UNITS - current;
+
+  await fundWallet(
+    ctx.publicClient,
+    ctx.walletClient,
+    ctx.chain,
+    ctx.adminPk,
+    0n,
+    0n,
+    missing,
+  );
+  await sendAndMine(ctx.publicClient, ctx.walletClient, ctx.chain, ctx.adminPk, {
+    to: AAVE_STABLE,
+    data: encodeFunctionData({
+      abi: erc20Abi,
+      functionName: "approve",
+      args: [AAVE.Pool, missing],
+    }),
+  });
+  await sendAndMine(ctx.publicClient, ctx.walletClient, ctx.chain, ctx.adminPk, {
+    to: AAVE.Pool,
+    data: encodeFunctionData({
+      abi: aavePoolAbi,
+      functionName: "supply",
+      args: [
+        AAVE_STABLE,
+        missing,
+        accountAddress(ctx.adminPk),
+        0,
+      ],
+    }),
+  });
+}
+
 export const aaveAdapter: ProtocolAdapter = {
   id: "aave",
   stableToken: AAVE_STABLE,
@@ -338,7 +384,7 @@ export const aaveAdapter: ProtocolAdapter = {
   },
 
   async observe(ctx, _state, agent): Promise<AaveObservation> {
-    const [account, weth, usdc] = await Promise.all([
+    const [account, weth, usdc, poolUsdc] = await Promise.all([
       ctx.publicClient.readContract({
         address: AAVE.Pool,
         abi: aavePoolAbi,
@@ -347,6 +393,12 @@ export const aaveAdapter: ProtocolAdapter = {
       }) as Promise<readonly bigint[]>,
       userReserve(ctx.publicClient, TOKENS.WETH.address, agent),
       userReserve(ctx.publicClient, AAVE_STABLE, agent),
+      ctx.publicClient.readContract({
+        address: AAVE_STABLE,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [AAVE.Pool],
+      }) as Promise<bigint>,
     ]);
     return {
       healthFactor: account[5].toString(),
@@ -360,6 +412,9 @@ export const aaveAdapter: ProtocolAdapter = {
       borrowed: {
         WETH: weth.borrowed.toString(),
         USDC: usdc.borrowed.toString(),
+      },
+      poolLiquidity: {
+        USDC: poolUsdc.toString(),
       },
     };
   },
@@ -461,5 +516,9 @@ export const aaveAdapter: ProtocolAdapter = {
     // eris-app-deployer の shared WETH/USDC reserve は supply/borrow を有効化しているが、
     // flashloan flag は既定 false のため FlashArb が Aave error 91 で止まる。
     await enableLocalFlashLoaning(ctx);
+    // local realtime setup は run ごとに snapshot へ戻るため、flashloan 用の pool liquidity
+    // も setupGlobal で再投入する。これが無いと profitable signal 時に Pool の ERC20 残高不足で
+    // `MockERC20: insufficient balance` になる。
+    await seedLocalFlashLoanLiquidity(ctx);
   },
 };

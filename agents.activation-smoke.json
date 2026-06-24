@@ -1,0 +1,109 @@
+{
+  "_comment": "Targeted local smoke roster for strategies that were previously zero in the parameter report. Frozen base strategies, no LLM/API calls.",
+  "agents": [
+    {
+      "id": "frozen-arb",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "arb",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "activation smoke for base arb"
+    },
+    {
+      "id": "frozen-venue",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "venue",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "activation smoke for base venue"
+    },
+    {
+      "id": "frozen-statarb",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "statarb",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "activation smoke for base statarb"
+    },
+    {
+      "id": "frozen-jitlp",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "jitlp",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "activation smoke for base jitlp"
+    },
+    {
+      "id": "frozen-lp",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "lp",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "activation smoke for base lp"
+    },
+    {
+      "id": "frozen-ladder",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "ladder",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "activation smoke for base ladder"
+    },
+    {
+      "id": "frozen-flasharb",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "flasharb",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "activation smoke for base flasharb"
+    },
+    {
+      "id": "frozen-adaptivearb",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "adaptivearb",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "activation smoke for base adaptivearb"
+    },
+    {
+      "id": "noop",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/noop.ts"],
+      "wallet": "AUTO",
+      "baseline": true,
+      "description": "noop baseline"
+    }
+  ]
+}

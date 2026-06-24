@@ -207,6 +207,7 @@ export type AaveObservation = {
   availableBorrowsBase: string;
   supplied: Partial<Record<TokenSymbol, string>>;
   borrowed: Partial<Record<TokenSymbol, string>>;
+  poolLiquidity?: Partial<Record<TokenSymbol, string>>;
 };
 
 export type ProtocolObservations = {

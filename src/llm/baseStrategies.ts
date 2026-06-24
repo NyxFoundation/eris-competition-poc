@@ -697,7 +697,24 @@ const flashAddr = helpers.ADDRESSES.FLASH_ARB;
 if (!flashAddr) return { type: "noop", reason: "FlashArb not deployed (needs ERIS_FLASH_ARB=1)" };
 const spread = Math.abs(uni / bal - 1);
 if (spread < params.spreadThreshold) return { type: "noop", reason: "spread too small" };
-const flashUsdc = Math.max(0, Math.floor(params.flashUsdc));
+const requestedFlashUsdc = Math.max(0, Math.floor(params.flashUsdc));
+const maxFlashUsdcParam = Number(params.maxFlashUsdc ?? requestedFlashUsdc);
+const maxFlashUsdc = Number.isFinite(maxFlashUsdcParam) ? Math.max(0, Math.floor(maxFlashUsdcParam)) : requestedFlashUsdc;
+let flashUsdc = Math.min(requestedFlashUsdc, maxFlashUsdc);
+const poolUsdcRaw = p.aave && p.aave.poolLiquidity ? p.aave.poolLiquidity.USDC : undefined;
+if (typeof poolUsdcRaw === "string" && /^[0-9]+$/.test(poolUsdcRaw)) {
+  const poolUsdcUnits = BigInt(poolUsdcRaw);
+  const reserveBpsRaw = Number(params.poolLiquidityReserveBps ?? 1000);
+  const reserveBps = Math.max(0, Math.min(10000, Math.floor(Number.isFinite(reserveBpsRaw) ? reserveBpsRaw : 1000)));
+  const usableUnits = (poolUsdcUnits * BigInt(10000 - reserveBps)) / 10000n;
+  const minFlashLiquidityUsdcRaw = Number(params.minFlashLiquidityUsdc ?? 1000);
+  const minFlashLiquidityUsdc = Math.max(0, Math.floor(Number.isFinite(minFlashLiquidityUsdcRaw) ? minFlashLiquidityUsdcRaw : 1000));
+  const minUsableUnits = BigInt(minFlashLiquidityUsdc) * 1000000n;
+  if (usableUnits < minUsableUnits) return { type: "noop", reason: "flash liquidity too low: " + (Number(poolUsdcUnits) / 1e6).toFixed(2) + " USDC" };
+  const requestedUnits = BigInt(flashUsdc) * 1000000n;
+  const cappedUnits = usableUnits < requestedUnits ? usableUnits : requestedUnits;
+  flashUsdc = Number(cappedUnits / 1000000n);
+}
 if (flashUsdc <= 0) return { type: "noop", reason: "flashUsdc zero" };
 const mode = uni < bal ? 0 : 1;
 const uniFeeBps = Number(params.uniFeeBps ?? 30);
@@ -921,10 +938,13 @@ const BASE_STRATEGIES: Record<string, Omit<Strategy, "version">> = {
   },
   flasharb: {
     notes:
-      "Base strategy **flasharb** (GitHub #3): Aave flashLoanSimple で自己資金上限を超えるサイズの uniswap↔balancer cross-venue 裁定を 1 tx で実行(資本制約を外すレバレッジ裁定)。割安 venue で買い割高で売り、返済段で利益不足なら atomic revert(gas のみ損)。revise で spreadThreshold / flashUsdc を磨く。**要 ERIS_FLASH_ARB=1**(未設定なら self-guard で noop)。uniswap+balancer 有効時のみ。",
+      "Base strategy **flasharb** (GitHub #3): Aave flashLoanSimple で自己資金上限を超えるサイズの uniswap↔balancer cross-venue 裁定を 1 tx で実行(資本制約を外すレバレッジ裁定)。割安 venue で買い割高で売り、返済段で利益不足なら atomic revert(gas のみ損)。Pool liquidity が薄い時は skip し、flashUsdc は maxFlashUsdc と観測 liquidity で cap する。revise で spreadThreshold / flashUsdc / maxFlashUsdc を磨く。**要 ERIS_FLASH_ARB=1**(未設定なら self-guard で noop)。uniswap+balancer 有効時のみ。",
     params: {
       spreadThreshold: 0.003,
       flashUsdc: 15000,
+      maxFlashUsdc: 15000,
+      minFlashLiquidityUsdc: 1000,
+      poolLiquidityReserveBps: 1000,
       uniFeeBps: 30,
       balancerFeeBps: 30,
       flashPremiumBps: 5,

@@ -211,7 +211,8 @@ export function baseSpecificGuidance(
   } else if (base === "flasharb") {
     specific = [
       "- Flash arbitrage should run only when spread exceeds all flashloan, swap, and gas costs. Atomic revert still burns gas.",
-      "- Prefer raising spreadThreshold or lowering flashUsdc when failures rise; do not bid maximum for tiny edges.",
+      "- Prefer raising spreadThreshold or lowering flashUsdc/maxFlashUsdc when failures rise; do not bid maximum for tiny edges.",
+      "- Keep poolLiquidityReserveBps and minFlashLiquidityUsdc conservative so thin Aave pool liquidity is skipped instead of reverted.",
       "- Use rawTx only when FlashArb is deployed and the venue pair is present.",
     ];
   } else {
