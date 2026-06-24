@@ -24,6 +24,7 @@ export interface BuiltTx {
   to: Address;
   data: Hex;
   value?: bigint;
+  gas?: bigint;
 }
 
 export interface FlowOrder {

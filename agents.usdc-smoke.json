@@ -1,0 +1,92 @@
+{
+  "_comment": "Short local smoke roster for USDC-only realtime checks. Uses frozen base strategies with mock strategist so no LLM/API calls are made.",
+  "agents": [
+    {
+      "id": "frozen-lp",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "lp",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "USDC-only base lp smoke"
+    },
+    {
+      "id": "frozen-fairmm",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "fairmm",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "USDC-only base fairmm smoke"
+    },
+    {
+      "id": "frozen-jitlp",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "jitlp",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "USDC-only base jitlp smoke"
+    },
+    {
+      "id": "frozen-ladder",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "ladder",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "USDC-only base ladder smoke"
+    },
+    {
+      "id": "frozen-venue",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "venue",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "USDC-only base venue smoke"
+    },
+    {
+      "id": "frozen-statarb",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
+      "wallet": "AUTO",
+      "env": {
+        "ERIS_BASE_STRATEGY": "statarb",
+        "ERIS_FREEZE_STRATEGY": "1",
+        "ERIS_LLM_AUTH": "mock"
+      },
+      "description": "USDC-only base statarb smoke"
+    },
+    {
+      "id": "flasharb",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/flash-arb.ts"],
+      "wallet": "AUTO",
+      "description": "flash loan cross-venue arb smoke"
+    },
+    {
+      "id": "noop",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/noop.ts"],
+      "wallet": "AUTO",
+      "baseline": true,
+      "description": "noop baseline"
+    }
+  ]
+}

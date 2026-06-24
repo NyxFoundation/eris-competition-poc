@@ -46,6 +46,14 @@ export const aavePoolAbi = parseAbi([
   "function getUserAccountData(address user) view returns (uint256 totalCollateralBase, uint256 totalDebtBase, uint256 availableBorrowsBase, uint256 currentLiquidationThreshold, uint256 ltv, uint256 healthFactor)",
 ]);
 
+export const aaveAddressesProviderAbi = parseAbi([
+  "function getPoolConfigurator() view returns (address)",
+]);
+
+export const aavePoolConfiguratorAbi = parseAbi([
+  "function setReserveFlashLoaning(address asset, bool enabled)",
+]);
+
 export const aaveDataProviderAbi = parseAbi([
   "function getUserReserveData(address asset, address user) view returns (uint256 currentATokenBalance, uint256 currentStableDebt, uint256 currentVariableDebt, uint256 principalStableDebt, uint256 scaledVariableDebt, uint256 stableBorrowRate, uint256 liquidityRate, uint40 stableRateLastUpdated, bool usageAsCollateralEnabled)",
 ]);
@@ -293,6 +301,31 @@ async function warpPastReserveLastUpdate(ctx: SimContext): Promise<void> {
   await mine(ctx.publicClient);
 }
 
+async function enableLocalFlashLoaning(ctx: SimContext): Promise<void> {
+  if (!ctx.config.localDeploy) return;
+  const configurator = (await ctx.publicClient.readContract({
+    address: AAVE.PoolAddressesProvider,
+    abi: aaveAddressesProviderAbi,
+    functionName: "getPoolConfigurator",
+  })) as Address;
+  for (const asset of [TOKENS.WETH.address, AAVE_STABLE]) {
+    await sendAndMine(
+      ctx.publicClient,
+      ctx.walletClient,
+      ctx.chain,
+      ctx.adminPk,
+      {
+        to: configurator,
+        data: encodeFunctionData({
+          abi: aavePoolConfiguratorAbi,
+          functionName: "setReserveFlashLoaning",
+          args: [asset, true],
+        }),
+      },
+    );
+  }
+}
+
 export const aaveAdapter: ProtocolAdapter = {
   id: "aave",
   stableToken: AAVE_STABLE,
@@ -424,5 +457,9 @@ export const aaveAdapter: ProtocolAdapter = {
 
     ctx.oracle.aaveAggregators[TOKENS.WETH.address.toLowerCase()] = wethAgg;
     ctx.oracle.aaveAggregators[AAVE_STABLE.toLowerCase()] = usdcAgg;
+
+    // eris-app-deployer の shared WETH/USDC reserve は supply/borrow を有効化しているが、
+    // flashloan flag は既定 false のため FlashArb が Aave error 91 で止まる。
+    await enableLocalFlashLoaning(ctx);
   },
 };

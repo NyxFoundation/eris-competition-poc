@@ -433,7 +433,9 @@ test("gmxtrend ベース: 上昇トレンドなら long を open", () => {
 test("fairmm ベース: ポジション無しなら fair 含意 tick 中心に mint", () => {
   const s = getBaseStrategy("fairmm");
   assert.ok(s);
-  const r = runExecutor(s, syntheticObs(), helpers); // pool 1690 < fair 1700
+  const obs = syntheticObs();
+  obs.fairPriceUsdcPerWeth = 1690;
+  const r = runExecutor(s, obs, helpers);
   assert.equal(r.ok, true);
   if (r.ok) {
     assert.equal(r.action.type, "mintLiquidity");
@@ -443,6 +445,16 @@ test("fairmm ベース: ポジション無しなら fair 含意 tick 中心に m
       assert.ok(r.action.tickLower < r.action.tickUpper);
     }
   }
+});
+
+test("fairmm ベース: pool tick が fair レンジ外なら one-sided LP を避ける", () => {
+  const s = getBaseStrategy("fairmm");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.fairPriceUsdcPerWeth = 2200;
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.action.type, "noop");
 });
 
 test("jitlp ベース: 高ボラで mint、低ボラ/履歴不足で noop", () => {
@@ -574,9 +586,17 @@ test("lpyield ベース: LP 無→mint、LP 有+遊休USDC→Aave supply", () =>
   // LP 無し → mint
   const a = syntheticObs();
   a.protocols.aave = emptyAave();
+  a.fairPriceUsdcPerWeth = 1690;
   const ra = runExecutor(s, a, helpers);
   assert.equal(ra.ok, true);
   if (ra.ok) assert.equal(ra.action.type, "mintLiquidity");
+
+  const outOfRange = syntheticObs();
+  outOfRange.protocols.aave = emptyAave();
+  outOfRange.fairPriceUsdcPerWeth = 2200;
+  const rr = runExecutor(s, outOfRange, helpers);
+  assert.equal(rr.ok, true);
+  if (rr.ok) assert.equal(rr.action.type, "noop");
 
   // LP 有り + 遊休 USDC → Aave へ park
   const b = syntheticObs();
@@ -663,7 +683,7 @@ test("flasharb ベース: spread 超 + FLASH_ARB 注入で flashLoanSimple の r
   const s = getBaseStrategy("flasharb");
   assert.ok(s);
   const obs = syntheticObs();
-  obs.protocols.balancer = { priceUsdcPerWeth: 1600 }; // spread ~5.6% > 0.3%
+  obs.protocols.balancer = { priceUsdcPerWeth: 1400 }; // large enough to clear fee/impact guard
   const r = runExecutor(s, obs, helpersFlash);
   assert.equal(r.ok, true);
   if (r.ok) {
@@ -780,7 +800,81 @@ test("lpyield(USDC-only): LP mint 前に WETH 無しなら USDC→WETH swap", ()
   const obs = syntheticObs();
   obs.balances.wethWei = "0";
   obs.protocols.aave = emptyAave();
+  obs.fairPriceUsdcPerWeth = 1690;
   assertUsdcToWethSwap(runExecutor(s, obs, helpers)); // LP 無 → 調達 swap
+});
+
+test("lp(USDC-only): mint 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("lp");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("fairmm(USDC-only): mint 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("fairmm");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.fairPriceUsdcPerWeth = 1690;
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("jitlp(USDC-only): 高ボラ mint 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("jitlp");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.history = Array.from({ length: 14 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: i % 2 === 0 ? 1700 : 1785,
+    fairPriceUsdcPerWeth: i % 2 === 0 ? 1700 : 1785,
+  }));
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("ladder(USDC-only): mint 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("ladder");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("venue(USDC-only): WETH 売り側 gap は残高無しなら避けて USDC 側を選ぶ", () => {
+  const s = getBaseStrategy("venue");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.protocols.uniswap!.pool.priceUsdcPerWeth = 1695; // funded USDC buy
+  obs.protocols.curve = { priceUsdcPerWeth: 1900 }; // larger but unfunded WETH sell
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "swap");
+    if (r.action.type === "swap") assert.equal(r.action.tokenIn, "USDC");
+  }
+});
+
+test("statarb(USDC-only): WETH 売り側 gap は残高無しなら避けて USDC 側を選ぶ", () => {
+  const s = getBaseStrategy("statarb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.history = Array.from({ length: 12 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: i % 2 === 0 ? 1699 : 1701,
+    fairPriceUsdcPerWeth: 1700,
+  }));
+  obs.protocols.uniswap!.pool.priceUsdcPerWeth = 1600; // funded USDC buy
+  obs.protocols.curve = { priceUsdcPerWeth: 1900 }; // larger but unfunded WETH sell
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "swap");
+    if (r.action.type === "swap") assert.equal(r.action.tokenIn, "USDC");
+  }
 });
 
 test("getBaseStrategy: 未知 id / undefined は null", () => {

@@ -173,7 +173,7 @@ function startDirectShim(): void {
   };
 
   const sendBuiltTx = async (
-    tx: { to: Address; data?: Hex; value?: bigint },
+    tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint },
     priorityFeeWei: bigint,
     meta: Record<string, unknown>,
   ): Promise<void> => {
@@ -181,12 +181,33 @@ function startDirectShim(): void {
       const block = await publicClient.getBlock();
       const baseFee = block.baseFeePerGas ?? 0n;
       const nonce = await allocNonce();
+      let gas = tx.gas;
+      if (gas === undefined) {
+        try {
+          const estimated = await publicClient.estimateGas({
+            account: address,
+            to: tx.to,
+            data: tx.data,
+            value: tx.value ?? 0n,
+            maxFeePerGas: baseFee * 2n + priorityFeeWei,
+            maxPriorityFeePerGas: priorityFeeWei,
+          });
+          const bufferBps = BigInt(
+            process.env.ERIS_DIRECT_GAS_BUFFER_BPS ?? "13000",
+          );
+          const buffered = (estimated * bufferBps + 9_999n) / 10_000n;
+          gas = buffered > estimated + 50_000n ? buffered : estimated + 50_000n;
+        } catch {
+          // Let viem/anvil surface the original simulation failure below.
+        }
+      }
       const hash = await walletClient.sendTransaction({
         account,
         chain,
         to: tx.to,
         data: tx.data,
         value: tx.value ?? 0n,
+        gas,
         nonce,
         // baseFee 揺らぎ耐性のため headroom を持たせる（実効 tip は maxPriorityFeePerGas のまま）
         maxFeePerGas: baseFee * 2n + priorityFeeWei,

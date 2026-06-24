@@ -14,6 +14,11 @@ import { buildFlashLoanSimple } from "../lib/flash.js";
 const agentAddress = process.env.ERIS_AGENT_ADDRESS ?? "";
 const SPREAD_THRESHOLD = floatEnv("FLASH_ARB_SPREAD", 0.003); // 30 bps
 const FLASH_USDC = intEnv("FLASH_ARB_USDC", 15000); // フラッシュ借入 USDC(自己資金上限超)
+const UNI_FEE_BPS = floatEnv("FLASH_ARB_UNI_FEE_BPS", 30);
+const BALANCER_FEE_BPS = floatEnv("FLASH_ARB_BALANCER_FEE_BPS", 30);
+const FLASH_PREMIUM_BPS = floatEnv("FLASH_ARB_PREMIUM_BPS", 5);
+const PRICE_IMPACT_BPS = floatEnv("FLASH_ARB_PRICE_IMPACT_BPS", 500);
+const MIN_PROFIT_USDC = floatEnv("FLASH_ARB_MIN_PROFIT_USDC", 5);
 
 const paramsType = [
   {
@@ -47,6 +52,21 @@ rl.on("line", (line) => {
     // WETH が割安な venue で買う。uni < bal → uniswap 買い(mode 0)。else balancer 買い(mode 1)。
     const mode = uni < bal ? 0 : 1;
     const amount = BigInt(FLASH_USDC) * 1_000_000n;
+    const venueRatio = mode === 0 ? bal / uni : uni / bal;
+    const feeHaircut =
+      (1 - UNI_FEE_BPS / 10000) *
+      (1 - BALANCER_FEE_BPS / 10000) *
+      (1 - PRICE_IMPACT_BPS / 10000);
+    const expectedOut = FLASH_USDC * venueRatio * feeHaircut;
+    const owed = FLASH_USDC * (1 + FLASH_PREMIUM_BPS / 10000);
+    const expectedProfit = expectedOut - owed;
+    if (!(expectedProfit >= MIN_PROFIT_USDC)) {
+      out({
+        type: "noop",
+        reason: `flash edge below costs: ${expectedProfit.toFixed(2)} USDC`,
+      });
+      return;
+    }
     // min-out は 0(返済段で利益不足なら atomic revert。sim 内に同 tx の敵対者はいない)。
     const params = encodeAbiParameters(paramsType, [
       {
