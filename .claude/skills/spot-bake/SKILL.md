@@ -59,7 +59,7 @@ tail -3 infra/spot/.current-ami          # 最新が末尾
 ```bash
 set -a; source .env 2>/dev/null; set +a
 ERIS_SPOT_AMI=latest ERIS_SPOT_WATCHDOG_MIN=25 infra/spot/run-spot.sh -- \
-  'SEED=1 ERIS_RUN_BLOCKS=40 ERIS_RUN_SECONDS=90 ENABLED_PROTOCOLS=uniswap,balancer,curve,aave,gmx AGENTS_CONFIG=agents.local.json npm run sim:realtime'
+  'SEED=1 ERIS_RUN_BLOCKS=40 ERIS_RUN_SECONDS=90 ENABLED_PROTOCOLS=uniswap,balancer,curve,aave,gmx AGENTS_CONFIG=agents.all18-mixed.json npm run sim:realtime'
 ```
 
 `exit_code=0` を確認。失敗したら `./runs-spot-*/console.log` で原因切り分け。

@@ -193,7 +193,7 @@ export function loadConfig(env = process.env): SimConfig {
     seed: intEnv(env.SEED, 1),
     runDirRoot: env.REPORT_DIR ?? "./runs",
     agentTimeoutMs: intEnv(env.AGENT_TIMEOUT_MS, 5000),
-    agentsConfigPath: env.AGENTS_CONFIG ?? "agents.local.json",
+    agentsConfigPath: env.AGENTS_CONFIG ?? "agents.all18-mixed.json",
     initialEthWei: bigintEnv(env.INITIAL_ETH_WEI, initialEthWeiDefault),
     // Background orderflow is environment machinery, not a competitor. Give it
     // ample gas so long runs do not silently lose market flow as wallets run dry.

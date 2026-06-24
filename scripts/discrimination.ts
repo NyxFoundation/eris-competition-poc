@@ -43,7 +43,7 @@ import {
   statsFromRunDirs,
 } from "../src/multiSeedRun.js";
 
-process.env.AGENTS_CONFIG ??= "agents.p1.json";
+process.env.AGENTS_CONFIG ??= "agents.all18-mixed.json";
 // 実時間 run の長さはブロック数で固定（ADR 0005 §1）。
 process.env.ERIS_RUN_BLOCKS ??= "60";
 process.env.ERIS_RUN_SECONDS ??= "0";

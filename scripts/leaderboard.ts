@@ -15,7 +15,7 @@ console.error(
 );
 
 process.env.ROUNDS ??= "128";
-process.env.AGENTS_CONFIG ??= "agents.leaderboard.json";
+process.env.AGENTS_CONFIG ??= "agents.all18-mixed.json";
 
 type SummaryAgent = {
   id: string;

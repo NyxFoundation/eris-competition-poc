@@ -16,7 +16,7 @@
 import { aggregateAgents } from "../src/discrimination.js";
 import { collectReplicationStats, parseRegimes } from "../src/multiSeedRun.js";
 
-process.env.AGENTS_CONFIG ??= "agents.evolve.json";
+process.env.AGENTS_CONFIG ??= "agents.all18-mixed.json";
 // 実時間 run の長さはブロック数で固定（標準値は ADR 0005「決めていないこと」: 実測で再較正）。
 process.env.ERIS_RUN_BLOCKS ??= "60";
 // runSeconds の途中打ち切りで run 長が wall-clock 依存にぶれないよう、ブロック数のみで終了する。
