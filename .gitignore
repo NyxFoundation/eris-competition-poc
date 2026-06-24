@@ -14,3 +14,7 @@ probe_tmp.mts
 
 # ローカルデプロイモードの snapshot ID
 .local-snapshot
+
+# spot runner のローカル状態（アカウント固有）
+infra/spot/.current-ami
+runs-spot-*/
