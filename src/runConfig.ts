@@ -42,6 +42,23 @@ export const SECRET_ENV_KEYS = [
 ] as const;
 
 export const DEFAULT_CONFIG_PATH = "eris.config.yaml";
+// コミット済みの雛形。eris.config.yaml が無いときの zero-config 既定（env config 読取は廃止したため、
+// env ではなくこの YAML へフォールバックする）。
+export const EXAMPLE_CONFIG_PATH = "eris.config.example.yaml";
+
+// 設定ファイルの解決順: --config > ERIS_CONFIG > eris.config.yaml > eris.config.example.yaml。
+// 最初に存在するものを返す（無ければ undefined）。
+function resolveConfigPathOrUndefined(argv: string[]): string | undefined {
+  const i = argv.indexOf("--config");
+  const explicit = i >= 0 && argv[i + 1] ? argv[i + 1] : undefined;
+  const candidates = [
+    explicit,
+    process.env.ERIS_CONFIG,
+    DEFAULT_CONFIG_PATH,
+    EXAMPLE_CONFIG_PATH,
+  ].filter((p): p is string => typeof p === "string" && p.length > 0);
+  return candidates.find((p) => existsSync(p));
+}
 
 // YAML 値 → env 文字列。loadConfig の各パーサが受け取る形へ正規化する。
 //   boolean        → "1" / "0"（loadConfig は `=== "1"` で真偽判定）
@@ -107,14 +124,12 @@ export function loadRunConfig(
   return { config, agents, configPath: path, source };
 }
 
-// 解決される設定ファイルパス（存在すれば）。--config > ERIS_CONFIG > 既定 の順。
+// 解決される設定ファイルパス（存在すれば）。--config > ERIS_CONFIG > eris.config.yaml >
+// eris.config.example.yaml の順。
 export function currentConfigPath(
   argv: string[] = process.argv,
 ): string | undefined {
-  const i = argv.indexOf("--config");
-  const explicit = i >= 0 && argv[i + 1] ? argv[i + 1] : undefined;
-  const path = explicit ?? process.env.ERIS_CONFIG ?? DEFAULT_CONFIG_PATH;
-  return existsSync(path) ? path : undefined;
+  return resolveConfigPathOrUndefined(argv);
 }
 
 // 評価ツールが自分のセクション（evaluate / discrimination / gate 等）を読むための raw YAML doc。
@@ -148,8 +163,9 @@ export function parseCliFlags(
   return out;
 }
 
-// CLI/coordinator 用の入口。`--config <path>` を argv から拾い、YAML があれば YAML 駆動、
-// 無ければ env フォールバック（移行期の後方互換）。
+// CLI/coordinator 用の入口。設定は YAML 一本化（env config 読取は廃止）。解決順は
+// --config > ERIS_CONFIG > eris.config.yaml > eris.config.example.yaml。いずれも無ければ
+// 明示エラー（env へはフォールバックしない）。
 export function resolveRunInputs(
   argv: string[] = process.argv,
   overrides: Record<string, string | number | boolean> = {},
@@ -158,19 +174,12 @@ export function resolveRunInputs(
   agents: AgentSpec[];
   configPath?: string;
 } {
-  const flagIdx = argv.indexOf("--config");
-  const explicit =
-    flagIdx >= 0 && argv[flagIdx + 1] ? argv[flagIdx + 1] : undefined;
-  const envPath = process.env.ERIS_CONFIG;
-  const path = explicit ?? envPath ?? DEFAULT_CONFIG_PATH;
-  if (existsSync(path)) {
-    const r = loadRunConfig(path, overrides);
-    return { config: r.config, agents: r.agents, configPath: r.configPath };
-  }
-  if (explicit || envPath) throw new Error(`config file not found: ${path}`);
-  // YAML 不在: 旧来の env 駆動にフォールバック（移行期）。overrides は env の上に重ねる。
-  const source: NodeJS.ProcessEnv = { ...process.env };
-  for (const [k, v] of Object.entries(overrides)) source[k] = toEnvString(v);
-  const config = loadConfig(source);
-  return { config, agents: loadAgents(config.agentsConfigPath) };
+  const path = resolveConfigPathOrUndefined(argv);
+  if (!path)
+    throw new Error(
+      `no config file found. cp ${EXAMPLE_CONFIG_PATH} ${DEFAULT_CONFIG_PATH} ` +
+        `(または --config <path> を指定)。設定は YAML 一本化済み（env からの設定読取は廃止）。`,
+    );
+  const r = loadRunConfig(path, overrides);
+  return { config: r.config, agents: r.agents, configPath: r.configPath };
 }
