@@ -180,11 +180,18 @@ type SubmittedMeta = {
 // ための floor（~数十 tx ぶん）。最終的な endowment 値は較正実測で決める（ADR「決めていないこと」）。
 const MIN_ECONOMIC_GAS_ETH_WEI = 500_000_000_000_000_000n; // 0.5 ETH
 
-export async function runRealtimeSimulation(): Promise<void> {
+export async function runRealtimeSimulation(
+  // 評価ツールが per-regime SEED 等をプログラム的に差し込む（env を mutate しない）。
+  overrides: Record<string, string | number | boolean> = {},
+): Promise<void> {
   // ADR 0013: 設定は YAML（eris.config.yaml / --config）を単一ソースに解決する。YAML が無ければ
   // 旧来の env 駆動にフォールバックする（移行期）。configPath は子プロセスへ伝播し、direct モードの
   // agent（directShim）が同じ YAML から config を再構築できるようにする。
-  const { config, agents: agentSpecs, configPath } = resolveRunInputs();
+  const {
+    config,
+    agents: agentSpecs,
+    configPath,
+  } = resolveRunInputs(process.argv, overrides);
   if (configPath) process.env.ERIS_CONFIG = configPath;
   const adapters = initProtocols(config.enabledProtocols);
   const enabledIds = adapters.map((a) => a.id);

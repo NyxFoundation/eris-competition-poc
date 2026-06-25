@@ -109,7 +109,10 @@ export function loadRunConfig(
 
 // CLI/coordinator 用の入口。`--config <path>` を argv から拾い、YAML があれば YAML 駆動、
 // 無ければ env フォールバック（移行期の後方互換）。
-export function resolveRunInputs(argv: string[] = process.argv): {
+export function resolveRunInputs(
+  argv: string[] = process.argv,
+  overrides: Record<string, string | number | boolean> = {},
+): {
   config: SimConfig;
   agents: AgentSpec[];
   configPath?: string;
@@ -120,11 +123,13 @@ export function resolveRunInputs(argv: string[] = process.argv): {
   const envPath = process.env.ERIS_CONFIG;
   const path = explicit ?? envPath ?? DEFAULT_CONFIG_PATH;
   if (existsSync(path)) {
-    const r = loadRunConfig(path);
+    const r = loadRunConfig(path, overrides);
     return { config: r.config, agents: r.agents, configPath: r.configPath };
   }
   if (explicit || envPath) throw new Error(`config file not found: ${path}`);
-  // YAML 不在: 旧来の env 駆動にフォールバック（移行期。最終的には YAML 一本化）。
-  const config = loadConfig();
+  // YAML 不在: 旧来の env 駆動にフォールバック（移行期）。overrides は env の上に重ねる。
+  const source: NodeJS.ProcessEnv = { ...process.env };
+  for (const [k, v] of Object.entries(overrides)) source[k] = toEnvString(v);
+  const config = loadConfig(source);
   return { config, agents: loadAgents(config.agentsConfigPath) };
 }
