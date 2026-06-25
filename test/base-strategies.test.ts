@@ -137,6 +137,18 @@ test("arb ベース: gap が小さければ noop", () => {
   if (r.ok) assert.equal(r.action.type, "noop");
 });
 
+// ADR 0013: base 非依存化。WBTC 等を選ぶ multi-asset 経路は registry に WBTC が必要なため
+// （parseAction が registry 検証する）、ERIS_LOCAL_DEPLOY=1 の統合検証スクリプトで確認する
+// （scripts/verify-multiasset-strategies）。ここでは WETH のみ観測で base 無し＝byte 互換のみ検証する。
+test("arb(WETH のみ観測): base フィールドを付けない（byte 互換）", () => {
+  const s = getBaseStrategy("arb");
+  assert.ok(s);
+  const r = runExecutor(s, syntheticObs(), helpers);
+  assert.equal(r.ok, true);
+  if (r.ok && r.action.type === "swap")
+    assert.equal((r.action as { base?: string }).base, undefined);
+});
+
 test("lp ベース: ポジションが無ければ tick 整列したレンジを mint", () => {
   const s = getBaseStrategy("lp");
   assert.ok(s);

@@ -26,6 +26,10 @@ export type MarketView = {
   venues: AgentVenue[];
   // base 在庫（base units, decimal string）。WETH は balances.wethWei、他は baseBalances[base]。
   baseBalanceWei: string;
+  // base の decimals（WETH=18 / WBTC=8）。base 量 ⇔ USD/quote 換算に使う。
+  baseDecimals: number;
+  // base-input swap の per-round 上限（base units, decimal string）。"0" = 上限なし（balance bound）。
+  maxSwapInBaseWei: string;
 };
 
 const QUOTE = "USDC";
@@ -72,7 +76,19 @@ export function marketViews(obs: AgentObservation): MarketView[] {
       base === "WETH"
         ? obs.balances.wethWei
         : (obs.baseBalances?.[base] ?? "0");
-    views.push({ base, fair, venues, baseBalanceWei });
+    const baseDecimals = obs.baseDecimals?.[base] ?? 18;
+    const maxSwapInBaseWei =
+      base === "WETH"
+        ? obs.limits.maxWethInWei
+        : (obs.limits.baseLimits?.[base]?.maxSwapInBaseWei ?? "0");
+    views.push({
+      base,
+      fair,
+      venues,
+      baseBalanceWei,
+      baseDecimals,
+      maxSwapInBaseWei,
+    });
   }
   return views;
 }

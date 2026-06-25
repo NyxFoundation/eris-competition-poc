@@ -40,7 +40,7 @@ import type {
   TxIntent,
   WalletRole,
 } from "./types.js";
-import { baseTokens } from "./markets.js";
+import { baseTokens, tokenInfo } from "./markets.js";
 import { enabledAdapters, initProtocols } from "./protocols/registry.js";
 import type { FlowKind, FlowWallet, SimContext } from "./protocols/types.js";
 import { updateOracles } from "./protocols/oracles.js";
@@ -625,6 +625,13 @@ export async function observationFor(
           ),
         }
       : {}),
+    // ADR 0013: 各 base の decimals。プロセス分離 agent の base 量換算用（WETH のみなら {WETH:18}）。
+    baseDecimals: Object.fromEntries(
+      Object.keys(ctx.fairPrices ?? { WETH: fairPrice }).map((b) => [
+        b,
+        tokenInfo(b).decimals,
+      ]),
+    ),
     enabledProtocols: enabledIds,
     balances: {
       ethWei: balances.ethWei.toString(),
@@ -653,9 +660,43 @@ export async function observationFor(
       maxGmxSizeUsd: config.maxGmxSizeUsd.toString(),
       maxAaveSupplyWethWei: config.maxAaveSupplyWethWei.toString(),
       maxAaveBorrowUsdcUnits: config.maxAaveBorrowUsdcUnits.toString(),
+      // ADR 0013: per-base 上限を露出。WETH は既存値、追加 base は config の per-base マップ（既定 0）。
+      baseLimits: buildBaseLimits(config),
     },
     protocols,
   };
+}
+
+// ADR 0013: base シンボル -> per-round 上限のマップを config から組む。WETH は既存の WETH 専用
+// 上限を流用し（byte 互換）、追加 base は MAX_AGENT/MAX_LP/MAX_AAVE_SUPPLY の per-base 値（既定 0）。
+function buildBaseLimits(
+  config: SimConfig,
+): NonNullable<AgentObservation["limits"]["baseLimits"]> {
+  const out: NonNullable<AgentObservation["limits"]["baseLimits"]> = {};
+  const bases = new Set<string>([
+    "WETH",
+    ...Object.keys(config.maxAgentBaseIn),
+    ...Object.keys(config.maxLpBase),
+    ...Object.keys(config.maxAaveSupplyBase),
+  ]);
+  for (const base of bases) {
+    const maxSwap =
+      base === "WETH"
+        ? config.maxAgentWethInWei
+        : (config.maxAgentBaseIn[base] ?? 0n);
+    const maxLp =
+      base === "WETH" ? config.maxLpWethWei : (config.maxLpBase[base] ?? 0n);
+    const maxAave =
+      base === "WETH"
+        ? config.maxAaveSupplyWethWei
+        : (config.maxAaveSupplyBase[base] ?? 0n);
+    out[base] = {
+      maxSwapInBaseWei: maxSwap.toString(),
+      maxLpBaseWei: maxLp.toString(),
+      maxAaveSupplyBaseWei: maxAave.toString(),
+    };
+  }
+  return out;
 }
 
 // orderflow bot プロセスに FlowContext を渡して FlowOrder[] を受け取り、TxIntent に変換する。

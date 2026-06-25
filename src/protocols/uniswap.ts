@@ -734,16 +734,24 @@ function validate(
     const market = marketFor("uniswap", base);
     if (!market) return { ok: false, reason: `no uniswap market for ${base}` };
     const inIsBase = action.tokenIn === market.base;
-    // WETH market は従来の per-round limit を維持。WBTC 等は balance チェックのみ（limits は Phase 8）。
-    if (base === "WETH") {
-      const maxAllowed = inIsBase
-        ? BigInt(obs.limits.maxWethInWei)
-        : BigInt(obs.limits.maxUsdcInUnits);
-      if (amountIn > maxAllowed)
+    // ADR 0013: per-round 上限を全 base で適用。base-input 側は per-base 上限（WETH=maxWethInWei、
+    // 追加 base は limits.baseLimits[base]。"0"=上限なし=balance bound）。quote-input 側は共有の
+    // maxUsdcInUnits。WETH は maxWethInWei が常に >0 なので従来と同一挙動（byte 互換）。
+    if (inIsBase) {
+      const maxBaseIn =
+        base === "WETH"
+          ? BigInt(obs.limits.maxWethInWei)
+          : BigInt(obs.limits.baseLimits?.[base]?.maxSwapInBaseWei ?? "0");
+      if (maxBaseIn > 0n && amountIn > maxBaseIn)
         return {
           ok: false,
           reason: "amountIn exceeds configured per-round limit",
         };
+    } else if (amountIn > BigInt(obs.limits.maxUsdcInUnits)) {
+      return {
+        ok: false,
+        reason: "amountIn exceeds configured per-round limit",
+      };
     }
     const balance = inIsBase
       ? (balances.bases?.[market.base] ?? balances.wethWei)
@@ -770,16 +778,20 @@ function validate(
     ) {
       return { ok: false, reason: "ticks must align to pool tick spacing" };
     }
-    if (base === "WETH") {
-      if (
-        baseAmt > BigInt(obs.limits.maxLpWethWei) ||
-        quoteAmt > BigInt(obs.limits.maxLpUsdcUnits)
-      )
-        return {
-          ok: false,
-          reason: "LP desired amounts exceed configured LP limits",
-        };
-    }
+    // ADR 0013: LP 上限を全 base で適用。base 側は per-base 上限（WETH=maxLpWethWei、追加 base は
+    // limits.baseLimits[base]。"0"=上限なし）。quote 側は共有の maxLpUsdcUnits。WETH は byte 互換。
+    const maxLpBase =
+      base === "WETH"
+        ? BigInt(obs.limits.maxLpWethWei)
+        : BigInt(obs.limits.baseLimits?.[base]?.maxLpBaseWei ?? "0");
+    if (
+      (maxLpBase > 0n && baseAmt > maxLpBase) ||
+      quoteAmt > BigInt(obs.limits.maxLpUsdcUnits)
+    )
+      return {
+        ok: false,
+        reason: "LP desired amounts exceed configured LP limits",
+      };
     const baseBal = balances.bases?.[base] ?? balances.wethWei;
     if (
       baseAmt > baseBal ||

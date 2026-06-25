@@ -187,12 +187,18 @@ function validate(
     if (a.type === "aaveSupply") {
       if (amount > assetBalance())
         return { ok: false, reason: "supply amount exceeds balance" };
-      // WETH supply は従来の per-round limit を維持。新 base は balance チェックのみ（limits は Phase 8）。
-      if (
-        a.asset === "WETH" &&
-        amount > BigInt(obs.limits.maxAaveSupplyWethWei)
-      )
-        return { ok: false, reason: "supply exceeds configured WETH limit" };
+      // ADR 0013: supply 上限を全 base で適用。WETH=maxAaveSupplyWethWei、追加 base は
+      // limits.baseLimits[asset]（"0"=上限なし）。stable asset には supply 上限を課さない（従来どおり）。
+      if (a.asset !== AAVE_STABLE_SYMBOL) {
+        const maxSupply =
+          a.asset === "WETH"
+            ? BigInt(obs.limits.maxAaveSupplyWethWei)
+            : BigInt(
+                obs.limits.baseLimits?.[a.asset]?.maxAaveSupplyBaseWei ?? "0",
+              );
+        if (maxSupply > 0n && amount > maxSupply)
+          return { ok: false, reason: "supply exceeds configured limit" };
+      }
     }
     if (a.type === "aaveRepay") {
       if (amount > assetBalance())

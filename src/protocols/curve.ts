@@ -176,16 +176,23 @@ function validate(
   const market = marketFor("curve", base);
   if (!market) return { ok: false, reason: `no curve market for ${base}` };
   const inIsBase = action.tokenIn === market.base;
-  // WETH market は従来の per-round limit を維持。WBTC 等は balance チェックのみ（limits は Phase 8）。
-  if (base === "WETH") {
-    const maxAllowed = inIsBase
-      ? BigInt(obs.limits.maxWethInWei)
-      : BigInt(obs.limits.maxUsdcInUnits);
-    if (amountIn > maxAllowed)
+  // ADR 0013: per-round 上限を全 base で適用。base 側は per-base 上限（WETH=maxWethInWei、追加 base は
+  // limits.baseLimits[base]。"0"=上限なし）。quote 側は共有 maxUsdcInUnits。WETH は byte 互換。
+  if (inIsBase) {
+    const maxBaseIn =
+      base === "WETH"
+        ? BigInt(obs.limits.maxWethInWei)
+        : BigInt(obs.limits.baseLimits?.[base]?.maxSwapInBaseWei ?? "0");
+    if (maxBaseIn > 0n && amountIn > maxBaseIn)
       return {
         ok: false,
         reason: "amountIn exceeds configured per-round limit",
       };
+  } else if (amountIn > BigInt(obs.limits.maxUsdcInUnits)) {
+    return {
+      ok: false,
+      reason: "amountIn exceeds configured per-round limit",
+    };
   }
   const balance = inIsBase
     ? (balances.bases?.[market.base] ?? balances.wethWei)

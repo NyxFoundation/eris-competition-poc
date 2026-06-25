@@ -294,6 +294,9 @@ export type AgentObservation = {
   // 既存戦略は未参照でも動く（後方互換）。WBTC を見る戦略だけ参照する。
   fairPricesUsd?: Record<TokenSymbol, number>;
   baseBalances?: Record<TokenSymbol, string>;
+  // ADR 0013: base シンボル -> decimals（WETH=18 / WBTC=8）。プロセス分離した agent が base 量を
+  // 単位換算するのに使う（agent は tokenInfo を呼べないため observation 経由で渡す）。
+  baseDecimals?: Record<TokenSymbol, number>;
   markets?: string[];
   enabledProtocols: ProtocolId[];
   balances: {
@@ -325,6 +328,17 @@ export type AgentObservation = {
     maxGmxSizeUsd: string;
     maxAaveSupplyWethWei: string;
     maxAaveBorrowUsdcUnits: string;
+    // ADR 0013: base シンボル -> per-round 上限（base units, decimal string）。WETH は上の
+    // maxWethInWei 等と同値で互換維持。追加 base（WBTC 等）の上限はここに載る。"0" = 上限なし
+    // （balance bound）。base 非依存の agent は base 売りサイズをこの値で頭打ちにできる。
+    baseLimits?: Record<
+      TokenSymbol,
+      {
+        maxSwapInBaseWei: string;
+        maxLpBaseWei: string;
+        maxAaveSupplyBaseWei: string;
+      }
+    >;
   };
   protocols: ProtocolObservations;
   // 競争シグナル（ADR 0011。economicGas で priority-fee オークションを実力化する観測）。
