@@ -17,7 +17,12 @@ import {
 import { RunLogger } from "../logger.js";
 import { valueUsdc } from "../pnl.js";
 import { checkRunFeeViolations } from "../postRunCheck.js";
-import { nextFairPrice, Rng } from "../rng.js";
+import {
+  nextFairPrice,
+  ouParamsForSymbol,
+  priceRngForAsset,
+  Rng,
+} from "../rng.js";
 import type {
   AgentAction,
   AgentObservation,
@@ -40,10 +45,12 @@ import {
   writeAaveOraclesStorage,
 } from "../protocols/oracles.js";
 import { GMX_MARKETS } from "../constants.js";
+import { baseTokens, gmxMarketAddresses, tokenInfo } from "../markets.js";
 import {
   buildFlowContext,
   flowOrdersToIntents,
   initialFairPrice,
+  initialFairPriceFor,
   observationFor,
   requestFlowIntents,
   submitIntent,
@@ -55,8 +62,10 @@ import { RealtimeAgentProcess } from "./agentProcess.js";
 import { RealtimeFlowProcess } from "./flowProcess.js";
 import {
   deployPriceFeed,
+  updatePriceFeedForMempool,
   updatePriceFeedMempool,
   writePriceFeedStorage,
+  writePriceFeedStorageFor,
 } from "./priceFeed.js";
 import { reconstructValueSeries } from "./reconstruct.js";
 import { EventSchedule } from "./events.js";
@@ -291,7 +300,7 @@ export async function runRealtimeSimulation(): Promise<void> {
     adminPk,
     keeperPk,
     oracle: { aaveAggregators: {} },
-    gmx: { market: GMX_MARKETS.ETH_USD },
+    gmx: { market: GMX_MARKETS.ETH_USD, markets: gmxMarketAddresses() },
     pendingGmxOrders: [],
     flowWallet(protocol: ProtocolId, kind: FlowKind): FlowWallet {
       const w = flowWalletMap.get(`${protocol}:${kind}`);
@@ -730,6 +739,20 @@ export async function runRealtimeSimulation(): Promise<void> {
     let baseFair = latestFairPrice; // OU 状態。イベントで触らない。
     // 平均回帰価格モデルの中心（競争開始時の base fair price）。run を通して固定。
     const fairAnchor = baseFair;
+    // ADR 0013: 追加 base（WBTC 等）の独立 OU 価格。各 base は専用 Rng で進むため WETH の価格
+    // パスは不変（fork 既定では extraBaseSymbols=[] → 完全に従来と一致＝byte 互換）。
+    const extraBaseSymbols = baseTokens()
+      .map((t) => t.symbol)
+      .filter((s) => s !== "WETH");
+    const extraPriceRng: Record<string, Rng> = {};
+    const extraBaseFair: Record<string, number> = {};
+    const extraAnchor: Record<string, number> = {};
+    for (const b of extraBaseSymbols) {
+      extraPriceRng[b] = priceRngForAsset(config.seed, b);
+      const p0 = await initialFairPriceFor(ctx, b, enabledIds);
+      extraBaseFair[b] = p0;
+      extraAnchor[b] = p0;
+    }
     const schedule = new EventSchedule(
       config.stressEvents,
       config.seed,
@@ -814,6 +837,18 @@ export async function runRealtimeSimulation(): Promise<void> {
           baseFair = nextFairPrice(baseFair, rng, fairAnchor);
           const overlay = schedule.at(blockIndex);
           latestFairPrice = baseFair * overlay.wethMult;
+          // ADR 0013: 追加 base を独立 Rng で進め、effective を ctx.fairPrices に配布する。
+          const fairPrices: Record<string, number> = { WETH: latestFairPrice };
+          for (const b of extraBaseSymbols) {
+            extraBaseFair[b] = nextFairPrice(
+              extraBaseFair[b],
+              extraPriceRng[b],
+              extraAnchor[b],
+              ouParamsForSymbol(b),
+            );
+            fairPrices[b] = extraBaseFair[b] * (overlay.baseMults[b] ?? 1);
+          }
+          ctx.fairPrices = fairPrices;
 
           // keeper / oracle 書込 / state+flow は相互に独立（ウォレットも別）なので並列に走らせる。
           // tx の記録（blocks.csv）はループから外し、run 後に一括走査する（logBlock 参照）。
@@ -863,6 +898,15 @@ export async function runRealtimeSimulation(): Promise<void> {
                     priorityFeeWei: oracleFee,
                   });
                 }
+                for (const b of extraBaseSymbols) {
+                  await writePriceFeedStorageFor(
+                    publicClient,
+                    priceFeedAddress,
+                    tokenInfo(b).address,
+                    fairPrices[b],
+                    BigInt(bn),
+                  );
+                }
                 return;
               }
               const feedHash = await updatePriceFeedMempool(
@@ -877,6 +921,21 @@ export async function runRealtimeSimulation(): Promise<void> {
                 priorityFeeWei: oracleFee,
                 actionType: "priceFeedUpdate",
               });
+              for (const b of extraBaseSymbols) {
+                const extraHash = await updatePriceFeedForMempool(
+                  ctx,
+                  priceFeedAddress,
+                  tokenInfo(b).address,
+                  fairPrices[b],
+                  oracleFee,
+                );
+                submittedByHash.set(extraHash.toLowerCase(), {
+                  ownerId: "oracle",
+                  role: "system",
+                  priorityFeeWei: oracleFee,
+                  actionType: "priceFeedUpdate",
+                });
+              }
               const oracleHashes = await updateOraclesMempool(
                 ctx,
                 latestFairPrice,

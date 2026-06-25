@@ -6,6 +6,7 @@ import {
   type PublicClient,
 } from "viem";
 import { AAVE, TOKENS, stableBalanceOf } from "../constants.js";
+import { marketsFor, tokenInfo } from "../markets.js";
 import {
   accountAddress,
   fundWallet,
@@ -83,11 +84,26 @@ export const mockAggregatorAbi = parseAbi([
   "function latestAnswer() view returns (int256)",
 ]);
 
-// Aave は native USDC を reserve に使う
+// Aave は native USDC を reserve（決済 stable）に使う。
 const AAVE_STABLE = TOKENS.USDC.address;
+const AAVE_STABLE_SYMBOL: TokenSymbol = "USDC";
 
+// aave で有効な base シンボル群（MARKET_LEGS.aave 由来。fork 既定では WETH のみ）。
+function aaveBaseSymbols(): TokenSymbol[] {
+  return marketsFor("aave").map((m) => m.base);
+}
+
+// 我々が読み書きする reserve のシンボル群（有効 base + 決済 stable）。
+// fork 既定では [WETH, USDC]（従来と一致）。
+function aaveReserveSymbols(): TokenSymbol[] {
+  return [...aaveBaseSymbols(), AAVE_STABLE_SYMBOL];
+}
+
+// シンボル -> reserve アドレス。stable は native USDC、それ以外は registry のアドレス。
 function aaveAsset(symbol: TokenSymbol): Address {
-  return symbol === "WETH" ? TOKENS.WETH.address : AAVE_STABLE;
+  return symbol === AAVE_STABLE_SYMBOL
+    ? AAVE_STABLE
+    : tokenInfo(symbol).address;
 }
 
 type AaveActionType =
@@ -115,15 +131,24 @@ function requireAmount(
   return value;
 }
 
+// asset を有効 base / 決済 stable のシンボルとして受理する。fork 既定では WETH/USDC のみ。
+function parseAsset(value: unknown): TokenSymbol {
+  if (typeof value !== "string")
+    throw new Error("asset must be a token symbol string");
+  const allowed = new Set(aaveReserveSymbols());
+  if (!allowed.has(value))
+    throw new Error(`asset must be one of ${[...allowed].join(", ")}`);
+  return value;
+}
+
 function parse(obj: Record<string, unknown>): LeafAction | null {
   const type = obj.type;
   if (typeof type !== "string" || !AAVE_TYPES.includes(type as AaveActionType))
     return null;
-  if (obj.asset !== "WETH" && obj.asset !== "USDC")
-    throw new Error("asset must be WETH or USDC");
+  const asset = parseAsset(obj.asset);
   const allowMax = type === "aaveWithdraw" || type === "aaveRepay";
   const amount = requireAmount(obj.amount, "amount", allowMax);
-  const action = { type, asset: obj.asset, amount } as unknown as LeafAction;
+  const action = { type, asset, amount } as unknown as LeafAction;
   if (obj.maxPriorityFeePerGasWei !== undefined) {
     if (
       typeof obj.maxPriorityFeePerGasWei !== "string" ||
@@ -151,16 +176,18 @@ function validate(
     asset: TokenSymbol;
     amount: string;
   };
+  // stable は USDC 相当の合算残高、base は bases マップ（WETH は wethWei と同値で互換）。
+  const assetBalance = (): bigint =>
+    a.asset === AAVE_STABLE_SYMBOL
+      ? stableBalanceOf(balances, AAVE_STABLE)
+      : (balances.bases?.[a.asset] ?? balances.wethWei);
   if (a.amount !== "max") {
     const amount = BigInt(a.amount);
     if (amount <= 0n) return { ok: false, reason: "amount must be positive" };
     if (a.type === "aaveSupply") {
-      const bal =
-        a.asset === "WETH"
-          ? balances.wethWei
-          : stableBalanceOf(balances, AAVE_STABLE);
-      if (amount > bal)
+      if (amount > assetBalance())
         return { ok: false, reason: "supply amount exceeds balance" };
+      // WETH supply は従来の per-round limit を維持。新 base は balance チェックのみ（limits は Phase 8）。
       if (
         a.asset === "WETH" &&
         amount > BigInt(obs.limits.maxAaveSupplyWethWei)
@@ -168,11 +195,7 @@ function validate(
         return { ok: false, reason: "supply exceeds configured WETH limit" };
     }
     if (a.type === "aaveRepay") {
-      const bal =
-        a.asset === "WETH"
-          ? balances.wethWei
-          : stableBalanceOf(balances, AAVE_STABLE);
-      if (amount > bal)
+      if (amount > assetBalance())
         return { ok: false, reason: "repay amount exceeds balance" };
     }
     if (
@@ -290,11 +313,13 @@ async function reserveLastUpdate(
 const AAVE_WARP_BUFFER_SECONDS = 3600n; // 1h。発火時に dt>0 を安定させる余裕。
 const LOCAL_FLASH_LIQUIDITY_USDC_UNITS = 100_000n * 10n ** 6n;
 async function warpPastReserveLastUpdate(ctx: SimContext): Promise<void> {
-  const [wethUpdate, usdcUpdate] = await Promise.all([
-    reserveLastUpdate(ctx.publicClient, TOKENS.WETH.address),
-    reserveLastUpdate(ctx.publicClient, AAVE_STABLE),
-  ]);
-  const maxUpdate = wethUpdate > usdcUpdate ? wethUpdate : usdcUpdate;
+  // 有効 reserve（fork 既定では [WETH, USDC]）の lastUpdate を読み、その最大を超える。
+  const updates = await Promise.all(
+    aaveReserveSymbols().map((sym) =>
+      reserveLastUpdate(ctx.publicClient, aaveAsset(sym)),
+    ),
+  );
+  const maxUpdate = updates.reduce((m, u) => (u > m ? u : m), 0n);
   const now = (await ctx.publicClient.getBlock()).timestamp;
   if (now > maxUpdate) return; // dt>0 済み（健全なフォークブロック）→ 何もしない
   await increaseTime(
@@ -311,7 +336,8 @@ async function enableLocalFlashLoaning(ctx: SimContext): Promise<void> {
     abi: aaveAddressesProviderAbi,
     functionName: "getPoolConfigurator",
   })) as Address;
-  for (const asset of [TOKENS.WETH.address, AAVE_STABLE]) {
+  // 有効 reserve（fork 既定では [WETH, USDC]）の flashloan flag を有効化。
+  for (const sym of aaveReserveSymbols()) {
     await sendAndMine(
       ctx.publicClient,
       ctx.walletClient,
@@ -322,7 +348,7 @@ async function enableLocalFlashLoaning(ctx: SimContext): Promise<void> {
         data: encodeFunctionData({
           abi: aavePoolConfiguratorAbi,
           functionName: "setReserveFlashLoaning",
-          args: [asset, true],
+          args: [aaveAsset(sym), true],
         }),
       },
     );
@@ -349,27 +375,34 @@ async function seedLocalFlashLoanLiquidity(ctx: SimContext): Promise<void> {
     0n,
     missing,
   );
-  await sendAndMine(ctx.publicClient, ctx.walletClient, ctx.chain, ctx.adminPk, {
-    to: AAVE_STABLE,
-    data: encodeFunctionData({
-      abi: erc20Abi,
-      functionName: "approve",
-      args: [AAVE.Pool, missing],
-    }),
-  });
-  await sendAndMine(ctx.publicClient, ctx.walletClient, ctx.chain, ctx.adminPk, {
-    to: AAVE.Pool,
-    data: encodeFunctionData({
-      abi: aavePoolAbi,
-      functionName: "supply",
-      args: [
-        AAVE_STABLE,
-        missing,
-        accountAddress(ctx.adminPk),
-        0,
-      ],
-    }),
-  });
+  await sendAndMine(
+    ctx.publicClient,
+    ctx.walletClient,
+    ctx.chain,
+    ctx.adminPk,
+    {
+      to: AAVE_STABLE,
+      data: encodeFunctionData({
+        abi: erc20Abi,
+        functionName: "approve",
+        args: [AAVE.Pool, missing],
+      }),
+    },
+  );
+  await sendAndMine(
+    ctx.publicClient,
+    ctx.walletClient,
+    ctx.chain,
+    ctx.adminPk,
+    {
+      to: AAVE.Pool,
+      data: encodeFunctionData({
+        abi: aavePoolAbi,
+        functionName: "supply",
+        args: [AAVE_STABLE, missing, accountAddress(ctx.adminPk), 0],
+      }),
+    },
+  );
 }
 
 export const aaveAdapter: ProtocolAdapter = {
@@ -384,15 +417,20 @@ export const aaveAdapter: ProtocolAdapter = {
   },
 
   async observe(ctx, _state, agent): Promise<AaveObservation> {
-    const [account, weth, usdc, poolUsdc] = await Promise.all([
+    // 有効 reserve（fork 既定では [WETH, USDC]）ごとに supplied/borrowed を読む。
+    const reserveSymbols = aaveReserveSymbols();
+    const [account, reserves, poolUsdc] = await Promise.all([
       ctx.publicClient.readContract({
         address: AAVE.Pool,
         abi: aavePoolAbi,
         functionName: "getUserAccountData",
         args: [agent],
       }) as Promise<readonly bigint[]>,
-      userReserve(ctx.publicClient, TOKENS.WETH.address, agent),
-      userReserve(ctx.publicClient, AAVE_STABLE, agent),
+      Promise.all(
+        reserveSymbols.map((sym) =>
+          userReserve(ctx.publicClient, aaveAsset(sym), agent),
+        ),
+      ),
       ctx.publicClient.readContract({
         address: AAVE_STABLE,
         abi: erc20Abi,
@@ -400,19 +438,19 @@ export const aaveAdapter: ProtocolAdapter = {
         args: [AAVE.Pool],
       }) as Promise<bigint>,
     ]);
+    const supplied: Partial<Record<TokenSymbol, string>> = {};
+    const borrowed: Partial<Record<TokenSymbol, string>> = {};
+    reserveSymbols.forEach((sym, i) => {
+      supplied[sym] = reserves[i].supplied.toString();
+      borrowed[sym] = reserves[i].borrowed.toString();
+    });
     return {
       healthFactor: account[5].toString(),
       totalCollateralBase: account[0].toString(),
       totalDebtBase: account[1].toString(),
       availableBorrowsBase: account[2].toString(),
-      supplied: {
-        WETH: weth.supplied.toString(),
-        USDC: usdc.supplied.toString(),
-      },
-      borrowed: {
-        WETH: weth.borrowed.toString(),
-        USDC: usdc.borrowed.toString(),
-      },
+      supplied,
+      borrowed,
       poolLiquidity: {
         USDC: poolUsdc.toString(),
       },
@@ -437,10 +475,17 @@ export const aaveAdapter: ProtocolAdapter = {
   },
 
   async setupWallet(): Promise<BuiltTx[]> {
-    return [
-      approveTx(TOKENS.WETH.address, AAVE.Pool),
-      approveTx(AAVE_STABLE, AAVE.Pool),
-    ];
+    // 有効 reserve（fork 既定では [WETH, USDC]）を Pool に approve。重複は排除。
+    const seen = new Set<string>();
+    const txs: BuiltTx[] = [];
+    for (const sym of aaveReserveSymbols()) {
+      const token = aaveAsset(sym);
+      const key = token.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      txs.push(approveTx(token, AAVE.Pool));
+    }
+    return txs;
   },
 
   async setupGlobal(ctx: SimContext): Promise<void> {
@@ -448,24 +493,25 @@ export const aaveAdapter: ProtocolAdapter = {
     // フォークの時刻ズレを補正（負の dt による利息計算アンダーフローを防ぐ）。
     // 以降の setup / ラウンドループでの Aave 読取が常に有効になる。
     await warpPastReserveLastUpdate(ctx);
-    // 現在の Aave オラクル価格を初期値にして mock を差し込む（連続性のため）
-    const [wethUsd8, usdcUsd8] = (await Promise.all([
-      ctx.publicClient.readContract({
-        address: AAVE.AaveOracle,
-        abi: aaveOracleAbi,
-        functionName: "getAssetPrice",
-        args: [TOKENS.WETH.address],
-      }),
-      ctx.publicClient.readContract({
-        address: AAVE.AaveOracle,
-        abi: aaveOracleAbi,
-        functionName: "getAssetPrice",
-        args: [AAVE_STABLE],
-      }),
-    ])) as [bigint, bigint];
-
-    const wethAgg = await deployContract(ctx, "MockAggregator", [wethUsd8]);
-    const usdcAgg = await deployContract(ctx, "MockAggregator", [usdcUsd8]);
+    // 有効 reserve（fork 既定では [WETH, USDC]）ごとに、現在の Aave オラクル価格を初期値にして
+    // mock aggregator を差し込む（連続性のため）。順序は aaveReserveSymbols() に従う。
+    const reserveSymbols = aaveReserveSymbols();
+    const reserveAssets = reserveSymbols.map(aaveAsset);
+    const currentPrices = (await Promise.all(
+      reserveAssets.map((asset) =>
+        ctx.publicClient.readContract({
+          address: AAVE.AaveOracle,
+          abi: aaveOracleAbi,
+          functionName: "getAssetPrice",
+          args: [asset],
+        }),
+      ),
+    )) as bigint[];
+    const aggregators = await Promise.all(
+      currentPrices.map((price) =>
+        deployContract(ctx, "MockAggregator", [price]),
+      ),
+    );
 
     // POOL_ADMIN 付与（必要時）
     const isAdmin = (await ctx.publicClient.readContract({
@@ -491,7 +537,7 @@ export const aaveAdapter: ProtocolAdapter = {
       );
     }
 
-    // setAssetSources で mock に差し替え
+    // setAssetSources で mock に差し替え（有効 reserve をまとめて差し替え）
     await sendAndMine(
       ctx.publicClient,
       ctx.walletClient,
@@ -502,16 +548,14 @@ export const aaveAdapter: ProtocolAdapter = {
         data: encodeFunctionData({
           abi: aaveOracleAbi,
           functionName: "setAssetSources",
-          args: [
-            [TOKENS.WETH.address, AAVE_STABLE],
-            [wethAgg, usdcAgg],
-          ],
+          args: [reserveAssets, aggregators],
         }),
       },
     );
 
-    ctx.oracle.aaveAggregators[TOKENS.WETH.address.toLowerCase()] = wethAgg;
-    ctx.oracle.aaveAggregators[AAVE_STABLE.toLowerCase()] = usdcAgg;
+    reserveAssets.forEach((asset, i) => {
+      ctx.oracle.aaveAggregators[asset.toLowerCase()] = aggregators[i];
+    });
 
     // eris-app-deployer の shared WETH/USDC reserve は supply/borrow を有効化しているが、
     // flashloan flag は既定 false のため FlashArb が Aave error 91 で止まる。

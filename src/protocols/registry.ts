@@ -1,5 +1,5 @@
 import type { Address } from "viem";
-import { setActiveStables } from "../chain.js";
+import { setActiveBases, setActiveStables } from "../chain.js";
 import type { LeafAction, ProtocolId } from "../types.js";
 import type { ProtocolAdapter } from "./types.js";
 import { uniswapAdapter } from "./uniswap.js";
@@ -7,6 +7,7 @@ import { balancerAdapter } from "./balancer.js";
 import { curveAdapter } from "./curve.js";
 import { aaveAdapter } from "./aave.js";
 import { gmxAdapter } from "./gmx.js";
+import { activeBaseSymbols, tokenInfo } from "../markets.js";
 
 // 全 adapter（実装済みのみ登録）。フェーズ進行に伴い追加する。
 const ALL_ADAPTERS: ProtocolAdapter[] = [
@@ -48,6 +49,11 @@ export function initProtocols(ids: ProtocolId[]): ProtocolAdapter[] {
   const adapters = enabledAdapters();
   setActiveStables(
     adapters.map((a) => a.stableToken).filter((t): t is Address => Boolean(t)),
+  );
+  // ADR 0013: 有効 protocol の base（WETH + 追加 base）を ACTIVE_BASES に登録。getBalances が
+  // 全 base 残高を読み、観測(baseBalances)・採点に入る。fork 既定は [WETH]（従来と一致）。
+  setActiveBases(
+    activeBaseSymbols(enabledIds).map((s) => tokenInfo(s).address),
   );
   return adapters;
 }

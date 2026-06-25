@@ -1,4 +1,5 @@
 import type { Address } from "viem";
+import type { MarketLegs, TokenSymbol } from "./types.js";
 import { LOCAL_DEPLOYMENT } from "./constants.local.js";
 
 // ---------------------------------------------------------------------------
@@ -14,18 +15,23 @@ const L = process.env.ERIS_LOCAL_DEPLOY === "1" ? LOCAL_DEPLOYMENT : null;
 
 export const CHAIN_ID = L?.CHAIN_ID ?? 42161;
 
-export type TokenSymbol = "WETH" | "USDC";
+// TokenSymbol は types.ts の単一定義（=string、ADR 0013）に統一。constants 経由で import
+// している既存箇所のため re-export する。
+export type { TokenSymbol };
 
-export const TOKENS = L?.TOKENS ?? {
-  WETH: {
-    address: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1" as Address,
-    decimals: 18,
-  },
-  USDC: {
-    address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address,
-    decimals: 6,
-  },
-};
+// ADR 0013: トークンレジストリ。Record<symbol,...> 型注釈で TokenSymbol(=string) による
+// インデックスアクセスを許可する。local-deploy では WBTC 等が overlay で増える。
+export const TOKENS: Record<string, { address: Address; decimals: number }> =
+  L?.TOKENS ?? {
+    WETH: {
+      address: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1" as Address,
+      decimals: 18,
+    },
+    USDC: {
+      address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address,
+      decimals: 6,
+    },
+  };
 
 // stable 統一会計: native USDC / USDC.e / USDT(USD₮0) をすべて $1・6 桁の「USDC 相当」とみなす。
 // Arbitrum では Balancer/Curve の深い WETH/stable プールが USDC.e / USDT ペアのため、
@@ -156,6 +162,43 @@ export const AAVE = L?.AAVE ?? {
   AclAdmin: "0xFF1137243698CaA18EE364Cc966CF0e02A4e6327" as Address,
   AclManager: "0xa72636CbcAa8F5FF95B2cc47F3CDEe83F3294a0B" as Address,
   PoolDataProvider: "0x243Aa95cAC2a25651eda86e80bEe66114413c43b" as Address,
+};
+
+// ---------------------------------------------------------------------------
+// market leg レジストリ（ADR 0013）。protocol × base ごとの venue 固有 leg。
+// fork 既定は WETH/USDC のみ（既存の venue 定数から構築）。local-deploy では
+// genLocalConstants が WBTC 等を加えた MARKET_LEGS を overlay する（L?.MARKET_LEGS）。
+// markets.ts がこれを MarketConfig へ組み立て、adapter が回す。新トークンは leg 追加で増える。
+// ---------------------------------------------------------------------------
+export const MARKET_LEGS: MarketLegs = L?.MARKET_LEGS ?? {
+  uniswap: {
+    WETH: {
+      pool: UNISWAP.poolWethUsdc500,
+      fee: UNISWAP.fee,
+      tickSpacing: UNISWAP.tickSpacing,
+    },
+  },
+  balancer: {
+    WETH: {
+      poolId: BALANCER.poolId,
+      tokens: BALANCER.tokens,
+      stable: BALANCER.usdcToken,
+    },
+  },
+  curve: {
+    WETH: {
+      pool: CURVE.pool,
+      baseIndex: CURVE.wethIndex,
+      quoteIndex: CURVE.usdtIndex,
+      stable: CURVE.usdcToken,
+    },
+  },
+  gmx: {
+    WETH: { market: GMX_MARKETS.ETH_USD },
+  },
+  aave: {
+    WETH: {},
+  },
 };
 
 // ---------------------------------------------------------------------------

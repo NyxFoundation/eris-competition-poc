@@ -614,6 +614,16 @@ export async function observationFor(
     agentAddress,
     fairPriceUsdcPerWeth: fairPrice,
     oraclePrices: { wethUsd: fairPrice, usdcUsd: 1 },
+    // ADR 0013: 全 base の USD 価格・残高。WETH のみのとき fairPricesUsd={WETH:fairPrice} で
+    // 既存フィールドと一致（後方互換）。WBTC を見る戦略だけ参照する。
+    fairPricesUsd: ctx.fairPrices ?? { WETH: fairPrice },
+    ...(balances.bases
+      ? {
+          baseBalances: Object.fromEntries(
+            Object.entries(balances.bases).map(([k, v]) => [k, v.toString()]),
+          ),
+        }
+      : {}),
     enabledProtocols: enabledIds,
     balances: {
       ethWei: balances.ethWei.toString(),
@@ -817,6 +827,23 @@ export async function initialFairPrice(
     return getPoolPriceUsdcPerWeth(ctx.publicClient);
   }
   return 3000;
+}
+
+// ADR 0013: 追加 base（WBTC 等）の初期 fair price。uniswap の当該 market pool 価格を採用し、
+// 無ければ既定（WBTC=60000）。WETH は従来の initialFairPrice にフォールバック。
+export async function initialFairPriceFor(
+  ctx: SimContext,
+  base: string,
+  enabledIds: ProtocolId[],
+): Promise<number> {
+  if (base === "WETH") return initialFairPrice(ctx, enabledIds);
+  if (enabledIds.includes("uniswap")) {
+    const { getPoolState } = await import("./protocols/uniswap.js");
+    const s = await getPoolState(ctx.publicClient);
+    const m = s.markets.find((ms) => ms.market.base === base);
+    if (m) return m.priceUsdcPerWeth;
+  }
+  return base === "WBTC" ? 60000 : 3000;
 }
 
 function uniswapPoolPrice(

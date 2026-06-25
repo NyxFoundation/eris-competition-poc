@@ -1,4 +1,6 @@
-import type { AgentAction, AgentObservation } from "../types.js";
+import type { AgentAction, AgentObservation, TokenSymbol } from "../types.js";
+import { tokenDecimals } from "../constants.js";
+import { kindOf } from "../markets.js";
 
 export type RoundRecord = {
   round: number;
@@ -202,12 +204,15 @@ function actionNotionalUsd(action: AgentAction, obs: AgentObservation): number {
 }
 
 function tokenAmountUsd(
-  token: "WETH" | "USDC",
+  token: TokenSymbol,
   amount: string,
   obs: AgentObservation,
 ): number {
-  if (token === "USDC") return unitsToNumber(amount, 6);
-  return unitsToNumber(amount, 18) * obs.fairPriceUsdcPerWeth;
+  // notional 概算（行動ログ用）。stable は decimals そのまま、base は decimals×fair。
+  // base の正確な per-asset 価格は Phase 6 で obs.fairPricesUsd 対応（現状は WETH 価格で概算）。
+  const decimals = tokenDecimals(token);
+  if (kindOf(token) === "stable") return unitsToNumber(amount, decimals);
+  return unitsToNumber(amount, decimals) * obs.fairPriceUsdcPerWeth;
 }
 
 function unitsToNumber(amount: string, decimals: number): number {

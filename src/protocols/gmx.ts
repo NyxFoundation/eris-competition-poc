@@ -13,6 +13,8 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { GMX, GMX_MARKETS, TOKENS, stableBalanceOf } from "../constants.js";
+import { marketFor, marketsFor, tokenInfo } from "../markets.js";
+import { baseFairPrice } from "./marketHelpers.js";
 import {
   accountAddress,
   increaseTime,
@@ -25,6 +27,7 @@ import type {
   AgentObservation,
   BalanceSnapshot,
   GmxObservation,
+  GmxPositionObservation,
   LeafAction,
   TokenSymbol,
 } from "../types.js";
@@ -338,6 +341,38 @@ function gmxCollateral(symbol: TokenSymbol): Address {
   return symbol === "WETH" ? TOKENS.WETH.address : TOKENS.USDC.address;
 }
 
+// action の base（既定 WETH）から index market アドレスを解決する。
+// fork 既定（ctx.gmx.markets 未設定・WETH 1 market）では常に ctx.gmx.market を返し、
+// 従来挙動と byte 一致する。WBTC 等は ctx.gmx.markets / MARKET_LEGS から解決。
+function resolveGmxMarket(ctx: SimContext, base: TokenSymbol): Address {
+  if (base === "WETH") return ctx.gmx.markets?.WETH ?? ctx.gmx.market;
+  return (
+    ctx.gmx.markets?.[base] ??
+    marketFor("gmx", base)?.gmx?.market ??
+    ctx.gmx.market
+  );
+}
+
+// 全 gmx market の (base, market アドレス) を列挙する。fork 既定では WETH 1 件。
+// ctx.gmx.markets が設定済みならそれを優先（base -> market）、無ければ MARKET_LEGS から導出。
+function gmxMarketEntries(
+  ctx: SimContext,
+): Array<{ base: TokenSymbol; market: Address }> {
+  if (ctx.gmx.markets && Object.keys(ctx.gmx.markets).length > 0) {
+    return Object.entries(ctx.gmx.markets).map(([base, market]) => ({
+      base,
+      market,
+    }));
+  }
+  const entries = marketsFor("gmx")
+    .filter((m) => m.gmx)
+    .map((m) => ({ base: m.base, market: m.gmx!.market }));
+  // WETH market は ctx.gmx.market（setupGlobal が確定したアドレス）を一次情報にして互換維持。
+  return entries.map((e) =>
+    e.base === "WETH" ? { base: e.base, market: ctx.gmx.market } : e,
+  );
+}
+
 function looseAcceptablePrice(isLong: boolean, isIncrease: boolean): bigint {
   // long増加 / short減少: price <= acceptable を満たすため max
   // short増加 / long減少: price >= acceptable を満たすため 0
@@ -497,12 +532,17 @@ function parse(obj: Record<string, unknown>): LeafAction | null {
   if (obj.collateral !== "WETH" && obj.collateral !== "USDC")
     throw new Error("collateral must be WETH or USDC");
   requireDecimalString(obj.sizeDeltaUsd, "sizeDeltaUsd");
+  // index market の base（既定 WETH = ETH/USD。ADR 0013）。WETH 以外は market が必要。
+  const base = typeof obj.base === "string" ? obj.base : "WETH";
+  if (base !== "WETH" && !marketFor("gmx", base)?.gmx)
+    throw new Error(`gmx: no market for base "${base}"`);
   const action = {
     type: obj.type,
     isLong: obj.isLong,
     collateral: obj.collateral,
     sizeDeltaUsd: obj.sizeDeltaUsd,
   } as Record<string, unknown>;
+  if (base !== "WETH") action.base = base;
   if (obj.type === "gmxIncrease") {
     requireDecimalString(obj.collateralAmount, "collateralAmount");
     action.collateralAmount = obj.collateralAmount;
@@ -562,31 +602,96 @@ function validate(
   return { ok: true };
 }
 
-async function getEthUsdPosition(
+// account の全 position を 1 回読む（market 走査の元データ）。
+async function getAccountPositions(
   publicClient: PublicClient,
   account: Address,
-): Promise<Position | undefined> {
-  const positions = (await publicClient.readContract({
+): Promise<Position[]> {
+  return (await publicClient.readContract({
     address: GMX.Reader,
     abi: readerAbi,
     functionName: "getAccountPositions",
     args: [GMX.DataStore, account, 0n, 50n],
   })) as unknown as Position[];
-  return positions.find(
-    (p) =>
-      p.addresses.market.toLowerCase() === GMX_MARKETS.ETH_USD.toLowerCase(),
-  );
 }
 
-function positionPnlUsd(p: Position, markPrice: number): number {
+// 指定 market アドレスの「建っている」position を取り出す（sizeInUsd>0）。
+// sizeInUsd===0 は実質ポジション無しとして undefined を返す（従来の observe/value 挙動と一致）。
+function positionForMarket(
+  positions: readonly Position[],
+  market: Address,
+): Position | undefined {
+  const p = positions.find(
+    (q) => q.addresses.market.toLowerCase() === market.toLowerCase(),
+  );
+  return p && p.numbers.sizeInUsd !== 0n ? p : undefined;
+}
+
+// base の index トークン decimals（sizeInTokens のスケール）。既定 WETH=18 で従来と一致。
+function baseDecimals(base: TokenSymbol): number {
+  return tokenInfo(base).decimals;
+}
+
+function positionPnlUsd(
+  p: Position,
+  markPrice: number,
+  base: TokenSymbol = "WETH",
+): number {
   if (p.numbers.sizeInTokens === 0n) return 0;
-  const sizeTokens = Number(p.numbers.sizeInTokens) / 1e18;
+  const sizeTokens = Number(p.numbers.sizeInTokens) / 10 ** baseDecimals(base);
   const entryPrice =
     Number(p.numbers.sizeInUsd) / FLOAT_PRECISION_NUM / sizeTokens;
   const diff = markPrice - entryPrice;
   return (p.flags.isLong ? diff : -diff) * sizeTokens;
 }
 const FLOAT_PRECISION_NUM = 1e30;
+
+// position の USD 評価（担保 + PnL）。markPrice は index base の価格、wethPrice は WETH 担保
+// 評価用の WETH 価格（WETH market では markPrice と同値）。collateral が WETH なら WETH 価格、
+// USDC なら $1 換算。fork 既定（WETH market・WETH 担保・1e18）では従来式と byte 一致する
+// （markPrice===wethPrice なので (collateralAmount/1e18)*markPrice と一致）。
+function positionValueUsd(
+  p: Position,
+  markPrice: number,
+  base: TokenSymbol,
+  wethPrice: number,
+): number {
+  if (p.numbers.sizeInUsd === 0n) return 0;
+  const collateralUsd =
+    p.addresses.collateralToken.toLowerCase() ===
+    TOKENS.WETH.address.toLowerCase()
+      ? (Number(p.numbers.collateralAmount) / 1e18) * wethPrice
+      : Number(p.numbers.collateralAmount) / 1e6;
+  return collateralUsd + positionPnlUsd(p, markPrice, base);
+}
+
+// Position -> GmxPositionObservation。entryPrice / pnl は base decimals で一般化。
+// 既定 WETH（18 decimals）では従来式と byte 一致する。
+function gmxPositionObservation(
+  p: Position,
+  markPrice: number,
+  base: TokenSymbol,
+): GmxPositionObservation {
+  const sizeTokens = Number(p.numbers.sizeInTokens) / 10 ** baseDecimals(base);
+  const entryPrice =
+    sizeTokens > 0
+      ? Number(p.numbers.sizeInUsd) / FLOAT_PRECISION_NUM / sizeTokens
+      : 0;
+  const collateral: TokenSymbol =
+    p.addresses.collateralToken.toLowerCase() ===
+    TOKENS.WETH.address.toLowerCase()
+      ? "WETH"
+      : "USDC";
+  return {
+    isLong: p.flags.isLong,
+    sizeUsd: p.numbers.sizeInUsd.toString(),
+    sizeInTokens: p.numbers.sizeInTokens.toString(),
+    collateral,
+    collateralAmount: p.numbers.collateralAmount.toString(),
+    entryPriceUsd: entryPrice,
+    pnlUsd: positionPnlUsd(p, markPrice, base),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // 歴史ブロック再構成（ADR 0006 §4）: blockNumber 指定 multicall で使う読取記述子と、
@@ -602,21 +707,17 @@ export function gmxAccountPositionsCall(account: Address) {
   } as const;
 }
 
+// 後方互換シグネチャ（reconstruct が import）。WETH(ETH/USD) market のみ markPrice で評価する。
+// WBTC 等の市場は reconstruct が WETH 価格しか渡せないため当面評価対象外（後続 Phase で対応）。
 export function gmxEthUsdPositionValueUsd(
   positions: readonly Position[] | undefined,
   markPrice: number,
 ): number {
-  const pos = positions?.find(
-    (p) =>
-      p.addresses.market.toLowerCase() === GMX_MARKETS.ETH_USD.toLowerCase(),
-  );
-  if (!pos || pos.numbers.sizeInUsd === 0n) return 0;
-  const collateralUsd =
-    pos.addresses.collateralToken.toLowerCase() ===
-    TOKENS.WETH.address.toLowerCase()
-      ? (Number(pos.numbers.collateralAmount) / 1e18) * markPrice
-      : Number(pos.numbers.collateralAmount) / 1e6;
-  return collateralUsd + positionPnlUsd(pos, markPrice);
+  const pos = positions
+    ? positionForMarket(positions, GMX_MARKETS.ETH_USD)
+    : undefined;
+  if (!pos) return 0;
+  return positionValueUsd(pos, markPrice, "WETH", markPrice);
 }
 
 export const gmxAdapter: ProtocolAdapter = {
@@ -631,35 +732,39 @@ export const gmxAdapter: ProtocolAdapter = {
   },
 
   async observe(ctx, _state, agent, fairPrice): Promise<GmxObservation> {
-    const pos = await getEthUsdPosition(ctx.publicClient, agent);
-    if (!pos || pos.numbers.sizeInUsd === 0n)
-      return { marketPriceUsd: fairPrice };
-    const sizeTokens = Number(pos.numbers.sizeInTokens) / 1e18;
-    const entryPrice =
-      sizeTokens > 0
-        ? Number(pos.numbers.sizeInUsd) / FLOAT_PRECISION_NUM / sizeTokens
-        : 0;
-    const collateral: TokenSymbol =
-      pos.addresses.collateralToken.toLowerCase() ===
-      TOKENS.WETH.address.toLowerCase()
-        ? "WETH"
-        : "USDC";
-    return {
+    const positions = await getAccountPositions(ctx.publicClient, agent);
+    // WETH(ETH/USD) market は従来どおりトップレベルに載せる（byte 互換）。
+    const wethMarketAddr = resolveGmxMarket(ctx, "WETH");
+    const wethPos = positionForMarket(positions, wethMarketAddr);
+    const obs: GmxObservation = {
       marketPriceUsd: fairPrice,
-      position: {
-        isLong: pos.flags.isLong,
-        sizeUsd: pos.numbers.sizeInUsd.toString(),
-        sizeInTokens: pos.numbers.sizeInTokens.toString(),
-        collateral,
-        collateralAmount: pos.numbers.collateralAmount.toString(),
-        entryPriceUsd: entryPrice,
-        pnlUsd: positionPnlUsd(pos, fairPrice),
-      },
+      ...(wethPos
+        ? { position: gmxPositionObservation(wethPos, fairPrice, "WETH") }
+        : {}),
     };
+
+    // WETH 以外の index market（WBTC 等）を markets に追加。fork 既定では空。
+    const extra: Record<
+      string,
+      { marketPriceUsd: number; position?: GmxPositionObservation }
+    > = {};
+    for (const { base, market } of gmxMarketEntries(ctx)) {
+      if (base === "WETH") continue;
+      const price = baseFairPrice(ctx, base, fairPrice);
+      const pos = positionForMarket(positions, market);
+      const key = marketFor("gmx", base)?.key ?? `${base}/USDC`;
+      extra[key] = {
+        marketPriceUsd: price,
+        ...(pos ? { position: gmxPositionObservation(pos, price, base) } : {}),
+      };
+    }
+    if (Object.keys(extra).length > 0) obs.markets = extra;
+    return obs;
   },
 
   async buildTxs(ctx, owner, action): Promise<BuiltTx[]> {
-    return [buildOrderTx(owner, ctx.gmx.market, action)];
+    const base = (action as { base?: TokenSymbol }).base ?? "WETH";
+    return [buildOrderTx(owner, resolveGmxMarket(ctx, base), action)];
   },
 
   // 競争ブロックで作成された注文を keeper が約定する
@@ -791,14 +896,19 @@ export const gmxAdapter: ProtocolAdapter = {
   },
 
   async valueUsdc(ctx, agent, _state, fairPrice): Promise<number> {
-    const pos = await getEthUsdPosition(ctx.publicClient, agent);
-    if (!pos || pos.numbers.sizeInUsd === 0n) return 0;
-    const collateralUsd =
-      pos.addresses.collateralToken.toLowerCase() ===
-      TOKENS.WETH.address.toLowerCase()
-        ? (Number(pos.numbers.collateralAmount) / 1e18) * fairPrice
-        : Number(pos.numbers.collateralAmount) / 1e6;
-    return collateralUsd + positionPnlUsd(pos, fairPrice);
+    const positions = await getAccountPositions(ctx.publicClient, agent);
+    const wethPrice = baseFairPrice(ctx, "WETH", fairPrice);
+    // 全 gmx market の position 価値を当該 base の fair price で合算する。
+    // fork 既定（WETH 1 market）では従来式と byte 一致（markPrice=wethPrice=fairPrice）。
+    let total = 0;
+    for (const { base, market } of gmxMarketEntries(ctx)) {
+      const pos = positionForMarket(positions, market);
+      if (!pos) continue;
+      const markPrice =
+        base === "WETH" ? wethPrice : baseFairPrice(ctx, base, fairPrice);
+      total += positionValueUsd(pos, markPrice, base, wethPrice);
+    }
+    return total;
   },
 
   async setupWallet(): Promise<BuiltTx[]> {
@@ -952,6 +1062,25 @@ export const gmxAdapter: ProtocolAdapter = {
           args: [TOKENS.USDC.address, toGmxPrice(1, 6), toGmxPrice(1, 6)],
         }),
       });
+      // ADR 0013: 追加 base（WBTC 等）の index token も更新する。fork 既定では
+      // ctx.gmx.markets が未設定 or WETH のみ → このループは空で従来と byte 一致。
+      // 価格は ctx.fairPrices[base]、無ければ fairPrice（WETH 価格）へフォールバック。
+      for (const { base } of gmxMarketEntries(c)) {
+        if (base === "WETH") continue; // 上で更新済み
+        const info = tokenInfo(base);
+        await send({
+          to: mock,
+          data: encodeFunctionData({
+            abi: mockOracleProviderAbi,
+            functionName: "setPrice",
+            args: [
+              info.address,
+              toGmxPrice(baseFairPrice(c, base, fairPrice), info.decimals),
+              toGmxPrice(baseFairPrice(c, base, fairPrice), info.decimals),
+            ],
+          }),
+        });
+      }
     };
   },
 };

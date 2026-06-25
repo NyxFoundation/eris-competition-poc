@@ -50,7 +50,14 @@ export interface SimContext {
   adminPk: Hex;
   keeperPk: Hex;
   oracle: OracleHandles;
-  gmx: { mockProvider?: Address; market: Address };
+  gmx: {
+    mockProvider?: Address;
+    market: Address; // WETH(ETH/USD) market。後方互換で残す（= markets["WETH"]）。
+    markets?: Record<string, Address>; // ADR 0013: base -> GMX market（WBTC 等）
+  };
+  // ADR 0013: 全 base の fair price（USD）。未設定または WETH のみのとき adapter は単一 fairPrice に
+  // フォールバックする。WBTC market を扱う adapter は ctx.fairPrices?.[base] を使う。
+  fairPrices?: Record<string, number>;
   // 競争ブロックで作成された GMX 注文キー（keeper ブロックで実行）
   pendingGmxOrders: Hex[];
   // GMX mock オラクル更新（gmx.setupGlobal が設定。oracles.updateOracles から呼ぶ）

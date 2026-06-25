@@ -7,10 +7,14 @@
 //   - スナップショット位相に同期する指標ハックが原理上不可能
 // 出力は events.jsonl への observation 形イベント（inventory.valueUsdc = 総価値）。
 // readPerRoundValues（evaluate / gate / discrimination）が無改修で読める。
+//
+// ADR 0013: 追加 base（WBTC 等）の spot 残高・LP も採点する。fork 既定（base=WETH のみ）では
+// 追加読取が無く従来と完全一致（byte 互換）。
 import type { Address, PublicClient } from "viem";
 import { parseAbi } from "viem";
 import { erc20Abi, poolAbi } from "../abis.js";
 import { AAVE, MULTICALL3, TOKENS, UNISWAP } from "../constants.js";
+import { baseTokens, marketsFor, tokenInfo } from "../markets.js";
 import type { RunLogger } from "../logger.js";
 import { valueUsdc } from "../pnl.js";
 import { aavePoolAbi } from "../protocols/aave.js";
@@ -19,7 +23,7 @@ import {
   gmxEthUsdPositionValueUsd,
 } from "../protocols/gmx.js";
 import {
-  lpPositionValueUsdc,
+  lpPositionValueUsdcMulti,
   poolPriceUsdcPerWethFromSqrtX96,
 } from "../protocols/uniswap.js";
 import type { ProtocolId } from "../types.js";
@@ -59,6 +63,7 @@ type MulticallContract = {
 
 // 1 agent あたりの断面 multicall 読取本数（インデックス計算用）。
 function perAgentReads(opts: {
+  extraBaseCount: number;
   activeStables: Address[];
   hasUniswap: boolean;
   hasAave: boolean;
@@ -67,6 +72,7 @@ function perAgentReads(opts: {
   return (
     1 + // ETH
     1 + // WETH
+    opts.extraBaseCount + // 追加 base 残高（WBTC 等）
     opts.activeStables.length +
     (opts.hasAave ? 1 : 0) +
     (opts.hasGmx ? 1 : 0) +
@@ -122,7 +128,14 @@ export async function readValueSnapshotAtBlock(opts: {
     });
   };
 
+  // ADR 0013: 追加 base（WETH 以外）と uniswap の全 market。fork 既定では空 / WETH のみ。
+  const extraBases = baseTokens()
+    .map((t) => t.symbol)
+    .filter((s) => s !== "WETH");
+  const uniMarkets = hasUniswap ? marketsFor("uniswap") : [];
+
   const perAgent = perAgentReads({
+    extraBaseCount: extraBases.length,
     activeStables,
     hasUniswap,
     hasAave,
@@ -130,6 +143,7 @@ export async function readValueSnapshotAtBlock(opts: {
   });
 
   const blockNumber = BigInt(opts.blockNumber);
+  // head: [WETH 価格(latestAnswer), 追加 base 価格(answerOf)…, uniswap 各 market slot0…]
   const head: MulticallContract[] = [
     {
       address: priceFeed,
@@ -137,13 +151,23 @@ export async function readValueSnapshotAtBlock(opts: {
       functionName: "latestAnswer",
     },
   ];
-  if (hasUniswap) {
+  for (const b of extraBases) {
     head.push({
-      address: UNISWAP.poolWethUsdc500,
+      address: priceFeed,
+      abi: priceFeedAbi,
+      functionName: "answerOf",
+      args: [tokenInfo(b).address],
+    });
+  }
+  const uniHeadBase = head.length; // uniswap slot0 群の開始 index
+  for (const m of uniMarkets) {
+    head.push({
+      address: m.uniswap!.pool,
       abi: poolAbi,
       functionName: "slot0",
     });
   }
+
   const contracts: MulticallContract[] = [...head];
   for (const agent of agents) {
     contracts.push(
@@ -159,6 +183,12 @@ export async function readValueSnapshotAtBlock(opts: {
         functionName: "balanceOf",
         args: [agent.address],
       },
+      ...extraBases.map((b) => ({
+        address: tokenInfo(b).address,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [agent.address],
+      })),
       ...activeStables.map((token) => ({
         address: token,
         abi: erc20Abi,
@@ -187,13 +217,23 @@ export async function readValueSnapshotAtBlock(opts: {
 
   const results = await call(contracts, blockNumber);
   const fairPrice = fromPriceFeedAnswer((results[0] as bigint) ?? 0n);
-  const slot0 = hasUniswap
-    ? (results[1] as readonly [bigint, number] | undefined)
-    : undefined;
-  const tick = slot0 ? Number(slot0[1]) : 0;
-  const poolPriceUsdcPerWeth = slot0
-    ? poolPriceUsdcPerWethFromSqrtX96(slot0[0])
-    : null;
+  // 全 base の USD 価格（WETH=latestAnswer, 追加 base=answerOf）。
+  const fairByBase: Record<string, number> = { WETH: fairPrice };
+  extraBases.forEach((b, i) => {
+    fairByBase[b] = fromPriceFeedAnswer((results[1 + i] as bigint) ?? 0n);
+  });
+
+  // uniswap 各 market の tick（LP 採点用）。WETH market の slot0 から後方互換の poolPrice。
+  const tickByPool: Record<string, number> = {};
+  let poolPriceUsdcPerWeth: number | null = null;
+  uniMarkets.forEach((m, i) => {
+    const s = results[uniHeadBase + i] as readonly [bigint, number] | undefined;
+    if (!s) return;
+    tickByPool[m.uniswap!.pool.toLowerCase()] = Number(s[1]);
+    if (m.base === "WETH") {
+      poolPriceUsdcPerWeth = poolPriceUsdcPerWethFromSqrtX96(s[0]);
+    }
+  });
 
   // LP 列挙（第 2/3 段 multicall）: NFT を持つ agent の tokenId → positions を引く
   const lpValueByAgent = new Map<string, number>();
@@ -226,10 +266,10 @@ export async function readValueSnapshotAtBlock(opts: {
       owners.forEach(({ agent }, j) => {
         const pos = positions[j];
         if (!pos || tokenIds[j] === undefined) return;
-        const value = lpPositionValueUsdc(
-          pos as Parameters<typeof lpPositionValueUsdc>[0],
-          tick,
-          fairPrice,
+        const value = lpPositionValueUsdcMulti(
+          pos as Parameters<typeof lpPositionValueUsdcMulti>[0],
+          tickByPool,
+          fairByBase,
         );
         lpValueByAgent.set(
           agent.id,
@@ -245,11 +285,13 @@ export async function readValueSnapshotAtBlock(opts: {
     let idx = head.length + i * perAgent;
     const ethWei = (results[idx++] as bigint) ?? 0n;
     const wethWei = (results[idx++] as bigint) ?? 0n;
+    const bases: Record<string, bigint> = { WETH: wethWei };
+    for (const b of extraBases) bases[b] = (results[idx++] as bigint) ?? 0n;
     let usdcUnits = 0n;
     for (let s = 0; s < activeStables.length; s++) {
       usdcUnits += (results[idx++] as bigint) ?? 0n;
     }
-    let total = valueUsdc({ ethWei, wethWei, usdcUnits }, fairPrice);
+    let total = valueUsdc({ ethWei, wethWei, usdcUnits, bases }, fairByBase);
     if (hasAave) {
       const account = results[idx++] as readonly bigint[] | undefined;
       if (account) total += Number(account[0] - account[1]) / 1e8;

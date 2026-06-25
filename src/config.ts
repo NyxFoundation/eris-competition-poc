@@ -6,6 +6,7 @@ import {
   MAX_BUNDLE_ACTIONS,
 } from "./constants.js";
 import type { AgentSpec, AgentsFile, ProtocolId } from "./types.js";
+import { baseTokens } from "./markets.js";
 import {
   parseStressEvents,
   type StressEventConfig,
@@ -92,6 +93,10 @@ export type SimConfig = {
   initialEthWei: bigint;
   flowEthWei: bigint;
   initialWethWei: bigint;
+  // ADR 0013: base シンボル -> 初期配布量（token units）。WETH は initialWethWei と同値で
+  // 互換維持。追加 base は INITIAL_<SYM>_<UNIT>（例 INITIAL_WBTC_SATS）で読み、未指定は 0
+  // （USDC-only 方針 = 追加 base は既定で配らない）。fork 既定（WETH のみ）では {WETH:...} の 1 件。
+  initialBaseAmounts: Record<string, bigint>;
   initialUsdcUnits: bigint;
   defaultPriorityFeeWei: bigint;
   maxPriorityFeeWei: bigint;
@@ -103,15 +108,25 @@ export type SimConfig = {
   economicGas: boolean;
   maxAgentWethInWei: bigint;
   maxAgentUsdcInUnits: bigint;
+  // ADR 0013: base シンボル -> per-round swap 上限（token units）。WETH は maxAgentWethInWei と
+  // 同値で互換維持。追加 base は MAX_AGENT_<SYM>_<UNIT>（例 MAX_AGENT_WBTC_IN_SATS）。未指定は
+  // 0（= 当該 base の per-round 上限を課さない。limits 整備は Phase 8 範囲外）。
+  maxAgentBaseIn: Record<string, bigint>;
   maxBundleActions: number;
   maxLpWethWei: bigint;
   maxLpUsdcUnits: bigint;
+  // ADR 0013: base シンボル -> LP mint 上限。WETH は maxLpWethWei と同値で互換維持。
+  // 追加 base は MAX_LP_<SYM>_<UNIT>（例 MAX_LP_WBTC_SATS）。未指定は 0。
+  maxLpBase: Record<string, bigint>;
   maxOpenPositions: number;
   uninformedFlowMaxWethWei: bigint;
   informedFlowMaxWethWei: bigint;
   enabledProtocols: ProtocolId[];
   maxGmxSizeUsd: bigint;
   maxAaveSupplyWethWei: bigint;
+  // ADR 0013: base シンボル -> Aave supply 上限。WETH は maxAaveSupplyWethWei と同値で互換維持。
+  // 追加 base は MAX_AAVE_SUPPLY_<SYM>_<UNIT>（例 MAX_AAVE_SUPPLY_WBTC_SATS）。未指定は 0。
+  maxAaveSupplyBase: Record<string, bigint>;
   maxAaveBorrowUsdcUnits: bigint;
   balancerFlowMaxWethWei: bigint;
   curveFlowMaxWethWei: bigint;
@@ -151,6 +166,23 @@ export function loadConfig(env = process.env): SimConfig {
   const initialEthWeiDefault = economicGas
     ? 3_000_000_000_000_000_000n
     : 100_000_000_000_000_000_000n;
+  // WETH の既存 env 値（互換のためここで一度だけ読み、per-base マップの WETH エントリにも流用する）。
+  const initialWethWei = bigintEnv(
+    env.INITIAL_WETH_WEI,
+    10_000_000_000_000_000_000n,
+  );
+  const maxAgentWethInWei = bigintEnv(
+    env.MAX_AGENT_WETH_IN_WEI,
+    1_000_000_000_000_000_000n,
+  );
+  const maxLpWethWei = bigintEnv(
+    env.MAX_LP_WETH_WEI,
+    1_000_000_000_000_000_000n,
+  );
+  const maxAaveSupplyWethWei = bigintEnv(
+    env.MAX_AAVE_SUPPLY_WETH_WEI,
+    5_000_000_000_000_000_000n,
+  );
   return {
     rpcUrl: env.ANVIL_RPC_URL ?? `http://127.0.0.1:${anvilPort}`,
     chainId: intEnv(env.CHAIN_ID, CHAIN_ID),
@@ -201,10 +233,10 @@ export function loadConfig(env = process.env): SimConfig {
       env.ERIS_FLOW_ETH_WEI,
       1_000_000_000_000_000_000_000n,
     ),
-    initialWethWei: bigintEnv(
-      env.INITIAL_WETH_WEI,
-      10_000_000_000_000_000_000n,
-    ),
+    initialWethWei,
+    initialBaseAmounts: readBaseAmounts(env, "INITIAL", {
+      WETH: initialWethWei,
+    }),
     initialUsdcUnits: bigintEnv(env.INITIAL_USDC_UNITS, 25_000_000_000n),
     defaultPriorityFeeWei: bigintEnv(
       env.DEFAULT_PRIORITY_FEE_WEI,
@@ -212,14 +244,19 @@ export function loadConfig(env = process.env): SimConfig {
     ),
     maxPriorityFeeWei: bigintEnv(env.MAX_PRIORITY_FEE_WEI, 5_000_000_000n),
     economicGas,
-    maxAgentWethInWei: bigintEnv(
-      env.MAX_AGENT_WETH_IN_WEI,
-      1_000_000_000_000_000_000n,
-    ),
+    maxAgentWethInWei,
     maxAgentUsdcInUnits: bigintEnv(env.MAX_AGENT_USDC_IN_UNITS, 5_000_000_000n),
+    // 追加 base の per-round swap 上限は MAX_AGENT_<SYM>_IN_<UNIT>（WETH は WEI 既存値を流用）。
+    maxAgentBaseIn: readBaseAmounts(
+      env,
+      "MAX_AGENT",
+      { WETH: maxAgentWethInWei },
+      "IN",
+    ),
     maxBundleActions: intEnv(env.MAX_BUNDLE_ACTIONS, MAX_BUNDLE_ACTIONS),
-    maxLpWethWei: bigintEnv(env.MAX_LP_WETH_WEI, 1_000_000_000_000_000_000n),
+    maxLpWethWei,
     maxLpUsdcUnits: bigintEnv(env.MAX_LP_USDC_UNITS, 5_000_000_000n),
+    maxLpBase: readBaseAmounts(env, "MAX_LP", { WETH: maxLpWethWei }),
     maxOpenPositions: intEnv(env.MAX_OPEN_POSITIONS, 10),
     uninformedFlowMaxWethWei: bigintEnv(
       env.UNINFORMED_FLOW_MAX_WETH_WEI,
@@ -231,10 +268,10 @@ export function loadConfig(env = process.env): SimConfig {
     ),
     enabledProtocols: parseEnabledProtocols(env.ENABLED_PROTOCOLS),
     maxGmxSizeUsd: bigintEnv(env.MAX_GMX_SIZE_USD, 50_000n * 10n ** 30n),
-    maxAaveSupplyWethWei: bigintEnv(
-      env.MAX_AAVE_SUPPLY_WETH_WEI,
-      5_000_000_000_000_000_000n,
-    ),
+    maxAaveSupplyWethWei,
+    maxAaveSupplyBase: readBaseAmounts(env, "MAX_AAVE_SUPPLY", {
+      WETH: maxAaveSupplyWethWei,
+    }),
     maxAaveBorrowUsdcUnits: bigintEnv(
       env.MAX_AAVE_BORROW_USDC_UNITS,
       5_000_000_000n,
@@ -481,6 +518,39 @@ function floatEnv(value: string | undefined, fallback: number): number {
 function bigintEnv(value: string | undefined, fallback: bigint): bigint {
   if (value === undefined || value === "") return fallback;
   return BigInt(value);
+}
+
+// ADR 0013: base シンボルの「金額 env」の単位サフィックス（decimals 由来）。
+// WETH(18)=WEI / WBTC(8)=SATS / それ以外=UNITS。新トークンは桁数で自動的に決まる。
+function unitSuffixFor(decimals: number): string {
+  if (decimals === 18) return "WEI";
+  if (decimals === 8) return "SATS";
+  return "UNITS";
+}
+
+// ADR 0013: base シンボル -> 金額の Record を env から組む（per-base 配布量 / per-base limits 用）。
+// WETH は wethSeed の値をそのまま使い env を読まない（既存 WETH env は呼び出し側で 1 度だけ
+// 読み済み = byte 互換を保つ）。追加 base は env キー
+//   <prefix>[_<SYM>]<_INFIX?>_<UNIT>   例 INITIAL_WBTC_SATS / MAX_AGENT_WBTC_IN_SATS
+// を読み、未指定は 0n（USDC-only 方針 = 追加 base は既定で配らない / 上限を課さない）。
+// fork 既定（WETH のみ）では {WETH: wethSeed.WETH} の 1 件のみで従来と完全一致。
+function readBaseAmounts(
+  env: NodeJS.ProcessEnv,
+  prefix: string,
+  wethSeed: Record<string, bigint>,
+  infix?: string,
+): Record<string, bigint> {
+  const out: Record<string, bigint> = {};
+  for (const t of baseTokens()) {
+    if (t.symbol === "WETH") {
+      out.WETH = wethSeed.WETH ?? 0n;
+      continue;
+    }
+    const unit = unitSuffixFor(t.decimals);
+    const key = [prefix, t.symbol, infix, unit].filter(Boolean).join("_");
+    out[t.symbol] = bigintEnv(env[key], 0n);
+  }
+  return out;
 }
 
 function hexEnv(value: string | undefined, fallback: string): Hex {

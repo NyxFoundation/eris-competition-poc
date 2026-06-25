@@ -1,5 +1,6 @@
-import { encodeFunctionData, type Hex } from "viem";
+import { encodeFunctionData, type Address, type Hex } from "viem";
 import { TOKENS } from "../constants.js";
+import { tokenInfo } from "../markets.js";
 import {
   bigintToStorageWord,
   sendAndMine,
@@ -8,6 +9,26 @@ import {
 } from "../chain.js";
 import type { SimContext } from "./types.js";
 import { mockAggregatorAbi, toAavePrice } from "./aave.js";
+
+// ADR 0013: WETH/USDC 以外の追加 base のうち、Aave mock aggregator が登録済みのものを列挙する。
+// fork 既定では ctx.fairPrices が未設定 or WETH のみ → 空配列で従来と byte 一致。
+// aggregator が無い base / fair price が非有限の base はスキップ（aave に 0 を書かない防御）。
+function extraAaveAggregators(
+  ctx: SimContext,
+): Array<{ aggregator: Address; aavePrice: bigint }> {
+  const fairPrices = ctx.fairPrices;
+  if (!fairPrices) return [];
+  const out: Array<{ aggregator: Address; aavePrice: bigint }> = [];
+  for (const [base, price] of Object.entries(fairPrices)) {
+    if (base === "WETH" || base === "USDC") continue; // 既存経路で処理
+    if (!Number.isFinite(price) || price <= 0) continue;
+    const addr = tokenInfo(base).address.toLowerCase();
+    const aggregator = ctx.oracle.aaveAggregators[addr];
+    if (!aggregator) continue; // 当該 base の aave reserve 無し
+    out.push({ aggregator, aavePrice: toAavePrice(price) });
+  }
+  return out;
+}
 
 // 毎ラウンド先頭で GMX/Aave の mock 価格を fairPrice に追従させる。
 // 価格更新は coordinator 特権 tx（競争ブロックとは別ブロック）で行う。
@@ -49,6 +70,25 @@ export async function updateOracles(
           abi: mockAggregatorAbi,
           functionName: "setAnswer",
           args: [toAavePrice(1)],
+        }),
+      },
+    );
+    wrote = true;
+  }
+
+  // ADR 0013: 追加 base（WBTC 等）の Aave aggregator も追従。fork 既定では空ループ。
+  for (const { aggregator, aavePrice } of extraAaveAggregators(ctx)) {
+    await sendAndMine(
+      ctx.publicClient,
+      ctx.walletClient,
+      ctx.chain,
+      ctx.adminPk,
+      {
+        to: aggregator,
+        data: encodeFunctionData({
+          abi: mockAggregatorAbi,
+          functionName: "setAnswer",
+          args: [aavePrice],
         }),
       },
     );
@@ -118,6 +158,27 @@ export async function updateOraclesMempool(
       ),
     );
   }
+  // ADR 0013: 追加 base（WBTC 等）の Aave aggregator も mempool 更新。fork 既定では空ループ。
+  for (const { aggregator, aavePrice } of extraAaveAggregators(ctx)) {
+    hashes.push(
+      await sendNoMine(
+        ctx.publicClient,
+        ctx.walletClient,
+        ctx.chain,
+        ctx.adminPk,
+        {
+          to: aggregator,
+          data: encodeFunctionData({
+            abi: mockAggregatorAbi,
+            functionName: "setAnswer",
+            args: [aavePrice],
+          }),
+          gas: SETTER_GAS,
+        },
+        priorityFeeWei,
+      ),
+    );
+  }
   if (ctx.oracle.gmxProvider && ctx.updateGmxOracle) {
     // GMX は内部で2本（WETH/USDC）submit する。hash は追えないが mempool には載る。
     await ctx.updateGmxOracle(ctx, fairPrice, { noMine: true, priorityFeeWei });
@@ -153,6 +214,15 @@ export async function writeAaveOraclesStorage(
       usdcAgg,
       AGG_ANSWER_SLOT,
       bigintToStorageWord(toAavePrice(1)),
+    );
+  }
+  // ADR 0013: 追加 base（WBTC 等）の Aave aggregator も storage 直書き。fork 既定では空ループ。
+  for (const { aggregator, aavePrice } of extraAaveAggregators(ctx)) {
+    await setStorageAt(
+      ctx.publicClient,
+      aggregator,
+      AGG_ANSWER_SLOT,
+      bigintToStorageWord(aavePrice),
     );
   }
 }

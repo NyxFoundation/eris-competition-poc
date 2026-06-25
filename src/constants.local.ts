@@ -3,6 +3,7 @@
 // ローカル(非fork)anvil に全 protocol をデプロイした際の決定論アドレス。
 // constants.ts が ERIS_LOCAL_DEPLOY=1 のときだけ overlay する。
 import type { Address } from "viem";
+import type { MarketLegs } from "./types.js";
 
 export type LocalDeployment = {
   CHAIN_ID: number;
@@ -31,24 +32,50 @@ export type LocalDeployment = {
     seedUsdcUnits: bigint;
     seedUsdtUnits: bigint;
   };
-  CURVE: { pool: Address; wethIndex: number; usdtIndex: number; usdcToken: Address };
+  CURVE: {
+    pool: Address;
+    wethIndex: number;
+    usdtIndex: number;
+    usdcToken: Address;
+  };
   GMX: {
-    RoleStore: Address; DataStore: Address; Oracle: Address; EventEmitter: Address;
-    Router: Address; ExchangeRouter: Address; OrderHandler: Address; OrderVault: Address;
-    LiquidationHandler: Address; Reader: Address; Config: Address;
+    RoleStore: Address;
+    DataStore: Address;
+    Oracle: Address;
+    EventEmitter: Address;
+    Router: Address;
+    ExchangeRouter: Address;
+    OrderHandler: Address;
+    OrderVault: Address;
+    LiquidationHandler: Address;
+    Reader: Address;
+    Config: Address;
   };
   GMX_MARKETS: { ETH_USD: Address };
   AAVE: {
-    PoolAddressesProvider: Address; Pool: Address; AaveOracle: Address;
-    AclAdmin: Address; AclManager: Address; PoolDataProvider: Address;
+    PoolAddressesProvider: Address;
+    Pool: Address;
+    AaveOracle: Address;
+    AclAdmin: Address;
+    AclManager: Address;
+    PoolDataProvider: Address;
   };
+  // ADR 0013: マルチアセット market leg（WBTC 等）。Phase 2 で genLocalConstants が生成。
+  // 未生成（既存 state）でも optional なので型は通り、markets.ts は WETH のみ返す。
+  MARKET_LEGS?: MarketLegs;
 };
 
 export const LOCAL_DEPLOYMENT: LocalDeployment | null = {
   CHAIN_ID: 31337,
   TOKENS: {
-    WETH: { address: "0x5FbDB2315678afecb367f032d93F642f64180aa3" as Address, decimals: 18 },
-    USDC: { address: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address, decimals: 6 },
+    WETH: {
+      address: "0x5FbDB2315678afecb367f032d93F642f64180aa3" as Address,
+      decimals: 18,
+    },
+    USDC: {
+      address: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address,
+      decimals: 6,
+    },
   },
   // ローカルは単一 USDC/USDT。native/bridged は同一 USDC、usdt は USDT に対応。
   USDC_VARIANTS: {
@@ -59,7 +86,8 @@ export const LOCAL_DEPLOYMENT: LocalDeployment | null = {
   UNISWAP: {
     poolWethUsdc500: "0xe35086d02782CEC7D20b1a164dE141aa39CEe723" as Address,
     swapRouter: "0x0B306BF915C4d645ff596e518fAf3F9669b97016" as Address,
-    nonfungiblePositionManager: "0x9A676e781A523b5d0C0e43731313A708CB607508" as Address,
+    nonfungiblePositionManager:
+      "0x9A676e781A523b5d0C0e43731313A708CB607508" as Address,
     quoterV2: "0x959922bE3CAee4b8Cd9a407cc3ac1C251C2007B1" as Address,
     // deployer の WETH/USDC プールは fee=3000(0.3%) / tickSpacing=60。
     fee: 3000,
@@ -70,9 +98,13 @@ export const LOCAL_DEPLOYMENT: LocalDeployment | null = {
     vault: "0x322813Fd9A801c5507c9de605d63CEA4f2CE6c44" as Address,
     queries: "0x4A679253410272dd5232B3Ff7cF5dbB88f295319" as Address,
     pool: "0x763e69d24a03c0c8B256e470D9fE9e0753504D07" as Address,
-    poolId: "0x763e69d24a03c0c8b256e470d9fe9e0753504d07000200000000000000000000" as `0x${string}`,
+    poolId:
+      "0x763e69d24a03c0c8b256e470d9fe9e0753504d07000200000000000000000000" as `0x${string}`,
     // deployer プールは [WETH, USDC] の 2 トークン (80/20)。USDT leg は無い。
-    tokens: ["0x5FbDB2315678afecb367f032d93F642f64180aa3" as Address, "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address],
+    tokens: [
+      "0x5FbDB2315678afecb367f032d93F642f64180aa3" as Address,
+      "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address,
+    ],
     usdcToken: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address,
     seedWethWei: 100_000_000_000_000_000_000n,
     seedUsdcUnits: 50_000_000_000n,
@@ -99,9 +131,12 @@ export const LOCAL_DEPLOYMENT: LocalDeployment | null = {
     Reader: "0xD1760AA0FCD9e64bA4ea43399Ad789CFd63C7809" as Address,
     Config: "0xA56F946D6398Dd7d9D4D9B337Cf9E0F68982ca5B" as Address,
   },
-  GMX_MARKETS: { ETH_USD: "0x27C1c5874252d84677c281b355f005E361c08B7B" as Address },
+  GMX_MARKETS: {
+    ETH_USD: "0x27C1c5874252d84677c281b355f005E361c08B7B" as Address,
+  },
   AAVE: {
-    PoolAddressesProvider: "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1" as Address,
+    PoolAddressesProvider:
+      "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1" as Address,
     Pool: "0xfa7a32340ea54A3FF70942B33090a8a9A1B50214" as Address,
     AaveOracle: "0x0355B7B8cb128fA5692729Ab3AAa199C1753f726" as Address,
     AclAdmin: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" as Address,
