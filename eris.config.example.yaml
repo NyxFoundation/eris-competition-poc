@@ -1,0 +1,72 @@
+# eris.config.example.yaml
+#
+# シミュレーションのユーザー設定の単一ソース。`eris.config.yaml` にコピーして使う:
+#   cp eris.config.example.yaml eris.config.yaml
+#   npm run sim:realtime              # 既定で eris.config.yaml を読む
+#   npm run sim:realtime -- --config eris.config.stress.yaml   # 別ファイルを指定
+#
+# キー名は内部の設定キー（旧 env 名）と同一。値は型付きで書ける（真偽値・数値・配列・オブジェクト）。
+# 未指定のキーは既定値が使われる。
+#
+# 秘密情報はここに書かない（このファイルはコミットされうる）。RPC URL・秘密鍵・API キーは
+# `.env.local` に置く（ARB_RPC_URL / *_PRIVATE_KEY / ANTHROPIC_API_KEY / OLLAMA_API_KEY）。
+# ローカル Anvil の dev キーは未指定でも既定で使われる。
+
+# --- run（実行条件） ---
+SEED: 1
+ERIS_RUN_BLOCKS: 24
+ERIS_RUN_SECONDS: 70
+ERIS_BLOCK_TIME_SEC: 2
+ENABLED_PROTOCOLS: [uniswap, balancer, curve]
+ERIS_ECONOMIC_GAS: false
+ERIS_LOCAL_DEPLOY: false
+REPORT_DIR: ./runs
+
+# --- funding（初期配布。USDC-only にするなら INITIAL_WETH_WEI: 0） ---
+INITIAL_WETH_WEI: 0
+INITIAL_USDC_UNITS: 25000000000
+# 追加 base の初期在庫（既定 0）。例: INITIAL_WBTC_SATS: 0
+
+# --- limits（agent の 1 ラウンド上限） ---
+MAX_AGENT_WETH_IN_WEI: 1000000000000000000
+MAX_AGENT_USDC_IN_UNITS: 5000000000
+# 追加 base の per-round 上限。例: MAX_AGENT_WBTC_IN_SATS: 0
+
+# --- flow（orderflow bot の強度） ---
+UNINFORMED_FLOW_MAX_WETH_WEI: 1000000000000000000
+INFORMED_FLOW_MAX_WETH_WEI: 2000000000000000000
+BALANCER_FLOW_MAX_WETH_WEI: 1000000000000000000
+CURVE_FLOW_MAX_WETH_WEI: 1000000000000000000
+CROSS_VENUE_SPREAD_FLOW_MAX_WETH_WEI: 0
+# マルチアセット(WBTC)を取引させるなら WBTC flow を有効化（価格乖離=裁定機会を作る）。
+# FLOW_MAX_WBTC_SATS: 50000000
+
+# --- stress（市場ストレスイベント。既定 off） ---
+# ERIS_STRESS_EVENTS は配列で書ける（旧 JSON 文字列の代わり）:
+# ERIS_STRESS_EVENTS:
+#   - { type: crash, magnitudeRange: [0.12, 0.16], windowFrac: [0.3, 0.7], rampBlocks: 3, holdBlocks: 6, decayBlocks: 8 }
+# ERIS_STRESS_VICTIM_COUNT: 0
+
+# --- LLM 駆動エージェント（agents で claude-llm を使う場合） ---
+# ERIS_LLM_AUTH: auto
+# ERIS_LLM_MODEL: gpt-oss:120b
+
+# --- agents（ロスター。旧 agents.*.json の置き換え。inline で書く） ---
+# 注: account0 は deployer と重なるため、ローカルでは AGENT1 以降を使う。
+agents:
+  - id: noop
+    command: node
+    args: [--import, tsx, examples/agents/noop.ts]
+    wallet: AGENT1_PRIVATE_KEY
+    baseline: true
+    description: 何もしない (基準ライン)
+  - id: venue-arb
+    command: node
+    args: [--import, tsx, examples/agents/venue-arb.ts]
+    wallet: AGENT2_PRIVATE_KEY
+    description: WETH 専用 cross-venue 裁定
+  - id: multi-arb
+    command: node
+    args: [--import, tsx, examples/agents/multi-arb.ts]
+    wallet: AGENT3_PRIVATE_KEY
+    description: base 非依存 cross-venue 裁定（全 active base × 全 venue）

@@ -3,6 +3,10 @@
 .env.local
 .env.keys
 agents.local.json
+# ローカルの run 設定（eris.config.example.yaml はコミット、実ファイルは無視）
+eris.config.yaml
+eris.config.*.yaml
+!eris.config.example.yaml
 runs/
 cache/
 out/

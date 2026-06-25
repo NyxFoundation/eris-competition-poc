@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from "node:fs";
+import { parse as parseYaml } from "yaml";
 import { keccak256, stringToBytes, type Hex } from "viem";
 import {
   CHAIN_ID,
@@ -353,7 +354,12 @@ function deriveRoleKey(role: string): Hex {
 
 export function loadAgents(path: string): AgentSpec[] {
   if (!existsSync(path)) return defaultAgents();
-  const parsed = JSON.parse(readFileSync(path, "utf8"));
+  const text = readFileSync(path, "utf8");
+  // ADR 0013: ロスターは JSON / YAML どちらも可（拡張子で判定）。
+  const parsed =
+    path.endsWith(".yaml") || path.endsWith(".yml")
+      ? parseYaml(text)
+      : JSON.parse(text);
   return validateAgentsFile(parsed, path);
 }
 
@@ -416,7 +422,7 @@ function defaultAgents(): AgentSpec[] {
   );
 }
 
-function validateAgentsFile(parsed: unknown, path: string): AgentSpec[] {
+export function validateAgentsFile(parsed: unknown, path: string): AgentSpec[] {
   if (!parsed || typeof parsed !== "object") {
     throw new Error(`${path} must be a JSON object`);
   }

@@ -117,6 +117,20 @@ npm run sim
 
 単一プロトコル設定の例: `agents.aave-test.json` / `agents.gmx-test.json`。
 
+## 設定ファイル（eris.config.yaml）
+
+実時間 run（`sim:realtime`）の設定は、env を散らす代わりに 1 つの YAML（`eris.config.yaml`）で管理できる。run ノブ（`SEED` / `ERIS_RUN_BLOCKS` / `ENABLED_PROTOCOLS` / `INITIAL_*` / `FLOW_*` / stress / LLM）と agent ロスターを inline で書ける。
+
+```bash
+cp eris.config.example.yaml eris.config.yaml
+npm run sim:realtime                                   # 既定で eris.config.yaml を読む
+npm run sim:realtime -- --config eris.config.stress.yaml   # 別ファイルを指定
+```
+
+- キー名は内部の設定キーと同一で、値は型付きで書ける（真偽値・数値・配列・オブジェクト）。未指定キーは既定値。
+- **秘密情報は YAML に書かない**。RPC URL・秘密鍵・API キーは `.env.local` に置く（`ARB_RPC_URL` / `*_PRIVATE_KEY` / `ANTHROPIC_API_KEY` / `OLLAMA_API_KEY`）。`eris.config.yaml` は gitignore 対象、`eris.config.example.yaml` がコミット済みの雛形。
+- `eris.config.yaml` が無ければ従来どおり env 駆動で動く（移行期の後方互換）。
+
 ## ローカルリアルタイムシミュレーション（非fork）
 
 Arbitrum を fork せず、隣接 repo `eris-app-deployer` がローカル anvil 上に全 protocol を deploy したものに poc が接続して realtime run を回すモード。fork backend への cold state RPC 往復（fork RPC レイテンシ）を避けられ、マルチアセット（WETH/WBTC）も動く。実時間 run（`sim:realtime`）を fork 無しで実行する。

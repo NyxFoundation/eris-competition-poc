@@ -28,6 +28,7 @@ import { wethAbi } from "../../../src/abis.js";
 import { parseAction, validateAction } from "../../../src/action.js";
 import { getBalances, makeClients } from "../../../src/chain.js";
 import { loadConfig } from "../../../src/config.js";
+import { loadRunConfig } from "../../../src/runConfig.js";
 import { GMX_MARKETS, TOKENS } from "../../../src/constants.js";
 import { observationFor } from "../../../src/coordinator.js";
 import { safeStringify } from "../../../src/logger.js";
@@ -109,7 +110,11 @@ function startDirectShim(): void {
   }) as typeof process.stdout.write;
 
   // ---- チェーンクライアント ----
-  const config = loadConfig();
+  // ADR 0013: coordinator が YAML 設定パスを ERIS_CONFIG で渡していれば、同じ YAML から config を
+  // 再構築する（設定の単一ソース）。無ければ従来どおり env から読む（移行期 / 旧経路）。
+  const config = process.env.ERIS_CONFIG
+    ? loadRunConfig(process.env.ERIS_CONFIG).config
+    : loadConfig();
   const adapters = initProtocols(config.enabledProtocols);
   const enabledIds = adapters.map((a) => a.id);
   // ADR 0013: WETH 以外の base（WBTC 等）。fork 既定では空 = 完全に従来挙動。

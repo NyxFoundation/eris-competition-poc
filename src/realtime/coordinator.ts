@@ -1,5 +1,6 @@
 import { keccak256, stringToBytes, type Address, type Hex } from "viem";
-import { loadAgents, loadConfig, privateKeyForWalletName } from "../config.js";
+import { privateKeyForWalletName } from "../config.js";
+import { resolveRunInputs } from "../runConfig.js";
 import { validateAction } from "../action.js";
 import {
   accountAddress,
@@ -180,7 +181,11 @@ type SubmittedMeta = {
 const MIN_ECONOMIC_GAS_ETH_WEI = 500_000_000_000_000_000n; // 0.5 ETH
 
 export async function runRealtimeSimulation(): Promise<void> {
-  const config = loadConfig();
+  // ADR 0013: 設定は YAML（eris.config.yaml / --config）を単一ソースに解決する。YAML が無ければ
+  // 旧来の env 駆動にフォールバックする（移行期）。configPath は子プロセスへ伝播し、direct モードの
+  // agent（directShim）が同じ YAML から config を再構築できるようにする。
+  const { config, agents: agentSpecs, configPath } = resolveRunInputs();
+  if (configPath) process.env.ERIS_CONFIG = configPath;
   const adapters = initProtocols(config.enabledProtocols);
   const enabledIds = adapters.map((a) => a.id);
   const directTx = config.agentDirectTx;
@@ -245,8 +250,7 @@ export async function runRealtimeSimulation(): Promise<void> {
     await setAutomine(publicClient, true);
   }
 
-  // ---- agent ウォレット（プロセスは setup 完了後に起動する）----
-  const agentSpecs = loadAgents(config.agentsConfigPath);
+  // ---- agent ウォレット（プロセスは setup 完了後に起動する。agentSpecs は YAML/env から解決済み）----
   const agentRuntimes: RealtimeAgentRuntime[] = agentSpecs.map((spec) => {
     const privateKey = privateKeyForWalletName(config, spec.wallet, spec.id);
     return {
