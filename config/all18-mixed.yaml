@@ -2,6 +2,7 @@
 # 使い方: npm run sim:realtime -- --config config/all18-mixed.yaml
 # 秘密情報（RPC/鍵/API キー）は .env.local。各 agent の env は agent プロセスへ渡す戦略パラメータ。
 ENABLED_PROTOCOLS: [uniswap, balancer, curve, gmx, aave]
+ERIS_FLASH_ARB: 1   # FlashArb コントラクトを deploy（flash agent が利用）
 ERIS_RUN_BLOCKS: 60
 ERIS_RUN_SECONDS: 0
 SEED: 1
@@ -18,7 +19,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "0"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base arb / offset 0
   - id: frozen-arb
@@ -31,7 +31,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: arb
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base arb
   - id: si-codex-adaptivearb
@@ -46,7 +45,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "3"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base adaptivearb / offset 3
   - id: frozen-adaptivearb
@@ -59,7 +57,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: adaptivearb
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base adaptivearb
   - id: si-codex-lp
@@ -74,7 +71,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "6"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base lp / offset 6
   - id: frozen-lp
@@ -87,7 +83,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: lp
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base lp
   - id: si-codex-venue
@@ -102,7 +97,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "9"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base venue / offset 9
   - id: frozen-venue
@@ -115,7 +109,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: venue
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base venue
   - id: si-codex-aave
@@ -130,7 +123,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "12"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base aave / offset 12
   - id: frozen-aave
@@ -143,7 +135,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: aave
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base aave
   - id: si-codex-statarb
@@ -158,7 +149,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "15"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base statarb / offset 15
   - id: frozen-statarb
@@ -171,7 +161,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: statarb
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base statarb
   - id: si-codex-cvbal
@@ -186,7 +175,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "18"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base cvbal / offset 18
   - id: frozen-cvbal
@@ -199,7 +187,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: cvbal
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base cvbal
   - id: si-codex-dnlp
@@ -214,7 +201,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "21"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base dnlp / offset 21
   - id: frozen-dnlp
@@ -227,7 +213,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: dnlp
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base dnlp
   - id: si-codex-gmxperp
@@ -242,7 +227,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "24"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base gmxperp / offset 24
   - id: frozen-gmxperp
@@ -255,7 +239,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: gmxperp
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base gmxperp
   - id: si-codex-gmxrev
@@ -270,7 +253,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "27"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base gmxrev / offset 27
   - id: frozen-gmxrev
@@ -283,7 +265,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: gmxrev
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base gmxrev
   - id: si-codex-gmxtrend
@@ -298,7 +279,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "30"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base gmxtrend / offset 30
   - id: frozen-gmxtrend
@@ -311,7 +291,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: gmxtrend
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base gmxtrend
   - id: si-codex-fairmm
@@ -326,7 +305,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "33"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base fairmm / offset 33
   - id: frozen-fairmm
@@ -339,7 +317,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: fairmm
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base fairmm
   - id: si-codex-jitlp
@@ -354,7 +331,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "36"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base jitlp / offset 36
   - id: frozen-jitlp
@@ -367,7 +343,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: jitlp
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base jitlp
   - id: si-codex-ladder
@@ -382,7 +357,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "39"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base ladder / offset 39
   - id: frozen-ladder
@@ -395,7 +369,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: ladder
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base ladder
   - id: si-codex-aaveloop
@@ -410,7 +383,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "42"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base aaveloop / offset 42
   - id: frozen-aaveloop
@@ -423,7 +395,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: aaveloop
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base aaveloop
   - id: si-codex-crossvenue
@@ -438,7 +409,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "45"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base crossvenue / offset 45
   - id: frozen-crossvenue
@@ -451,7 +421,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: crossvenue
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base crossvenue
   - id: si-codex-lpyield
@@ -466,7 +435,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "48"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base lpyield / offset 48
   - id: frozen-lpyield
@@ -479,7 +447,6 @@ agents:
     env:
       ERIS_BASE_STRATEGY: lpyield
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base lpyield
   - id: si-codex-flasharb
@@ -494,7 +461,6 @@ agents:
       ERIS_LLM_AUTH: codex
       ERIS_LLM_REVIEW_EVERY: "60"
       ERIS_LLM_REVIEW_OFFSET: "51"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: codex 自己改善 / base flasharb / offset 51
   - id: frozen-flasharb
@@ -507,6 +473,5 @@ agents:
     env:
       ERIS_BASE_STRATEGY: flasharb
       ERIS_FREEZE_STRATEGY: "1"
-      ENABLED_PROTOCOLS: uniswap,balancer,curve,gmx,aave
       ERIS_FLASH_ARB: "1"
     description: frozen 固定 / base flasharb

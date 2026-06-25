@@ -2,7 +2,7 @@
 
 Anvil の **Arbitrum One** フォーク上で動く、ローカルなマルチプロトコル DeFi 戦略シミュレータ。エージェントには RPC アクセス・秘密鍵・pending トランザクション・txpool は一切渡さない。コーディネータは各エージェントに**確定済み状態の観測のみ**を与え、受理した JSON アクションをトランザクションへ変換する。
 
-対応プロトコルはプロトコルアダプタレジストリ（`src/protocols/`）でプラガブル: **Uniswap V3 / Balancer v2 / Curve / Aave v3 / GMX v2**。run ごとに `ENABLED_PROTOCOLS`（カンマ区切り、例 `ENABLED_PROTOCOLS=uniswap,balancer,curve,aave,gmx`）で有効プロトコルを選ぶ。Aave v3 と GMX v2 の価格は、コーディネータが毎ラウンド外生的な fair price に追従させる制御可能なモックオラクルで駆動する。
+対応プロトコルはプロトコルアダプタレジストリ（`src/protocols/`）でプラガブル: **Uniswap V3 / Balancer v2 / Curve / Aave v3 / GMX v2**。有効プロトコルは config の `ENABLED_PROTOCOLS`（YAML 配列、例 `ENABLED_PROTOCOLS: [uniswap, balancer, curve, aave, gmx]`）か CLI フラグ `--protocols uniswap,balancer,curve,aave,gmx` で run ごとに選ぶ。Aave v3 と GMX v2 の価格は、コーディネータが毎ブロック外生的な fair price に追従させる制御可能なモックオラクルで駆動する。
 
 ## プロトコルとアクション
 
