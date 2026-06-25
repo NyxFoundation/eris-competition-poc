@@ -507,11 +507,13 @@ export const aaveAdapter: ProtocolAdapter = {
         }),
       ),
     )) as bigint[];
-    const aggregators = await Promise.all(
-      currentPrices.map((price) =>
-        deployContract(ctx, "MockAggregator", [price]),
-      ),
-    );
+    // deployContract は admin nonce を自動採番するため、複数 base（WBTC 等）の aggregator を
+    // Promise.all で並列 deploy すると同一 nonce 競合（replacement transaction underpriced）になる。
+    // base 数に依らず安全なよう直列で deploy する（ADR 0013）。
+    const aggregators: Address[] = [];
+    for (const price of currentPrices) {
+      aggregators.push(await deployContract(ctx, "MockAggregator", [price]));
+    }
 
     // POOL_ADMIN 付与（必要時）
     const isAdmin = (await ctx.publicClient.readContract({

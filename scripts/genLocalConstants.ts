@@ -10,6 +10,9 @@
  *     npm run gen:local-constants
  *
  * 既定の DEPLOYMENTS_JSON は隣接 repo ../eris-app-deployer/deployments/deployments.json。
+ *
+ * ADR 0013: deployments.json に WBTC（tokens.WBTC + 各 venue の wbtcUsdc* / gmx WBTC market）が
+ * あれば TOKENS.WBTC と MARKET_LEGS の WBTC leg を生成する。無ければ WETH のみ（後方互換）。
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
@@ -29,7 +32,7 @@ type Deployments = {
     common?: { multicall3?: string };
     uniswapV3?: Record<string, string>;
     balancerV2?: Record<string, string>;
-    curve?: Record<string, string>;
+    curve?: Record<string, string | number>;
     gmxV2?: Record<string, unknown> & {
       markets?: {
         marketToken: string;
@@ -41,6 +44,10 @@ type Deployments = {
     aaveV3?: Record<string, unknown>;
   };
 };
+
+type GmxMarketList = NonNullable<
+  NonNullable<Deployments["protocols"]["gmxV2"]>["markets"]
+>;
 
 function loadDeployments(): { path: string; data: Deployments } {
   const path =
@@ -60,6 +67,19 @@ function ca(v: string | undefined, what: string): Address {
   return getAddress(need(v, what));
 }
 
+// ADR 0013: WBTC market 群（deployments.json に WBTC があれば構築。無ければ undefined）。
+type WbtcInfo = {
+  token: Address;
+  uniPool?: Address;
+  balPool?: Address;
+  balPoolId?: string;
+  balTokens?: Address[];
+  curvePool?: Address;
+  curveBaseIndex?: number;
+  curveQuoteIndex?: number;
+  gmxMarket?: Address;
+};
+
 function main() {
   const { path, data } = loadDeployments();
   const t = data.tokens;
@@ -72,7 +92,7 @@ function main() {
   const uni = need(p.uniswapV3, "protocols.uniswapV3");
   const bal = need(p.balancerV2, "protocols.balancerV2");
   const gmx = need(p.gmxV2, "protocols.gmxV2") as Record<string, string> & {
-    markets?: Deployments["protocols"]["gmxV2"]["markets"];
+    markets?: GmxMarketList;
   };
   const aave = need(p.aaveV3, "protocols.aaveV3") as Record<string, string>;
   const multicall3 = ca(p.common?.multicall3, "protocols.common.multicall3");
@@ -95,19 +115,55 @@ function main() {
   // Curve: deployer が twocrypto-ng の WETH/USDC crypto pool を立てる (uint256 index)。
   // coin0=USDC(stable)=0, coin1=WETH=1。poc CURVE は WETH<->stable leg を使う。
   const curveP = p.curve as
-    | (Record<string, string> & {
+    | (Record<string, string | number> & {
         wethUsdcCryptoPool?: string;
         cryptoWethIndex?: number;
         cryptoStableIndex?: number;
+        wbtcUsdcCryptoPool?: string;
+        cryptoWbtcIndex?: number;
+        cryptoWbtcStableIndex?: number;
       })
     | undefined;
   const curve = {
-    pool: ca(curveP?.wethUsdcCryptoPool, "curve.wethUsdcCryptoPool"),
+    pool: ca(curveP?.wethUsdcCryptoPool as string, "curve.wethUsdcCryptoPool"),
     wethIndex: Number(need(curveP?.cryptoWethIndex, "curve.cryptoWethIndex")),
     usdtIndex: Number(
       need(curveP?.cryptoStableIndex, "curve.cryptoStableIndex"),
     ),
   };
+
+  // ---- ADR 0013: WBTC（あれば各 venue の leg を集める。無ければ WETH のみ）----
+  const wbtc = t.WBTC ? getAddress(t.WBTC) : undefined;
+  let wbtcInfo: WbtcInfo | undefined;
+  if (wbtc) {
+    const wbtcMarket = markets.find(
+      (m) => m.indexToken.toLowerCase() === wbtc.toLowerCase(),
+    );
+    const balWbtcTokens = (
+      wbtc.toLowerCase() < usdc.toLowerCase() ? [wbtc, usdc] : [usdc, wbtc]
+    ) as Address[];
+    wbtcInfo = {
+      token: wbtc,
+      uniPool: uni.wbtcUsdcPool ? getAddress(uni.wbtcUsdcPool) : undefined,
+      balPool: bal.wbtcUsdcPool ? getAddress(bal.wbtcUsdcPool) : undefined,
+      balPoolId: bal.wbtcUsdcPoolId,
+      balTokens: balWbtcTokens,
+      curvePool: curveP?.wbtcUsdcCryptoPool
+        ? getAddress(curveP.wbtcUsdcCryptoPool)
+        : undefined,
+      curveBaseIndex:
+        curveP?.cryptoWbtcIndex !== undefined
+          ? Number(curveP.cryptoWbtcIndex)
+          : undefined,
+      curveQuoteIndex:
+        curveP?.cryptoWbtcStableIndex !== undefined
+          ? Number(curveP.cryptoWbtcStableIndex)
+          : undefined,
+      gmxMarket: wbtcMarket?.marketToken
+        ? getAddress(wbtcMarket.marketToken)
+        : undefined,
+    };
+  }
 
   const out = render({
     deploymentsPath: path,
@@ -158,6 +214,7 @@ function main() {
       AclManager: ca(aave.aclManager, "aaveV3.aclManager"),
       PoolDataProvider: ca(aave.poolDataProvider, "aaveV3.poolDataProvider"),
     },
+    wbtc: wbtcInfo,
   });
 
   const target = resolve(ROOT, "src", "constants.local.ts");
@@ -165,10 +222,14 @@ function main() {
   console.log(`✓ 生成: ${target}`);
   console.log(`  入力: ${path} (chainId=${data.chainId})`);
   console.log(`  WETH=${weth} USDC=${usdc} Multicall3=${multicall3}`);
+  if (wbtcInfo) {
+    console.log(
+      `  WBTC=${wbtcInfo.token} (uni=${wbtcInfo.uniPool ?? "-"} bal=${wbtcInfo.balPool ?? "-"} curve=${wbtcInfo.curvePool ?? "-"} gmx=${wbtcInfo.gmxMarket ?? "-"})`,
+    );
+  } else {
+    console.log(`  WBTC: なし（WETH のみ。MARKET_LEGS は WETH 単一）`);
+  }
   console.log(`  ローカル run: ERIS_LOCAL_DEPLOY=1 を設定して使用`);
-  console.log(
-    `  Curve は twocrypto-ng の WETH/USDC crypto pool (${curve.pool}) を使用 (5 venue 全対応)`,
-  );
 }
 
 function render(d: {
@@ -190,19 +251,67 @@ function render(d: {
   gmx: Record<string, Address>;
   ethUsdMarket: Address;
   aave: Record<string, Address>;
+  wbtc?: WbtcInfo;
 }): string {
   const a = (x: string) => `"${x}" as Address`;
+  const w = d.wbtc;
+
+  // ---- TOKENS の WBTC エントリ（あれば）----
+  const tokensWbtc = w
+    ? `\n    WBTC: { address: ${a(w.token)}, decimals: 8 },`
+    : "";
+
+  // ---- MARKET_LEGS（WETH + WBTC leg。WBTC leg は当該 venue のアドレスが揃っているものだけ）----
+  const uniWbtc = w?.uniPool
+    ? `\n      WBTC: { pool: ${a(w.uniPool)}, fee: 3000, tickSpacing: 60 },`
+    : "";
+  const balWbtc =
+    w?.balPool && w?.balPoolId
+      ? `\n      WBTC: { poolId: "${w.balPoolId}" as \`0x\${string}\`, tokens: [${w.balTokens!.map(a).join(", ")}], stable: ${a(d.usdc)} },`
+      : "";
+  const curveWbtc =
+    w?.curvePool &&
+    w?.curveBaseIndex !== undefined &&
+    w?.curveQuoteIndex !== undefined
+      ? `\n      WBTC: { pool: ${a(w.curvePool)}, baseIndex: ${w.curveBaseIndex}, quoteIndex: ${w.curveQuoteIndex}, stable: ${a(d.usdc)} },`
+      : "";
+  const gmxWbtc = w?.gmxMarket
+    ? `\n      WBTC: { market: ${a(w.gmxMarket)} },`
+    : "";
+  const aaveWbtc = w ? `\n      WBTC: {},` : "";
+
+  const marketLegs = `
+  MARKET_LEGS: {
+    uniswap: {
+      WETH: { pool: ${a(d.uni.pool)}, fee: 3000, tickSpacing: 60 },${uniWbtc}
+    },
+    balancer: {
+      WETH: { poolId: "${d.bal.poolId}" as \`0x\${string}\`, tokens: [${d.bal.tokens.map(a).join(", ")}], stable: ${a(d.usdc)} },${balWbtc}
+    },
+    curve: {
+      WETH: { pool: ${a(d.curve.pool)}, baseIndex: ${d.curve.wethIndex}, quoteIndex: ${d.curve.usdtIndex}, stable: ${a(d.usdc)} },${curveWbtc}
+    },
+    gmx: {
+      WETH: { market: ${a(d.ethUsdMarket)} },${gmxWbtc}
+    },
+    aave: {
+      WETH: {},${aaveWbtc}
+    },
+  },`;
+
   return `// AUTO-GENERATED by scripts/genLocalConstants.ts — 手で編集しない。
 // 入力: ${d.deploymentsPath}
 // ローカル(非fork)anvil に全 protocol をデプロイした際の決定論アドレス。
 // constants.ts が ERIS_LOCAL_DEPLOY=1 のときだけ overlay する。
 import type { Address } from "viem";
+import type { MarketLegs } from "./types.js";
 
 export type LocalDeployment = {
   CHAIN_ID: number;
   TOKENS: {
     WETH: { address: Address; decimals: number };
     USDC: { address: Address; decimals: number };
+    WBTC?: { address: Address; decimals: number };
   };
   USDC_VARIANTS: { native: Address; bridged: Address; usdt: Address };
   UNISWAP: {
@@ -236,13 +345,15 @@ export type LocalDeployment = {
     PoolAddressesProvider: Address; Pool: Address; AaveOracle: Address;
     AclAdmin: Address; AclManager: Address; PoolDataProvider: Address;
   };
+  // ADR 0013: マルチアセット market leg（WBTC 等）。WBTC が deployments.json にあれば WBTC leg を含む。
+  MARKET_LEGS?: MarketLegs;
 };
 
 export const LOCAL_DEPLOYMENT: LocalDeployment | null = {
   CHAIN_ID: ${d.chainId},
   TOKENS: {
     WETH: { address: ${a(d.weth)}, decimals: 18 },
-    USDC: { address: ${a(d.usdc)}, decimals: 6 },
+    USDC: { address: ${a(d.usdc)}, decimals: 6 },${tokensWbtc}
   },
   // ローカルは単一 USDC/USDT。native/bridged は同一 USDC、usdt は USDT に対応。
   USDC_VARIANTS: {
@@ -301,7 +412,7 @@ export const LOCAL_DEPLOYMENT: LocalDeployment | null = {
     AclAdmin: ${a(d.aave.AclAdmin)},
     AclManager: ${a(d.aave.AclManager)},
     PoolDataProvider: ${a(d.aave.PoolDataProvider)},
-  },
+  },${marketLegs}
 };
 `;
 }

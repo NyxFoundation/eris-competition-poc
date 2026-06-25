@@ -10,6 +10,7 @@ export type LocalDeployment = {
   TOKENS: {
     WETH: { address: Address; decimals: number };
     USDC: { address: Address; decimals: number };
+    WBTC?: { address: Address; decimals: number };
   };
   USDC_VARIANTS: { native: Address; bridged: Address; usdt: Address };
   UNISWAP: {
@@ -32,50 +33,27 @@ export type LocalDeployment = {
     seedUsdcUnits: bigint;
     seedUsdtUnits: bigint;
   };
-  CURVE: {
-    pool: Address;
-    wethIndex: number;
-    usdtIndex: number;
-    usdcToken: Address;
-  };
+  CURVE: { pool: Address; wethIndex: number; usdtIndex: number; usdcToken: Address };
   GMX: {
-    RoleStore: Address;
-    DataStore: Address;
-    Oracle: Address;
-    EventEmitter: Address;
-    Router: Address;
-    ExchangeRouter: Address;
-    OrderHandler: Address;
-    OrderVault: Address;
-    LiquidationHandler: Address;
-    Reader: Address;
-    Config: Address;
+    RoleStore: Address; DataStore: Address; Oracle: Address; EventEmitter: Address;
+    Router: Address; ExchangeRouter: Address; OrderHandler: Address; OrderVault: Address;
+    LiquidationHandler: Address; Reader: Address; Config: Address;
   };
   GMX_MARKETS: { ETH_USD: Address };
   AAVE: {
-    PoolAddressesProvider: Address;
-    Pool: Address;
-    AaveOracle: Address;
-    AclAdmin: Address;
-    AclManager: Address;
-    PoolDataProvider: Address;
+    PoolAddressesProvider: Address; Pool: Address; AaveOracle: Address;
+    AclAdmin: Address; AclManager: Address; PoolDataProvider: Address;
   };
-  // ADR 0013: マルチアセット market leg（WBTC 等）。Phase 2 で genLocalConstants が生成。
-  // 未生成（既存 state）でも optional なので型は通り、markets.ts は WETH のみ返す。
+  // ADR 0013: マルチアセット market leg（WBTC 等）。WBTC が deployments.json にあれば WBTC leg を含む。
   MARKET_LEGS?: MarketLegs;
 };
 
 export const LOCAL_DEPLOYMENT: LocalDeployment | null = {
   CHAIN_ID: 31337,
   TOKENS: {
-    WETH: {
-      address: "0x5FbDB2315678afecb367f032d93F642f64180aa3" as Address,
-      decimals: 18,
-    },
-    USDC: {
-      address: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address,
-      decimals: 6,
-    },
+    WETH: { address: "0x5FbDB2315678afecb367f032d93F642f64180aa3" as Address, decimals: 18 },
+    USDC: { address: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address, decimals: 6 },
+    WBTC: { address: "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853" as Address, decimals: 8 },
   },
   // ローカルは単一 USDC/USDT。native/bridged は同一 USDC、usdt は USDT に対応。
   USDC_VARIANTS: {
@@ -86,8 +64,7 @@ export const LOCAL_DEPLOYMENT: LocalDeployment | null = {
   UNISWAP: {
     poolWethUsdc500: "0xe35086d02782CEC7D20b1a164dE141aa39CEe723" as Address,
     swapRouter: "0x0B306BF915C4d645ff596e518fAf3F9669b97016" as Address,
-    nonfungiblePositionManager:
-      "0x9A676e781A523b5d0C0e43731313A708CB607508" as Address,
+    nonfungiblePositionManager: "0x9A676e781A523b5d0C0e43731313A708CB607508" as Address,
     quoterV2: "0x959922bE3CAee4b8Cd9a407cc3ac1C251C2007B1" as Address,
     // deployer の WETH/USDC プールは fee=3000(0.3%) / tickSpacing=60。
     fee: 3000,
@@ -95,16 +72,12 @@ export const LOCAL_DEPLOYMENT: LocalDeployment | null = {
   },
   MULTICALL3: "0x610178dA211FEF7D417bC0e6FeD39F05609AD788" as Address,
   BALANCER: {
-    vault: "0x322813Fd9A801c5507c9de605d63CEA4f2CE6c44" as Address,
-    queries: "0x4A679253410272dd5232B3Ff7cF5dbB88f295319" as Address,
-    pool: "0x763e69d24a03c0c8B256e470D9fE9e0753504D07" as Address,
-    poolId:
-      "0x763e69d24a03c0c8b256e470d9fe9e0753504d07000200000000000000000000" as `0x${string}`,
+    vault: "0x09635F643e140090A9A8Dcd712eD6285858ceBef" as Address,
+    queries: "0x67d269191c92Caf3cD7723F116c85e6E9bf55933" as Address,
+    pool: "0xf0D7de80A1C242fA3C738b083C422d65c6c7ABF1" as Address,
+    poolId: "0xf0d7de80a1c242fa3c738b083c422d65c6c7abf1000200000000000000000000" as `0x${string}`,
     // deployer プールは [WETH, USDC] の 2 トークン (80/20)。USDT leg は無い。
-    tokens: [
-      "0x5FbDB2315678afecb367f032d93F642f64180aa3" as Address,
-      "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address,
-    ],
+    tokens: ["0x5FbDB2315678afecb367f032d93F642f64180aa3" as Address, "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address],
     usdcToken: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address,
     seedWethWei: 100_000_000_000_000_000_000n,
     seedUsdcUnits: 50_000_000_000n,
@@ -113,34 +86,53 @@ export const LOCAL_DEPLOYMENT: LocalDeployment | null = {
   // Curve: twocrypto-ng の WETH/USDC crypto pool (uint256 index get_dy/exchange)。
   // coin0=USDC(stable)=0, coin1=WETH=1。usdcToken は pool の stable=USDC。
   CURVE: {
-    pool: "0xD33d097DD5eE1cB4927632DD211c7981eda96319" as Address,
+    pool: "0xd1891dD9DFF0784baa1dEb361dDFCAa5aE49cc6F" as Address,
     wethIndex: 1,
     usdtIndex: 0,
     usdcToken: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address,
   },
   GMX: {
-    RoleStore: "0x01c1DeF3b91672704716159C9041Aeca392DdFfb" as Address,
-    DataStore: "0x96F3Ce39Ad2BfDCf92C0F6E2C2CAbF83874660Fc" as Address,
-    Oracle: "0x02df3a3F960393F5B349E40A599FEda91a7cc1A7" as Address,
-    EventEmitter: "0x74Cf9087AD26D541930BaC724B7ab21bA8F00a27" as Address,
-    Router: "0xaB7B4c595d3cE8C85e16DA86630f2fc223B05057" as Address,
-    ExchangeRouter: "0xB9d9e972100a1dD01cd441774b45b5821e136043" as Address,
-    OrderHandler: "0x8bEe2037448F096900Fd9affc427d38aE6CC0350" as Address,
-    OrderVault: "0x12Bcb546bC60fF39F1Adfc7cE4605d5Bd6a6A876" as Address,
-    LiquidationHandler: "0x124dDf9BdD2DdaD012ef1D5bBd77c00F05C610DA" as Address,
-    Reader: "0xD1760AA0FCD9e64bA4ea43399Ad789CFd63C7809" as Address,
-    Config: "0xA56F946D6398Dd7d9D4D9B337Cf9E0F68982ca5B" as Address,
+    RoleStore: "0xD49a0e9A4CD5979aE36840f542D2d7f02C4817Be" as Address,
+    DataStore: "0x70bDA08DBe07363968e9EE53d899dFE48560605B" as Address,
+    Oracle: "0x54B8d8E2455946f2A5B8982283f2359812e815ce" as Address,
+    EventEmitter: "0x821f3361D454cc98b7555221A06Be563a7E2E0A6" as Address,
+    Router: "0x9BcC604D4381C5b0Ad12Ff3Bf32bEdE063416BC7" as Address,
+    ExchangeRouter: "0x3a622DB2db50f463dF562Dc5F341545A64C580fc" as Address,
+    OrderHandler: "0x0fe4223AD99dF788A6Dcad148eB4086E6389cEB6" as Address,
+    OrderVault: "0x3C15538ED063e688c8DF3d571Cb7a0062d2fB18D" as Address,
+    LiquidationHandler: "0xF6a8aD553b265405526030c2102fda2bDcdDC177" as Address,
+    Reader: "0xF85895D097B2C25946BB95C4d11E2F3c035F8f0C" as Address,
+    Config: "0xC66AB83418C20A65C3f8e83B3d11c8C3a6097b6F" as Address,
   },
-  GMX_MARKETS: {
-    ETH_USD: "0x27C1c5874252d84677c281b355f005E361c08B7B" as Address,
-  },
+  GMX_MARKETS: { ETH_USD: "0x9Db678A416F878535bdcAD6902f74D31dF29e6f7" as Address },
   AAVE: {
-    PoolAddressesProvider:
-      "0x82e01223d51Eb87e16A03E24687EDF0F294da6f1" as Address,
-    Pool: "0xfa7a32340ea54A3FF70942B33090a8a9A1B50214" as Address,
-    AaveOracle: "0x0355B7B8cb128fA5692729Ab3AAa199C1753f726" as Address,
+    PoolAddressesProvider: "0xB0D4afd8879eD9F52b28595d31B441D079B2Ca07" as Address,
+    Pool: "0x7B6fCB97Fc1B74e16CBe577054a4426d3487837C" as Address,
+    AaveOracle: "0xfbC22278A96299D91d41C453234d97b4F5Eb9B2d" as Address,
     AclAdmin: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" as Address,
-    AclManager: "0xDC11f7E700A4c898AE5CAddB1082cFfa76512aDD" as Address,
-    PoolDataProvider: "0x7bc06c482DEAd17c0e297aFbC32f6e63d3846650" as Address,
+    AclManager: "0x4EE6eCAD1c2Dae9f525404De8555724e3c35d07B" as Address,
+    PoolDataProvider: "0x5081a39b8A5f0E35a8D959395a630b68B74Dd30f" as Address,
+  },
+  MARKET_LEGS: {
+    uniswap: {
+      WETH: { pool: "0xe35086d02782CEC7D20b1a164dE141aa39CEe723" as Address, fee: 3000, tickSpacing: 60 },
+      WBTC: { pool: "0x1B99e1798C19F366b750819eDdfA27d77476cdaC" as Address, fee: 3000, tickSpacing: 60 },
+    },
+    balancer: {
+      WETH: { poolId: "0xf0d7de80a1c242fa3c738b083c422d65c6c7abf1000200000000000000000000" as `0x${string}`, tokens: ["0x5FbDB2315678afecb367f032d93F642f64180aa3" as Address, "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address], stable: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address },
+      WBTC: { poolId: "0x1a7a3e29c3c4b3c858f2ded8be6ed51a07589ecf000200000000000000000001" as `0x${string}`, tokens: ["0xa513E6E4b8f2a923D98304ec87F64353C4D5C853" as Address, "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address], stable: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address },
+    },
+    curve: {
+      WETH: { pool: "0xd1891dD9DFF0784baa1dEb361dDFCAa5aE49cc6F" as Address, baseIndex: 1, quoteIndex: 0, stable: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address },
+      WBTC: { pool: "0xF2AdAad89d56D49C697B9907C7D66ef27d96f859" as Address, baseIndex: 1, quoteIndex: 0, stable: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512" as Address },
+    },
+    gmx: {
+      WETH: { market: "0x9Db678A416F878535bdcAD6902f74D31dF29e6f7" as Address },
+      WBTC: { market: "0xF5f3d310CBBa3cE65C650a19059Cdd39AA4E5238" as Address },
+    },
+    aave: {
+      WETH: {},
+      WBTC: {},
+    },
   },
 };
