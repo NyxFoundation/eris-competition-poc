@@ -59,7 +59,7 @@ tail -3 infra/spot/.current-ami          # 最新が末尾
 ```bash
 set -a; source .env 2>/dev/null; set +a
 ERIS_SPOT_AMI=latest ERIS_SPOT_WATCHDOG_MIN=25 infra/spot/run-spot.sh -- \
-  'npm run sim:realtime -- --seed 1 --blocks 40 --seconds 90 --protocols uniswap,balancer,curve,aave,gmx --config eris.config.all18-mixed.yaml'
+  'npm run sim:realtime -- --seed 1 --blocks 40 --seconds 90 --protocols uniswap,balancer,curve,aave,gmx --config config/all18-mixed.yaml'
 ```
 
 `exit_code=0` を確認。失敗したら `./runs-spot-*/console.log` で原因切り分け。

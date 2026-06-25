@@ -184,7 +184,7 @@ export async function runRealtimeSimulation(
   // 評価ツールが per-regime SEED 等をプログラム的に差し込む（env を mutate しない）。
   overrides: Record<string, string | number | boolean> = {},
 ): Promise<void> {
-  // ADR 0013: 設定は YAML（eris.config.yaml / --config）を単一ソースに解決する。YAML が無ければ
+  // ADR 0013: 設定は YAML（config/local.yaml / --config）を単一ソースに解決する。YAML が無ければ
   // 旧来の env 駆動にフォールバックする（移行期）。configPath は子プロセスへ伝播し、direct モードの
   // agent（directShim）が同じ YAML から config を再構築できるようにする。
   const {

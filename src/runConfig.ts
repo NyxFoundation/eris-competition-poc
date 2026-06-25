@@ -2,7 +2,7 @@
 //
 // 方針:
 //   - ユーザー設定値（run ノブ / funding / limits / flow / stress / LLM）と agent ロスターを
-//     1 つの YAML（既定 `eris.config.yaml`）で管理する。YAML のキーは既存の env 名と同一にし、
+//     1 つの YAML（既定 `config/local.yaml`）で管理する。YAML のキーは既存の env 名と同一にし、
 //     型変換（bool→"1"/"0"、文字列/数値配列→CSV、object→JSON）して loadConfig が読む source map に
 //     流し込む。これで loadConfig の全パーサ（bigintEnv/intEnv 等）を無改修で再利用できる。
 //   - **秘密情報のみ env(.env) のまま**（コミットされる YAML に秘密を入れない。外部 SDK が env を
@@ -41,12 +41,13 @@ export const SECRET_ENV_KEYS = [
   "AGENT6_PRIVATE_KEY",
 ] as const;
 
-export const DEFAULT_CONFIG_PATH = "eris.config.yaml";
-// コミット済みの雛形。eris.config.yaml が無いときの zero-config 既定（env config 読取は廃止したため、
-// env ではなくこの YAML へフォールバックする）。
-export const EXAMPLE_CONFIG_PATH = "eris.config.example.yaml";
+// 設定は config/ ディレクトリで管理する。ローカルの実ファイルは config/local.yaml（gitignore）、
+// コミット済みの雛形・シナリオは config/example.yaml / config/all18-mixed.yaml / config/claude-llm.yaml。
+export const DEFAULT_CONFIG_PATH = "config/local.yaml";
+// config/local.yaml が無いときの zero-config 既定（env config 読取は廃止したため env ではなくこれへ）。
+export const EXAMPLE_CONFIG_PATH = "config/example.yaml";
 
-// 設定ファイルの解決順: --config > ERIS_CONFIG > eris.config.yaml > eris.config.example.yaml。
+// 設定ファイルの解決順: --config > ERIS_CONFIG > config/local.yaml > config/example.yaml。
 // 最初に存在するものを返す（無ければ undefined）。
 function resolveConfigPathOrUndefined(argv: string[]): string | undefined {
   const i = argv.indexOf("--config");
@@ -124,8 +125,8 @@ export function loadRunConfig(
   return { config, agents, configPath: path, source };
 }
 
-// 解決される設定ファイルパス（存在すれば）。--config > ERIS_CONFIG > eris.config.yaml >
-// eris.config.example.yaml の順。
+// 解決される設定ファイルパス（存在すれば）。--config > ERIS_CONFIG > config/local.yaml >
+// config/example.yaml の順。
 export function currentConfigPath(
   argv: string[] = process.argv,
 ): string | undefined {
@@ -164,7 +165,7 @@ export function parseCliFlags(
 }
 
 // 退役した代表的な「設定 env」が残っていたら警告する（silent に既定動作へ落ちる事故を防ぐ）。
-// これらはもう読まれない。設定は YAML（eris.config.yaml / --config）へ、ツール params は CLI フラグへ。
+// これらはもう読まれない。設定は YAML（config/local.yaml / --config）へ、ツール params は CLI フラグへ。
 const RETIRED_CONFIG_ENV = [
   "ENABLED_PROTOCOLS",
   "AGENTS_CONFIG",
@@ -186,7 +187,7 @@ function warnRetiredConfigEnv(): void {
   warnedRetired = true;
   process.stderr.write(
     `[config] 警告: 設定 env は退役しました（無視されます）: ${found.join(", ")}。` +
-      ` 設定は eris.config.yaml / --config、ツール params は CLI フラグ（--regimes 等）で指定してください。\n`,
+      ` 設定は config/local.yaml / --config、ツール params は CLI フラグ（--regimes 等）で指定してください。\n`,
   );
 }
 
@@ -210,7 +211,7 @@ function cliOverrides(argv: string[]): Record<string, string> {
 }
 
 // CLI/coordinator 用の入口。設定は YAML 一本化（env config 読取は廃止）。解決順は
-// --config > ERIS_CONFIG > eris.config.yaml > eris.config.example.yaml。いずれも無ければ
+// --config > ERIS_CONFIG > config/local.yaml > config/example.yaml。いずれも無ければ
 // 明示エラー（env へはフォールバックしない）。CLI エイリアス（--seed 等）と programmatic
 // overrides を YAML の上に重ねる（overrides が最優先）。
 export function resolveRunInputs(

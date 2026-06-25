@@ -88,7 +88,7 @@ infra/spot/bake-ami.sh                    # 最後に AMI ID を表示
 # 以後の run（install/deploy なし。総時間 ~4〜5 分、起動オーバーヘッド ~2.7 分）
 ERIS_SPOT_AMI=ami-xxxxxxxx OLLAMA_API_KEY=ollama-... infra/spot/run-spot.sh --watch -- \
   'SEED=1 ERIS_RUN_BLOCKS=80 ENABLED_PROTOCOLS=uniswap,balancer,curve,aave,gmx \
-   AGENTS_CONFIG=eris.config.claude-llm.yaml npm run sim:realtime'
+   AGENTS_CONFIG=config/claude-llm.yaml npm run sim:realtime'
 ```
 
 - **現在の golden AMI: `ami-0e88a9cadfdb6d1a3`**（us-west-2 / eris account。全 5 venue + claude-llm で green 実証済み）。

@@ -1,9 +1,9 @@
-# eris.config.example.yaml
+# config/example.yaml
 #
-# シミュレーションのユーザー設定の単一ソース。`eris.config.yaml` にコピーして使う:
-#   cp eris.config.example.yaml eris.config.yaml
-#   npm run sim:realtime              # 既定で eris.config.yaml を読む
-#   npm run sim:realtime -- --config eris.config.stress.yaml   # 別ファイルを指定
+# シミュレーションのユーザー設定の単一ソース。`config/local.yaml` にコピーして使う:
+#   cp config/example.yaml config/local.yaml
+#   npm run sim:realtime              # 既定で config/local.yaml を読む
+#   npm run sim:realtime -- --config config/stress.yaml   # 別ファイルを指定
 #
 # キー名は内部の設定キー（旧 env 名）と同一。値は型付きで書ける（真偽値・数値・配列・オブジェクト）。
 # 未指定のキーは既定値が使われる。
