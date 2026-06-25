@@ -8,12 +8,8 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import {
-  loadAgents,
-  loadConfig,
-  privateKeyForWalletName,
-  type SimConfig,
-} from "./config.js";
+import { privateKeyForWalletName, type SimConfig } from "./config.js";
+import { resolveRunInputs } from "./runConfig.js";
 import { AgentProcess } from "./agentProcess.js";
 import { validateAction } from "./action.js";
 import {
@@ -93,7 +89,9 @@ type ReceiptResult = {
 const GAS_ONLY_WEI = 2_000_000_000_000_000_000_000_000n; // 2,000,000 ETH（admin/keeper: gas + Balancer seed の wrap 等）
 
 export async function runSimulation(): Promise<void> {
-  const config = loadConfig();
+  // ADR 0013: 設定は YAML（eris.config.yaml / --config）を単一ソースに解決（無ければ env フォールバック）。
+  const { config, agents: agentSpecs, configPath } = resolveRunInputs();
+  if (configPath) process.env.ERIS_CONFIG = configPath;
   // 有効 protocol の設定 + stable 統一会計の登録（registry.initProtocols に集約）
   const adapters = initProtocols(config.enabledProtocols);
   const enabledIds = adapters.map((a) => a.id);
@@ -125,7 +123,7 @@ export async function runSimulation(): Promise<void> {
   }
   logger.event({ type: "fork_reset", forked: Boolean(config.forkUrl) });
 
-  const agentSpecs = loadAgents(config.agentsConfigPath);
+  // agentSpecs は resolveRunInputs で解決済み（YAML inline ロスター or AGENTS_CONFIG）。
   const agentRuntimes: AgentRuntime[] = agentSpecs.map((spec) => {
     const privateKey = privateKeyForWalletName(config, spec.wallet, spec.id);
     return {

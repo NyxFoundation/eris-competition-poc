@@ -107,6 +107,47 @@ export function loadRunConfig(
   return { config, agents, configPath: path, source };
 }
 
+// 解決される設定ファイルパス（存在すれば）。--config > ERIS_CONFIG > 既定 の順。
+export function currentConfigPath(
+  argv: string[] = process.argv,
+): string | undefined {
+  const i = argv.indexOf("--config");
+  const explicit = i >= 0 && argv[i + 1] ? argv[i + 1] : undefined;
+  const path = explicit ?? process.env.ERIS_CONFIG ?? DEFAULT_CONFIG_PATH;
+  return existsSync(path) ? path : undefined;
+}
+
+// 評価ツールが自分のセクション（evaluate / discrimination / gate 等）を読むための raw YAML doc。
+// YAML が無ければ空オブジェクト。
+export function loadConfigDoc(
+  argv: string[] = process.argv,
+): Record<string, unknown> {
+  const path = currentConfigPath(argv);
+  if (!path) return {};
+  const doc = parseYaml(readFileSync(path, "utf8"));
+  return doc && typeof doc === "object" && !Array.isArray(doc)
+    ? (doc as Record<string, unknown>)
+    : {};
+}
+
+// `--key value` / `--key=value` / `--flag` を拾う軽量パーサ（env の代わりに一回限りの上書きに使う）。
+export function parseCliFlags(
+  argv: string[] = process.argv,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (let i = 2; i < argv.length; i++) {
+    const a = argv[i];
+    if (!a.startsWith("--")) continue;
+    const body = a.slice(2);
+    const eq = body.indexOf("=");
+    if (eq >= 0) out[body.slice(0, eq)] = body.slice(eq + 1);
+    else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith("--"))
+      out[body] = argv[++i];
+    else out[body] = "1";
+  }
+  return out;
+}
+
 // CLI/coordinator 用の入口。`--config <path>` を argv から拾い、YAML があれば YAML 駆動、
 // 無ければ env フォールバック（移行期の後方互換）。
 export function resolveRunInputs(

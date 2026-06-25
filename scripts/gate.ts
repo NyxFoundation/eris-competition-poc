@@ -10,17 +10,17 @@
 // 他 agent への転嫁チェック（旧ゲート rule 4 相当）: 他 agent の mean netPnl 低下合計が
 // 対象の改善を超える場合は flag する（自動却下はしない）。
 //
-// 使い方:
-//   npm run gate --silent -- /tmp/eval-before.json /tmp/eval-after.json <targetAgentId>
-// env:
-//   GATE_MODE=improve|noninferior（既定 improve。noninferior は holdout regime の再検証用）
-//   GATE_MARGIN=<USDC>（noninferior の劣化許容幅。既定 0）
-//   GATE_CI_LEVEL（既定 0.9） / GATE_BOOTSTRAP_ITERS（既定 4000） / GATE_SEED（bootstrap の決定論 seed）
+// 使い方（パラメータは CLI フラグ `--key=value` か eris.config.yaml の `gate:` セクション。env 退役）:
+//   npm run gate --silent -- /tmp/eval-before.json /tmp/eval-after.json <targetAgentId> --mode=improve
+//   フラグ: --mode=improve|noninferior（既定 improve。noninferior は holdout regime の再検証用）
+//           --margin=<USDC>（noninferior の劣化許容幅。既定 0）
+//           --level（既定 0.9） / --iterations（既定 4000） / --seed（bootstrap の決定論 seed）
 //
 // 出力: 判定 JSON を stdout、人間向けサマリを stderr。exit code: PASS=0 / FAIL=2 / エラー=1。
 import { readFileSync } from "node:fs";
 import type { AgentAggregate } from "../src/discrimination.js";
 import { evaluateUnpairedGate, type GateMode } from "../src/stats.js";
+import { loadConfigDoc, parseCliFlags } from "../src/runConfig.js";
 
 type EvalJson = {
   regimes?: number[];
@@ -32,11 +32,19 @@ type EvalJson = {
   agents: AgentAggregate[];
 };
 
-function numEnv(value: string | undefined, fallback: number): number {
-  if (value === undefined || value.trim() === "") return fallback;
-  const parsed = Number(value);
+// CLI フラグ > YAML `gate:` セクション > 既定 の順で数値パラメータを解決。
+function num(
+  section: Record<string, unknown>,
+  flags: Record<string, string>,
+  key: string,
+  fallback: number,
+): number {
+  const raw = flags[key] ?? section[key];
+  if (raw === undefined || raw === null || String(raw).trim() === "")
+    return fallback;
+  const parsed = Number(raw);
   if (!Number.isFinite(parsed))
-    throw new Error(`expected number env value, got ${value}`);
+    throw new Error(`expected number for ${key}, got ${raw}`);
   return parsed;
 }
 
@@ -54,17 +62,21 @@ function pnlSamples(evalJson: EvalJson, id: string, label: string): number[] {
 }
 
 function main(): void {
-  const [beforePath, afterPath, targetId] = process.argv.slice(2);
+  const flags = parseCliFlags();
+  const section = (loadConfigDoc().gate ?? {}) as Record<string, unknown>;
+  // positional 引数（--flag 以外）: before / after / targetId。フラグは --key=value 形式で。
+  const positionals = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+  const [beforePath, afterPath, targetId] = positionals;
   if (!beforePath || !afterPath || !targetId) {
     console.error(
-      "usage: npm run gate --silent -- <before.json> <after.json> <targetAgentId>",
+      "usage: npm run gate --silent -- <before.json> <after.json> <targetAgentId> [--mode=improve]",
     );
     process.exitCode = 1;
     return;
   }
-  const mode = (process.env.GATE_MODE ?? "improve") as GateMode;
+  const mode = (flags.mode ?? section.mode ?? "improve") as GateMode;
   if (mode !== "improve" && mode !== "noninferior")
-    throw new Error(`invalid GATE_MODE: ${mode}`);
+    throw new Error(`invalid gate mode: ${mode}`);
 
   const before = loadEval(beforePath);
   const after = loadEval(afterPath);
@@ -101,10 +113,10 @@ function main(): void {
     pnlSamples(after, targetId, afterPath),
     {
       mode,
-      margin: numEnv(process.env.GATE_MARGIN, 0),
-      level: numEnv(process.env.GATE_CI_LEVEL, 0.9),
-      iterations: numEnv(process.env.GATE_BOOTSTRAP_ITERS, 4000),
-      seed: numEnv(process.env.GATE_SEED, 12345),
+      margin: num(section, flags, "margin", 0),
+      level: num(section, flags, "level", 0.9),
+      iterations: num(section, flags, "iterations", 4000),
+      seed: num(section, flags, "seed", 12345),
     },
   );
 

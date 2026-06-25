@@ -51,6 +51,28 @@ CROSS_VENUE_SPREAD_FLOW_MAX_WETH_WEI: 0
 # ERIS_LLM_AUTH: auto
 # ERIS_LLM_MODEL: gpt-oss:120b
 
+# --- evaluate（npm run evaluate の反復条件。CLI --regimes/--replications で一回上書き可） ---
+# evaluate:
+#   regimes: [1]
+#   replications: 8
+
+# --- discrimination（npm run discrimination。判定しきい値。CLI --key で一回上書き可） ---
+# discrimination:
+#   regimes: [1, 2, 3]
+#   replications: 5
+#   # baselineIds: [noop]
+#   # benchmarkId: noop
+#   # pnlMargin / sharpeMargin / minBeatFraction / c1CiLevel / bootstrapIterations
+#   # c1Paired / minSpearman / maxGapCv / minSharpeSpread
+
+# --- gate（npm run gate。受理ゲート。CLI --mode=improve 等で一回上書き可） ---
+# gate:
+#   mode: improve        # improve | noninferior
+#   margin: 0
+#   level: 0.9
+#   iterations: 4000
+#   seed: 12345
+
 # --- agents（ロスター。旧 agents.*.json の置き換え。inline で書く） ---
 # 注: account0 は deployer と重なるため、ローカルでは AGENT1 以降を使う。
 agents:

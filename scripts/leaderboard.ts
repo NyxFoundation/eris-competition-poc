@@ -1,7 +1,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runSimulation } from "../src/coordinator.js";
-import { loadAgents, loadConfig } from "../src/config.js";
+import type { AgentSpec } from "../src/types.js";
+import { resolveRunInputs } from "../src/runConfig.js";
 import {
   latestRunDir,
   readPerRoundValues,
@@ -13,9 +14,6 @@ console.error(
   "[deprecated] `npm run leaderboard` は同期ラウンド方式に依存しており非推奨です（ADR 0006）。" +
     "ランキング/識別力は `npm run evaluate` / `npm run discrimination` を使ってください。",
 );
-
-process.env.ROUNDS ??= "128";
-process.env.AGENTS_CONFIG ??= "agents.all18-mixed.json";
 
 type SummaryAgent = {
   id: string;
@@ -46,11 +44,12 @@ type Row = {
 };
 
 async function main(): Promise<void> {
-  const config = loadConfig();
+  // 設定・ロスターは YAML（eris.config.yaml）を単一ソースに解決（無ければ env フォールバック）。
+  const { config, agents } = resolveRunInputs();
   const runDirRoot = config.runDirRoot;
 
   console.log(
-    `[leaderboard] starting simulation: rounds=${config.rounds} agents=${config.agentsConfigPath}`,
+    `[leaderboard] starting simulation: rounds=${config.rounds} agents=${agents.length}`,
   );
   await runSimulation();
 
@@ -61,7 +60,7 @@ async function main(): Promise<void> {
     readFileSync(join(runDir, "summary.json"), "utf8"),
   ) as Summary;
   const valuesByAgent = readPerRoundValues(join(runDir, "events.jsonl"));
-  const descriptions = readDescriptions(config.agentsConfigPath);
+  const descriptions = readDescriptions(agents);
 
   const rows = summary.agents
     .map((agent): Row => {
@@ -87,9 +86,8 @@ async function main(): Promise<void> {
   console.log(`[leaderboard] wrote ${outPath}`);
 }
 
-function readDescriptions(path: string): Map<string, string> {
+function readDescriptions(agents: AgentSpec[]): Map<string, string> {
   const map = new Map<string, string>();
-  const agents = loadAgents(path);
   for (const a of agents) {
     if (a.description) map.set(a.id, a.description);
   }

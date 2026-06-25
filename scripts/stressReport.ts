@@ -5,13 +5,11 @@
 // reconstruct のコアは無改修で再利用する（観測 reconstructed observation を入力に取るだけ）。
 //
 // 使い方:
-//   RUN_DIR=runs/<id> npm run stress-report     # 明示指定
-//   npm run stress-report                        # ./runs 配下の最新 run を採用
+//   npm run stress-report -- --run-dir runs/<id>   # 明示指定
+//   npm run stress-report                           # ./runs 配下の最新 run を採用
+//   npm run stress-report -- --report-dir <root>    # runs ルートを変える
 //
-// 環境（stress run の例。要 ARB_RPC_URL で full re-fork）:
-//   ARB_RPC_URL=... ERIS_RUN_BLOCKS=80 \
-//   ERIS_STRESS_EVENTS='[{"type":"crash","magnitudeRange":[0.06,0.10],"windowFrac":[0.3,0.7],"rampBlocks":3,"holdBlocks":6,"decayBlocks":8}]' \
-//   ERIS_STRESS_VICTIM_COUNT=3 AGENTS_CONFIG=agents.local.json npm run sim:realtime
+// stress run の作り方（例）は eris.config.yaml の stress セクション + sim:realtime を参照。
 import {
   existsSync,
   readdirSync,
@@ -26,6 +24,7 @@ import {
   renderStressMarkdown,
 } from "../src/stressMetrics.js";
 import { safeStringify } from "../src/logger.js";
+import { parseCliFlags } from "../src/runConfig.js";
 
 // agents/<id>.jsonl を agentId → 行配列で読む（liquidator 帰属の一次情報。ADR 0009 §6）。
 function readAgentLogs(agentsDir: string): Map<string, string[]> {
@@ -50,11 +49,13 @@ function latestRunDir(runsDir: string): string | null {
 }
 
 function main(): void {
-  const runsRoot = process.env.REPORT_DIR ?? "./runs";
-  const runDir = process.env.RUN_DIR ?? latestRunDir(runsRoot);
+  // 解析対象は CLI フラグで指定（env 退役）: --report-dir <root> / --run-dir <dir>。
+  const flags = parseCliFlags();
+  const runsRoot = flags["report-dir"] ?? "./runs";
+  const runDir = flags["run-dir"] ?? latestRunDir(runsRoot);
   if (!runDir || !existsSync(join(runDir, "events.jsonl"))) {
     console.error(
-      `no run dir with events.jsonl found (set RUN_DIR or run a sim first). runsRoot=${runsRoot}`,
+      `no run dir with events.jsonl found (pass --run-dir or run a sim first). runsRoot=${runsRoot}`,
     );
     process.exit(1);
   }
