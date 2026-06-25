@@ -26,6 +26,20 @@ function ctx(round: number, spreadMaxWethWei = "0"): FlowContextWire {
   };
 }
 
+function usdcOnlyCtx(round: number): FlowContextWire {
+  const base = ctx(round);
+  const flowBalances: FlowContextWire["flowBalances"] = {};
+  for (const protocol of base.protocols) {
+    for (const kind of ["informed", "uninformed", "spread"] as const) {
+      flowBalances[`${protocol}:${kind}`] = {
+        wethWei: "0",
+        usdcUnits: "25000000000",
+      };
+    }
+  }
+  return { ...base, flowBalances };
+}
+
 test("buildFlowOrders is reproducible for a fixed seed (固定市場の根拠)", () => {
   const a = new Rng(42);
   const b = new Rng(42);
@@ -71,6 +85,34 @@ test("aave flow は supplied===0 のとき aaveSupply を出す", () => {
   const aave = orders.find((o) => o.protocol === "aave");
   assert.ok(aave);
   assert.equal((aave!.action as { type: string }).type, "aaveSupply");
+});
+
+test("USDC-only flow: aave は WETH supply 前に同じ wallet で USDC→WETH swap を出す", () => {
+  const orders = buildFlowOrders(new Rng(3), usdcOnlyCtx(1));
+  const prep = orders.find(
+    (o) => o.walletProtocol === "aave" && o.protocol === "uniswap",
+  );
+  assert.ok(prep);
+  assert.equal(prep!.kind, "informed");
+  assert.equal((prep!.action as { type: string }).type, "swap");
+  assert.equal((prep!.action as { tokenIn: string }).tokenIn, "USDC");
+  assert.equal(
+    orders.some((o) => (o.action as { type: string }).type === "aaveSupply"),
+    false,
+  );
+});
+
+test("USDC-only flow: WETH-in AMM flow は USDC-in に倒して残高不足 revert を避ける", () => {
+  const orders = buildFlowOrders(new Rng(7), usdcOnlyCtx(1));
+  for (const order of orders.filter(
+    (o) =>
+      (o.protocol === "uniswap" ||
+        o.protocol === "balancer" ||
+        o.protocol === "curve") &&
+      o.kind !== "spread",
+  )) {
+    assert.equal((order.action as { tokenIn: string }).tokenIn, "USDC");
+  }
 });
 
 test("異なる seed は異なる flow を生む", () => {

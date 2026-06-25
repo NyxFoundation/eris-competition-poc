@@ -64,6 +64,8 @@ export type TxRow = {
   status: string;
 };
 
+export type AgentRecentRow = TxRow & { ts: number };
+
 export type Activity = {
   id: string;
   submitted: number;
@@ -161,6 +163,7 @@ export class DashboardState extends EventEmitter {
   private readonly txs = new Ring<TxRow>(250);
   private readonly liquidations = new Ring<LiquidationEvent>(50);
   private readonly activity = new Map<string, Activity>();
+  private readonly agentRecent = new Map<string, Ring<AgentRecentRow>>();
 
   private send(event: string, data: unknown): void {
     this.emit("message", { event, data });
@@ -219,6 +222,25 @@ export class DashboardState extends EventEmitter {
 
   private activityList(): Activity[] {
     return this.order.map((id) => this.activity.get(id)!).filter(Boolean);
+  }
+
+  private rememberAgentRecent(row: AgentRecentRow): void {
+    this.ensureAgent(row.ownerId);
+    let ring = this.agentRecent.get(row.ownerId);
+    if (!ring) {
+      ring = new Ring<AgentRecentRow>(20);
+      this.agentRecent.set(row.ownerId, ring);
+    }
+    ring.push(row);
+  }
+
+  private agentRecentSnapshot(): Record<string, AgentRecentRow[]> {
+    return Object.fromEntries(
+      [...this.agentRecent.entries()].map(([id, ring]) => [
+        id,
+        ring.items().slice().reverse(),
+      ]),
+    );
   }
 
   // ---- runWatcher からの更新 ----
@@ -288,6 +310,7 @@ export class DashboardState extends EventEmitter {
 
   addTx(row: TxRow): void {
     this.txs.push(row);
+    this.rememberAgentRecent({ ...row, ts: Date.now() });
     this.send("tx", row);
     // included/reverted の集計は確定（blocks.csv = mined）のみ。submitted は二重計上しない。
     if (row.phase !== "mined") return;
@@ -318,6 +341,17 @@ export class DashboardState extends EventEmitter {
     if (a.actionType) act.lastActionType = a.actionType;
     if (a.reason) act.lastReason = a.reason;
     act.lastTs = a.ts ?? Date.now();
+    this.rememberAgentRecent({
+      phase: a.event === "submitted" ? "submitted" : "mined",
+      blockNumber: this.latestBlock,
+      txIndex: null,
+      ownerId: a.agentId,
+      role: "agent",
+      actionType: a.actionType ?? a.event,
+      priorityFeeWei: "0",
+      status: a.event,
+      ts: act.lastTs,
+    });
     this.send("agentAction", {
       agentId: a.agentId,
       event: a.event,
@@ -420,6 +454,7 @@ export class DashboardState extends EventEmitter {
       blocks: this.blocks.items(),
       prices: this.prices.items(),
       tx: this.txs.items(),
+      agentRecent: this.agentRecentSnapshot(),
       activity: this.activityList(),
       poller: this.poller,
       totals: this.totals,

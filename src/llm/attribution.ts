@@ -11,15 +11,16 @@
 //    裁定の取り分)だけが netUsd に残る。サイズを上げて意味があるのはこの α だけ。
 // 既存の rollback A/B 判定(claudeAgent.alphaValueUsd)と同じ α 規約に揃えている。
 //
-// 注意: α 値は free 残高(usdc/weth/eth)のみで評価し、LP ポジションに固定した価値は含めない
-// (RoundRecord が LP 内訳を持たないため。rollback の α 規約と同じ制約)。純 swap 戦略
-// (crossvenue base)では free 残高 = 全在庫なので一致する。
+// 注意: free 残高(usdc/weth/eth)は固定参照価格で β を除く。LP/GMX/Aave 等の protocol position は
+// RoundRecord.positionValueUsd の mark-to-market 概算を加える。position 側の内訳が無いため完全な
+// β 除去ではないが、以前のように LP/GMX/Aave の価値を attribution から丸ごと落とすより安全。
 import type { RoundRecord } from "./history.js";
 
 export type ActionAttribution = {
   rounds: number; // その action.type を取ったラウンド数
   netUsd: number; // β除去: 固定参照価格での α 評価額の変化合計(トレード由来 PnL の概算)
   grossUsd: number; // 参考: 生 inventoryUsd 変化(価格変動 β を含む)
+  notionalUsd: number; // その action.type の概算取引サイズ合計
   valid: number; // executorOk だった回数
   failed: number; // executor エラー/不正だった回数
 };
@@ -35,10 +36,10 @@ export type Attribution = {
   totalGrossUsd: number; // 期間合計 gross(= 最終 inventoryUsd − 初回 inventoryUsd, β込み)
 };
 
-// 在庫を固定参照価格 ref で評価した α 値: usdc + (weth+eth)×ref。
-// 価格変動による在庫の再評価(β)を除くので、戦略の取り分だけが残る。
+// 在庫を固定参照価格 ref で評価した α 値: usdc + (weth+eth)×ref + position mark。
+// free balance の価格変動(β)を除きつつ、protocol position の価値も欠落させない。
 function alphaValue(r: RoundRecord, ref: number): number {
-  return r.usdc + (r.weth + r.eth) * ref;
+  return r.usdc + (r.weth + r.eth) * ref + (r.positionValueUsd ?? 0);
 }
 
 // 窓内で固定する参照価格を選ぶ: 最新の正の fairPrice → 無ければ最新の正の poolPrice → 0。
@@ -67,6 +68,7 @@ export function computeAttribution(records: RoundRecord[]): Attribution {
       rounds: 0,
       netUsd: 0,
       grossUsd: 0,
+      notionalUsd: 0,
       valid: 0,
       failed: 0,
     });
@@ -78,6 +80,7 @@ export function computeAttribution(records: RoundRecord[]): Attribution {
     if (r.executorOk) b.valid++;
     else b.failed++;
     if (r.action.type !== "noop") turnover++;
+    b.notionalUsd += r.action.notionalUsd ?? 0;
     // noop / 失敗の理由を数える(executorOk=false の理由も含む)
     if (r.action.type === "noop" || !r.executorOk) {
       const key = r.executorReason ?? r.action.type;
@@ -127,7 +130,7 @@ export function formatAttribution(a: Attribution): string {
     .sort((x, y) => y[1].netUsd - x[1].netUsd)
     .map(
       ([type, s]) =>
-        `  ${type}: rounds=${s.rounds} αNetUsd=${s.netUsd.toFixed(2)} (gross=${s.grossUsd.toFixed(2)}) ok=${s.valid} fail=${s.failed}`,
+        `  ${type}: rounds=${s.rounds} αNetUsd=${s.netUsd.toFixed(2)} (gross=${s.grossUsd.toFixed(2)}) avgNotional=${(s.notionalUsd / Math.max(1, s.rounds)).toFixed(2)} ok=${s.valid} fail=${s.failed}`,
     );
   const noop =
     a.topNoopReasons.length > 0
@@ -137,7 +140,7 @@ export function formatAttribution(a: Attribution): string {
     `samples=${a.samples} turnover=${a.turnover} refPrice=${a.refPrice.toFixed(2)} maxα-drawdownUsd=${a.drawdownUsd.toFixed(2)}`,
     `window αPnL (trade edge, price moves removed) = ${a.totalAlphaUsd.toFixed(2)} USDC` +
       ` | total Δvalue incl. price moves (β) = ${a.totalGrossUsd.toFixed(2)} USDC`,
-    "per-action α attribution (αNetUsd = inventory α change attributed to that action; gross includes price moves):",
+    "per-action α attribution (αNetUsd = inventory α change attributed to that action; protocol positions included as mark value; gross includes price moves):",
     ...lines,
     `top noop/failed reasons: ${noop}`,
   ].join("\n");

@@ -28,9 +28,10 @@ import {
 import { ClaudeSubscriptionStrategist } from "./claudeSubscriptionStrategist.js";
 import { ClaudeCliStrategist } from "./claudeCliStrategist.js";
 import { CodexCliStrategist } from "./codexCliStrategist.js";
+import { OllamaStrategist } from "./ollamaStrategist.js";
 import type { ReviseReason } from "./prompts.js";
 
-const REVIEW_EVERY_N_ROUNDS = intEnv("ERIS_LLM_REVIEW_EVERY", 10);
+const REVIEW_EVERY_N_ROUNDS = intEnv("ERIS_LLM_REVIEW_EVERY", 60);
 // revise ウィンドウの位相オフセット(ブロック)。多数の自己改善 agent を並列で回すとき、
 // 全員が同じ round で同時に revise すると LLM API のピーク並走が agent 数になり競合する
 // (各 revise が遅くなり runway 内に終わらない)。agent ごとに別オフセットを与えて revise を
@@ -38,14 +39,18 @@ const REVIEW_EVERY_N_ROUNDS = intEnv("ERIS_LLM_REVIEW_EVERY", 10);
 // 既定 0 = 従来どおり(全員同位相)。ロスターで agent 別に設定する。
 const REVIEW_OFFSET = intEnv("ERIS_LLM_REVIEW_OFFSET", 0);
 const DRAWDOWN_TRIGGER_RATIO = floatEnv("ERIS_LLM_DRAWDOWN_RATIO", 0.05);
-const HISTORY_CAPACITY = intEnv("ERIS_LLM_HISTORY_CAPACITY", 30);
+const HISTORY_CAPACITY = intEnv("ERIS_LLM_HISTORY_CAPACITY", 80);
+const MIN_SCHEDULED_REVISE_HISTORY = intEnv("ERIS_LLM_MIN_REVISE_HISTORY", 24);
 const EXECUTOR_TIMEOUT_MS = intEnv("ERIS_LLM_EXECUTOR_TIMEOUT_MS", 200);
 // 改訂凍結フラグ。1 なら init/seed 後に revise を一切行わない(決定論・ベース保護)。
 const FREEZE_STRATEGY = process.env.ERIS_FREEZE_STRATEGY === "1";
 // live sanity ゲート(ADR 0002 A-3)。直近 N 観測で revise 候補が前版より実行時エラーを
 // 増やすなら採用しない。ERIS_LLM_SANITY_GATE=0 で無効化(決定論測定など)。
-const SANITY_OBS_WINDOW = intEnv("ERIS_LLM_SANITY_WINDOW", 8);
+const SANITY_OBS_WINDOW = intEnv("ERIS_LLM_SANITY_WINDOW", 16);
 const SANITY_GATE_ENABLED = process.env.ERIS_LLM_SANITY_GATE !== "0";
+const SANITY_MAX_ACTION_MULT = floatEnv("ERIS_LLM_SANITY_MAX_ACTION_MULT", 1.75);
+const SANITY_MIN_EXTRA_ACTIONS = intEnv("ERIS_LLM_SANITY_MIN_EXTRA_ACTIONS", 4);
+const SANITY_MAX_BID_MULT = floatEnv("ERIS_LLM_SANITY_MAX_BID_MULT", 2);
 // live PnL ロールバック(ADR 0002 の rollback_condition を機構化)。revise 採用後に実現 PnL を
 // 監視し、(a)採用時評価額から ROLLBACK_DROP 以上下落(急落ガード)、または (b)新版の α レートが
 // 前版より明確に劣る(A/B 劣化ガード)とき前版へ自動で巻き戻す(事後・反応的ガード)。
@@ -56,26 +61,36 @@ const SANITY_GATE_ENABLED = process.env.ERIS_LLM_SANITY_GATE !== "0";
 // 在庫を固定価格(採用時 fair price)で評価して β を除き、トレード由来の α だけのレートで比較する。
 // ERIS_LLM_ROLLBACK=0 で無効化。
 const ROLLBACK_ENABLED = process.env.ERIS_LLM_ROLLBACK !== "0";
-const ROLLBACK_WINDOW = intEnv("ERIS_LLM_ROLLBACK_WINDOW", 5); // 急落判定までの最小経過ラウンド
-const ROLLBACK_DROP = floatEnv("ERIS_LLM_ROLLBACK_DROP", 0.04); // 急落: 採用時比の下落率しきい値
-const ROLLBACK_AB_WINDOW = intEnv("ERIS_LLM_ROLLBACK_AB_WINDOW", 20); // A/B 劣化判定までの最小経過ラウンド
+const ROLLBACK_WINDOW = intEnv("ERIS_LLM_ROLLBACK_WINDOW", 3); // 急落判定までの最小経過ラウンド
+const ROLLBACK_DROP = floatEnv("ERIS_LLM_ROLLBACK_DROP", 0.025); // 急落: 採用時比の下落率しきい値
+const ROLLBACK_AB_WINDOW = intEnv("ERIS_LLM_ROLLBACK_AB_WINDOW", 10); // A/B 劣化判定までの最小経過ラウンド
 // A/B 劣化: 前版が明確にプラスの α レートを持っていたのに新版がその ROLLBACK_KEEP_FRACTION 未満
 // しか維持できなければ巻き戻す(edge を大きく削った改悪を相対比で検出。edge が小さくても効く)。
 // 基準(前版 α レート)が小さすぎる=ノイズのときは A/B 判定しない。
-const ROLLBACK_KEEP_FRACTION = floatEnv("ERIS_LLM_ROLLBACK_KEEP_FRACTION", 0.5);
+const ROLLBACK_KEEP_FRACTION = floatEnv("ERIS_LLM_ROLLBACK_KEEP_FRACTION", 0.75);
 const ROLLBACK_MIN_RATE_FRAC = floatEnv(
   "ERIS_LLM_ROLLBACK_MIN_RATE_FRAC",
   0.000005,
 );
-const ROLLBACK_GRADUATE = intEnv("ERIS_LLM_ROLLBACK_GRADUATE", 40); // 監視を打ち切る経過ラウンド
+const ROLLBACK_GRADUATE = intEnv("ERIS_LLM_ROLLBACK_GRADUATE", 30); // 監視を打ち切る経過ラウンド
+const ROLLBACK_REVERT_RATE = floatEnv("ERIS_LLM_ROLLBACK_REVERT_RATE", 0.35);
+const ROLLBACK_REVERT_MIN_SAMPLE = intEnv(
+  "ERIS_LLM_ROLLBACK_REVERT_MIN_SAMPLE",
+  5,
+);
 
-// 在庫を固定価格で評価した「α(トレード由来 PnL)」: usdc + (weth+eth)×refPrice。
-// 価格変動による在庫の再評価(β)を除くので、戦略の取り分だけが残る。
+// 在庫を固定価格で評価した「α(トレード由来 PnL)」:
+// free balance は usdc + (weth+eth)×refPrice、protocol position は現在 mark を加える。
+// LP/GMX/Aave 価値を落とさず、free balance の価格変動(β)だけを除く概算。
 function alphaValueUsd(
-  inv: { usdc: number; weth: number; eth: number },
+  inv: { valueUsdc?: number; usdc: number; weth: number; eth: number },
   refPrice: number,
+  markPrice: number = refPrice,
 ): number {
-  return inv.usdc + (inv.weth + inv.eth) * refPrice;
+  const freeAtRef = inv.usdc + (inv.weth + inv.eth) * refPrice;
+  if (inv.valueUsdc === undefined) return freeAtRef;
+  const freeAtMark = inv.usdc + (inv.weth + inv.eth) * markPrice;
+  return freeAtRef + (inv.valueUsdc - freeAtMark);
 }
 
 function reportDirRoot(): string {
@@ -155,9 +170,11 @@ const helpersBase: Omit<ExecutorHelpers, "log"> = {
  *                   推奨のサブスク経路。SDK と違い nested でもハングしない。
  *   codex         – CodexCliStrategist via `codex exec` (別 API プール)。claude -p と競合しない
  *                   ので混成ロスターで自己改善の並走上限を上げられる。`ERIS_CODEX_MODEL` で model 上書き。
+ *   ollama        – OllamaStrategist via direct Ollama Cloud API (`https://ollama.com/api`).
+ *                   `OLLAMA_API_KEY` 必須。`ERIS_OLLAMA_MODEL`/`ERIS_LLM_MODEL` で model 上書き。
  *   subscription  – ClaudeSubscriptionStrategist via Agent SDK query()。注意: Claude Code
  *                   セッション内(別ターミナル含む)では nested 検出でハングしうる。
- *   auto (default)– cli if `claude` is reachable, else apikey if a key is set, else mock.
+ *   auto (default)– cli if `claude` is reachable, else apikey/ollama if a key is set, else mock.
  */
 export function selectStrategist(): Strategist {
   const auth = (process.env.ERIS_LLM_AUTH ?? "auto").toLowerCase();
@@ -185,6 +202,16 @@ export function selectStrategist(): Strategist {
     emitStderr("[claude-llm] strategist=codex (codex exec, 別 API プール)\n");
     return new CodexCliStrategist();
   }
+  if (auth === "ollama") {
+    if (!process.env.ERIS_OLLAMA_API_KEY && !process.env.OLLAMA_API_KEY) {
+      emitStderr(
+        "[claude-llm] strategist=mock (ERIS_LLM_AUTH=ollama but OLLAMA_API_KEY unset)\n",
+      );
+      return new MockStrategist();
+    }
+    emitStderr("[claude-llm] strategist=ollama (Ollama Cloud API)\n");
+    return new OllamaStrategist();
+  }
   if (auth === "subscription") {
     emitStderr("[claude-llm] strategist=subscription (Agent SDK query)\n");
     return new ClaudeSubscriptionStrategist();
@@ -200,8 +227,14 @@ export function selectStrategist(): Strategist {
     );
     return new ClaudeStrategist();
   }
+  if (process.env.ERIS_OLLAMA_API_KEY || process.env.OLLAMA_API_KEY) {
+    emitStderr(
+      "[claude-llm] strategist=ollama (auto: no claude/anthropic, OLLAMA_API_KEY present)\n",
+    );
+    return new OllamaStrategist();
+  }
   emitStderr(
-    "[claude-llm] strategist=mock (auto: no claude binary, no ANTHROPIC_API_KEY)\n",
+    "[claude-llm] strategist=mock (auto: no claude binary, no ANTHROPIC_API_KEY, no OLLAMA_API_KEY)\n",
   );
   return new MockStrategist();
 }
@@ -328,6 +361,7 @@ function decideAction(state: State, obs: AgentObservation): DecisionResult {
   return {
     action: result.action,
     ok: true,
+    reason: result.action.type === "noop" ? result.action.reason : undefined,
     logs: result.logs,
     strategyVersion: state.strategy.version,
   };
@@ -373,6 +407,12 @@ function scheduleStrategyWorkIfNeeded(
     currentUsd,
     initialUsd,
   );
+  if (
+    reason === "scheduled" &&
+    state.history.size() < MIN_SCHEDULED_REVISE_HISTORY
+  ) {
+    return;
+  }
   if (reason) {
     state.pendingPhase = "revise";
     state.lastReviseRound = obs.round;
@@ -493,21 +533,79 @@ export function passesSanityGate(
   recentObs: AgentObservation[],
 ): { ok: true } | { ok: false; reason: string } {
   if (recentObs.length === 0) return { ok: true };
-  let candErr = 0;
-  let prevErr = 0;
-  for (const obs of recentObs) {
-    if (!runExecutor(candidate, obs, helpersBase, EXECUTOR_TIMEOUT_MS).ok)
-      candErr++;
-    if (prev && !runExecutor(prev, obs, helpersBase, EXECUTOR_TIMEOUT_MS).ok)
-      prevErr++;
-  }
-  if (candErr > prevErr) {
+  const cand = gateProfile(candidate, recentObs);
+  const old = prev ? gateProfile(prev, recentObs) : null;
+  const prevErr = old?.errors ?? 0;
+  if (cand.errors > prevErr) {
     return {
       ok: false,
-      reason: `candidate errors on ${candErr}/${recentObs.length} recent obs (prev ${prevErr})`,
+      reason: `candidate errors on ${cand.errors}/${recentObs.length} recent obs (prev ${prevErr})`,
     };
   }
+  if (old) {
+    const extraActions = cand.actionCount - old.actionCount;
+    const actionLimit = Math.max(
+      old.actionCount * SANITY_MAX_ACTION_MULT,
+      old.actionCount + SANITY_MIN_EXTRA_ACTIONS,
+    );
+    if (cand.actionCount > actionLimit) {
+      return {
+        ok: false,
+        reason: `candidate is too aggressive on recent obs: actions ${cand.actionCount} vs prev ${old.actionCount}`,
+      };
+    }
+    if (
+      extraActions >= 0 &&
+      old.bidGweiTotal > 0 &&
+      cand.bidGweiTotal > old.bidGweiTotal * SANITY_MAX_BID_MULT
+    ) {
+      return {
+        ok: false,
+        reason: `candidate raises priority-fee budget too much: ${cand.bidGweiTotal.toFixed(1)}gwei vs prev ${old.bidGweiTotal.toFixed(1)}gwei`,
+      };
+    }
+  }
   return { ok: true };
+}
+
+type GateProfile = {
+  errors: number;
+  actionCount: number;
+  bidGweiTotal: number;
+};
+
+function gateProfile(strategy: Strategy, recentObs: AgentObservation[]): GateProfile {
+  let errors = 0;
+  let actionCount = 0;
+  let bidGweiTotal = 0;
+  for (const obs of recentObs) {
+    const result = runExecutor(strategy, obs, helpersBase, EXECUTOR_TIMEOUT_MS);
+    if (!result.ok) {
+      errors++;
+      continue;
+    }
+    const count = countActionUnits(result.action);
+    actionCount += count;
+    if (count > 0) {
+      bidGweiTotal += priorityFeeGwei(result.action, obs) * count;
+    }
+  }
+  return { errors, actionCount, bidGweiTotal };
+}
+
+function countActionUnits(action: AgentAction): number {
+  if (action.type === "noop") return 0;
+  if (action.type === "bundle") return action.actions.length;
+  if (action.type === "rawBundle") return action.txs.length;
+  return 1;
+}
+
+function priorityFeeGwei(action: AgentAction, obs: AgentObservation): number {
+  let fee: string | undefined;
+  if ("maxPriorityFeePerGasWei" in action) {
+    fee = action.maxPriorityFeePerGasWei;
+  }
+  return Number(BigInt(fee ?? obs.limits.defaultPriorityFeePerGasWei)) / 1e9;
 }
 
 /**
@@ -523,7 +621,11 @@ export function maybeRollback(state: State, obs: AgentObservation): void {
     const refPrice = obs.fairPriceUsdcPerWeth;
     state.refPrice = refPrice;
     state.adoptUsd = obs.inventory.valueUsdc;
-    state.adoptAlpha = alphaValueUsd(obs.inventory, refPrice);
+    state.adoptAlpha = alphaValueUsd(
+      obs.inventory,
+      refPrice,
+      obs.fairPriceUsdcPerWeth,
+    );
     state.adoptRound = obs.round;
     // 前版の α レート(per round)を直近 ROLLBACK_AB_WINDOW ラウンドの履歴から推定。
     const recs = state.history.recent();
@@ -531,7 +633,10 @@ export function maybeRollback(state: State, obs: AgentObservation): void {
       const k = Math.min(ROLLBACK_AB_WINDOW, recs.length);
       const start = recs[recs.length - k];
       const span = Math.max(1, obs.round - start.round);
-      const startAlpha = alphaValueUsd(start, refPrice);
+      const startAlpha =
+        start.usdc +
+        (start.weth + start.eth) * refPrice +
+        (start.positionValueUsd ?? 0);
       state.prevAlphaRate = (state.adoptAlpha - startAlpha) / span;
     } else {
       state.prevAlphaRate = null; // 前版 track 不足 → 急落判定のみ
@@ -565,6 +670,16 @@ export function maybeRollback(state: State, obs: AgentObservation): void {
       revert(`drop=${(drop * 100).toFixed(1)}%`);
       return;
     }
+    if (
+      obs.competition &&
+      obs.competition.recentSampleSize >= ROLLBACK_REVERT_MIN_SAMPLE &&
+      obs.competition.recentRevertRate >= ROLLBACK_REVERT_RATE
+    ) {
+      revert(
+        `revertRate=${(obs.competition.recentRevertRate * 100).toFixed(0)}%/${obs.competition.recentSampleSize}`,
+      );
+      return;
+    }
   }
   // (b) A/B 劣化ガード(新版の α レートが前版の一定割合未満)
   if (
@@ -576,7 +691,12 @@ export function maybeRollback(state: State, obs: AgentObservation): void {
     // 前版が明確にプラスの edge を持っていたときだけ比較する(基準が無いと判定不能)。
     if (state.prevAlphaRate > minRate) {
       const newAlphaRate =
-        (alphaValueUsd(obs.inventory, state.refPrice) - state.adoptAlpha) /
+        (alphaValueUsd(
+          obs.inventory,
+          state.refPrice,
+          obs.fairPriceUsdcPerWeth,
+        ) -
+          state.adoptAlpha) /
         elapsed;
       if (newAlphaRate < state.prevAlphaRate * ROLLBACK_KEEP_FRACTION) {
         revert(

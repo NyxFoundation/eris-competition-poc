@@ -14,13 +14,16 @@
 //     price RNG の消費列を乱さない（再現性は SEED で維持）。
 //   - depeg 用の usdcPx も返せる形にしておく（v1 は常に 1。phase 2 で可変化）。
 import { Rng } from "../rng.js";
+import type { TokenSymbol } from "../types.js";
 
 export type StressEventType = "spike" | "crash";
 
 // env（ERIS_STRESS_EVENTS）で与えるイベント仕様。値ではなくレンジを与える。
 export type StressEventConfig = {
   type: StressEventType;
-  // WETH 倍率の乖離幅。spike は +、crash は − に効く。[min,max] から seed が選ぶ。
+  // ADR 0013: イベント対象の base（既定 WETH）。WBTC 等に crash/spike を効かせられる。
+  base?: TokenSymbol;
+  // 価格倍率の乖離幅。spike は +、crash は − に効く。[min,max] から seed が選ぶ。
   magnitudeRange: [number, number];
   // イベント開始位置の run 長に対する割合 [min,max]。seed が選ぶ。
   windowFrac: [number, number];
@@ -33,6 +36,7 @@ export type StressEventConfig = {
 // seed で確定したイベント（blockIndex は runStart からの 0 起点）。
 export type ResolvedStressEvent = {
   type: StressEventType;
+  base: string; // 対象 base（既定 WETH）
   magnitude: number;
   startBlock: number;
   rampBlocks: number;
@@ -41,8 +45,13 @@ export type ResolvedStressEvent = {
   endBlock: number; // startBlock + ramp + hold + decay（この値は窓に含まれない）
 };
 
-// at(blockIndex) が返すオーバーレイ。effective = base * wethMult（usdcPx は v1 未使用）。
-export type OverlayState = { wethMult: number; usdcPx: number };
+// at(blockIndex) が返すオーバーレイ。effective[base] = baseFair[base] * baseMults[base]。
+// wethMult は後方互換（= baseMults["WETH"]）。usdcPx は v1 未使用。
+export type OverlayState = {
+  wethMult: number;
+  usdcPx: number;
+  baseMults: Record<string, number>;
+};
 
 // price 本路 Rng（seed）・flow Rng（flowSeed）と衝突しない派生 seed のための salt。
 const STRESS_SEED_SALT = 0x53_54_52_53; // "STRS"
@@ -93,6 +102,7 @@ export class EventSchedule {
       );
       return {
         type: c.type,
+        base: c.base ?? "WETH",
         magnitude,
         startBlock,
         rampBlocks: c.rampBlocks,
@@ -118,14 +128,16 @@ export class EventSchedule {
   // 当該 blockIndex のオーバーレイ。重なるイベントは倍率を乗算合成する
   // （非重複なら各イベントがそのまま現れる）。
   at(blockIndex: number): OverlayState {
-    let wethMult = 1;
+    const baseMults: Record<string, number> = {};
     for (const ev of this.events) {
       const e = envelope(ev, blockIndex);
       if (e === 0) continue;
       const sign = ev.type === "crash" ? -1 : 1;
-      wethMult *= 1 + sign * ev.magnitude * e;
+      const cur = baseMults[ev.base] ?? 1;
+      baseMults[ev.base] = cur * (1 + sign * ev.magnitude * e);
     }
-    return { wethMult, usdcPx: 1 };
+    const wethMult = baseMults.WETH ?? 1;
+    return { wethMult, usdcPx: 1, baseMults };
   }
 }
 
@@ -162,6 +174,9 @@ function parseOne(raw: unknown, i: number): StressEventConfig {
   if (o.type !== "spike" && o.type !== "crash") {
     throw new Error(`${label}.type must be "spike" or "crash"`);
   }
+  if (o.base !== undefined && typeof o.base !== "string") {
+    throw new Error(`${label}.base must be a token symbol string`);
+  }
   const magnitudeRange = parseRange(
     o.magnitudeRange,
     `${label}.magnitudeRange`,
@@ -184,6 +199,7 @@ function parseOne(raw: unknown, i: number): StressEventConfig {
   }
   return {
     type: o.type,
+    base: typeof o.base === "string" ? o.base : undefined,
     magnitudeRange,
     windowFrac,
     rampBlocks,

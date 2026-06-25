@@ -11,6 +11,7 @@ import {
 } from "../src/llm/strategy.js";
 import { createState, seedStrategy } from "../src/llm/claudeAgent.js";
 import {
+  decodeFunctionData,
   encodeAbiParameters,
   encodeFunctionData,
   formatUnits,
@@ -34,6 +35,22 @@ const helpersFlash = {
     FLASH_ARB: "0x000000000000000000000000000000000000fa5b" as `0x${string}`,
   },
 };
+
+const flashLoanSimpleAbi = [
+  {
+    type: "function",
+    name: "flashLoanSimple",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "receiverAddress", type: "address" },
+      { name: "asset", type: "address" },
+      { name: "amount", type: "uint256" },
+      { name: "params", type: "bytes" },
+      { name: "referralCode", type: "uint16" },
+    ],
+    outputs: [],
+  },
+] as const;
 
 // executor が読むフィールドを満たす最小の観測。
 function syntheticObs(
@@ -118,6 +135,18 @@ test("arb ベース: gap が小さければ noop", () => {
   const r = runExecutor(s, obs, helpers);
   assert.equal(r.ok, true);
   if (r.ok) assert.equal(r.action.type, "noop");
+});
+
+// ADR 0013: base 非依存化。WBTC 等を選ぶ multi-asset 経路は registry に WBTC が必要なため
+// （parseAction が registry 検証する）、ERIS_LOCAL_DEPLOY=1 の統合検証スクリプトで確認する
+// （scripts/verify-multiasset-strategies）。ここでは WETH のみ観測で base 無し＝byte 互換のみ検証する。
+test("arb(WETH のみ観測): base フィールドを付けない（byte 互換）", () => {
+  const s = getBaseStrategy("arb");
+  assert.ok(s);
+  const r = runExecutor(s, syntheticObs(), helpers);
+  assert.equal(r.ok, true);
+  if (r.ok && r.action.type === "swap")
+    assert.equal((r.action as { base?: string }).base, undefined);
 });
 
 test("lp ベース: ポジションが無ければ tick 整列したレンジを mint", () => {
@@ -433,7 +462,9 @@ test("gmxtrend ベース: 上昇トレンドなら long を open", () => {
 test("fairmm ベース: ポジション無しなら fair 含意 tick 中心に mint", () => {
   const s = getBaseStrategy("fairmm");
   assert.ok(s);
-  const r = runExecutor(s, syntheticObs(), helpers); // pool 1690 < fair 1700
+  const obs = syntheticObs();
+  obs.fairPriceUsdcPerWeth = 1690;
+  const r = runExecutor(s, obs, helpers);
   assert.equal(r.ok, true);
   if (r.ok) {
     assert.equal(r.action.type, "mintLiquidity");
@@ -443,6 +474,16 @@ test("fairmm ベース: ポジション無しなら fair 含意 tick 中心に m
       assert.ok(r.action.tickLower < r.action.tickUpper);
     }
   }
+});
+
+test("fairmm ベース: pool tick が fair レンジ外なら one-sided LP を避ける", () => {
+  const s = getBaseStrategy("fairmm");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.fairPriceUsdcPerWeth = 2200;
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.action.type, "noop");
 });
 
 test("jitlp ベース: 高ボラで mint、低ボラ/履歴不足で noop", () => {
@@ -574,9 +615,17 @@ test("lpyield ベース: LP 無→mint、LP 有+遊休USDC→Aave supply", () =>
   // LP 無し → mint
   const a = syntheticObs();
   a.protocols.aave = emptyAave();
+  a.fairPriceUsdcPerWeth = 1690;
   const ra = runExecutor(s, a, helpers);
   assert.equal(ra.ok, true);
   if (ra.ok) assert.equal(ra.action.type, "mintLiquidity");
+
+  const outOfRange = syntheticObs();
+  outOfRange.protocols.aave = emptyAave();
+  outOfRange.fairPriceUsdcPerWeth = 2200;
+  const rr = runExecutor(s, outOfRange, helpers);
+  assert.equal(rr.ok, true);
+  if (rr.ok) assert.equal(rr.action.type, "noop");
 
   // LP 有り + 遊休 USDC → Aave へ park
   const b = syntheticObs();
@@ -663,7 +712,7 @@ test("flasharb ベース: spread 超 + FLASH_ARB 注入で flashLoanSimple の r
   const s = getBaseStrategy("flasharb");
   assert.ok(s);
   const obs = syntheticObs();
-  obs.protocols.balancer = { priceUsdcPerWeth: 1600 }; // spread ~5.6% > 0.3%
+  obs.protocols.balancer = { priceUsdcPerWeth: 1400 }; // large enough to clear fee/impact guard
   const r = runExecutor(s, obs, helpersFlash);
   assert.equal(r.ok, true);
   if (r.ok) {
@@ -680,6 +729,59 @@ test("flasharb ベース: spread 超 + FLASH_ARB 注入で flashLoanSimple の r
   }
 });
 
+test("flasharb ベース: Aave pool liquidity が薄ければ noop", () => {
+  const s = getBaseStrategy("flasharb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.protocols.balancer = { priceUsdcPerWeth: 1400 };
+  obs.protocols.aave = {
+    healthFactor: "0",
+    totalCollateralBase: "0",
+    totalDebtBase: "0",
+    availableBorrowsBase: "0",
+    supplied: {},
+    borrowed: {},
+    poolLiquidity: { USDC: "500000000" },
+  };
+  const r = runExecutor(s, obs, helpersFlash);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "noop");
+    if (r.action.type === "noop") {
+      assert.match(r.action.reason ?? "", /flash liquidity too low/);
+    }
+  }
+});
+
+test("flasharb ベース: Aave pool liquidity で flashUsdc を cap する", () => {
+  const s = getBaseStrategy("flasharb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.protocols.balancer = { priceUsdcPerWeth: 1400 };
+  obs.protocols.aave = {
+    healthFactor: "0",
+    totalCollateralBase: "0",
+    totalDebtBase: "0",
+    availableBorrowsBase: "0",
+    supplied: {},
+    borrowed: {},
+    poolLiquidity: { USDC: "10000000000" },
+  };
+  const r = runExecutor(s, obs, helpersFlash);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "rawTx");
+    if (r.action.type === "rawTx") {
+      const decoded = decodeFunctionData({
+        abi: flashLoanSimpleAbi,
+        data: r.action.tx.data as `0x${string}`,
+      });
+      assert.equal(decoded.functionName, "flashLoanSimple");
+      assert.equal(decoded.args[2], 9000000000n);
+    }
+  }
+});
+
 test("flasharb ベース: spread が小さければ noop", () => {
   const s = getBaseStrategy("flasharb");
   assert.ok(s);
@@ -688,6 +790,221 @@ test("flasharb ベース: spread が小さければ noop", () => {
   const r = runExecutor(s, obs, helpersFlash);
   assert.equal(r.ok, true);
   if (r.ok) assert.equal(r.action.type, "noop");
+});
+
+// USDC-only 配布(wethWei=0)対応: WETH 前提の base が先に USDC→WETH swap で調達するか。
+function assertUsdcToWethSwap(r: ReturnType<typeof runExecutor>) {
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "swap");
+    if (r.action.type === "swap") {
+      assert.equal(r.action.tokenIn, "USDC");
+      assert.ok(BigInt(r.action.amountIn) > 0n);
+    }
+  }
+}
+
+test("gmxperp(USDC-only): WETH 無しなら collateral 用に USDC→WETH swap", () => {
+  const s = getBaseStrategy("gmxperp");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.limits.maxGmxSizeUsd = "100000000000000000000000000000000000";
+  obs.protocols.gmx = { marketPriceUsd: 1700 };
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("gmxrev(USDC-only): open 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("gmxrev");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.limits.maxGmxSizeUsd = "100000000000000000000000000000000000";
+  obs.protocols.gmx = { marketPriceUsd: 1700 };
+  obs.fairPriceUsdcPerWeth = 1700;
+  obs.history = Array.from({ length: 12 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: 1690,
+    fairPriceUsdcPerWeth: 1690, // MA 1690 < price 1700 → open、ただし WETH 無し→swap
+  }));
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("gmxtrend(USDC-only): open 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("gmxtrend");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.limits.maxGmxSizeUsd = "100000000000000000000000000000000000";
+  obs.protocols.gmx = { marketPriceUsd: 1700 };
+  obs.history = Array.from({ length: 8 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: 1680 + i * 8,
+    fairPriceUsdcPerWeth: 1680 + i * 8, // 上昇トレンド→open、ただし WETH 無し→swap
+  }));
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("dnlp(USDC-only): LP mint 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("dnlp");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.protocols.gmx = { marketPriceUsd: 1700 };
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers)); // LP 無 → 調達 swap
+});
+
+test("aave(USDC-only): supply 用 WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("aave");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.limits.maxAaveSupplyWethWei = "5000000000000000000";
+  obs.limits.maxAaveBorrowUsdcUnits = "5000000000";
+  obs.protocols.aave = emptyAave();
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("aaveloop(USDC-only): 未開始で WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("aaveloop");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.balances.usdcUnits = "10000000000"; // 10000 USDC
+  obs.limits.maxAaveSupplyWethWei = "5000000000000000000";
+  obs.protocols.aave = emptyAave();
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("lpyield(USDC-only): LP mint 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("lpyield");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.protocols.aave = emptyAave();
+  obs.fairPriceUsdcPerWeth = 1690;
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers)); // LP 無 → 調達 swap
+});
+
+test("lp(USDC-only): mint 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("lp");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("fairmm(USDC-only): mint 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("fairmm");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.fairPriceUsdcPerWeth = 1690;
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("jitlp(USDC-only): 高ボラ mint 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("jitlp");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.history = Array.from({ length: 14 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: i % 2 === 0 ? 1700 : 1785,
+    fairPriceUsdcPerWeth: i % 2 === 0 ? 1700 : 1785,
+  }));
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("ladder(USDC-only): mint 前に WETH 無しなら USDC→WETH swap", () => {
+  const s = getBaseStrategy("ladder");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("venue(USDC-only): WETH 売り側 gap は残高無しなら避けて USDC 側を選ぶ", () => {
+  const s = getBaseStrategy("venue");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.protocols.uniswap!.pool.priceUsdcPerWeth = 1695; // funded USDC buy
+  obs.protocols.curve = { priceUsdcPerWeth: 1900 }; // larger but unfunded WETH sell
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "swap");
+    if (r.action.type === "swap") assert.equal(r.action.tokenIn, "USDC");
+  }
+});
+
+test("arb(USDC-only): WETH 売り側しか無ければ小さく USDC→WETH seed", () => {
+  const s = getBaseStrategy("arb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.inventory = { valueUsdc: 10000, weth: 0, usdc: 10000, eth: 1 };
+  obs.protocols.uniswap!.pool.priceUsdcPerWeth = 1800; // WETH 売り側だが WETH 無し
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("adaptivearb(USDC-only): WETH 売り側しか無ければ小さく USDC→WETH seed", () => {
+  const s = getBaseStrategy("adaptivearb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.inventory = { valueUsdc: 10000, weth: 0, usdc: 10000, eth: 1 };
+  obs.protocols.uniswap!.pool.priceUsdcPerWeth = 1800; // WETH 売り側だが WETH 無し
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("statarb(USDC-only): WETH 売り側 gap は残高無しなら避けて USDC 側を選ぶ", () => {
+  const s = getBaseStrategy("statarb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.history = Array.from({ length: 12 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: i % 2 === 0 ? 1699 : 1701,
+    fairPriceUsdcPerWeth: 1700,
+  }));
+  obs.protocols.uniswap!.pool.priceUsdcPerWeth = 1600; // funded USDC buy
+  obs.protocols.curve = { priceUsdcPerWeth: 1900 }; // larger but unfunded WETH sell
+  const r = runExecutor(s, obs, helpers);
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.action.type, "swap");
+    if (r.action.type === "swap") assert.equal(r.action.tokenIn, "USDC");
+  }
+});
+
+test("statarb(USDC-only): WETH 売り側しか無ければ burn-in 後に小さく seed", () => {
+  const s = getBaseStrategy("statarb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.inventory = { valueUsdc: 10000, weth: 0, usdc: 10000, eth: 1 };
+  obs.history = Array.from({ length: 12 }, (_, i) => ({
+    round: i + 1,
+    poolPriceUsdcPerWeth: i % 2 === 0 ? 1699 : 1701,
+    fairPriceUsdcPerWeth: 1700,
+  }));
+  obs.protocols.uniswap!.pool.priceUsdcPerWeth = 1800; // WETH 売り側だが WETH 無し
+  assertUsdcToWethSwap(runExecutor(s, obs, helpers));
+});
+
+test("flasharb(USDC-only): flash edge が無ければ fair fallback 用に seed", () => {
+  const s = getBaseStrategy("flasharb");
+  assert.ok(s);
+  const obs = syntheticObs();
+  obs.balances.wethWei = "0";
+  obs.inventory = { valueUsdc: 10000, weth: 0, usdc: 10000, eth: 1 };
+  obs.protocols.uniswap!.pool.priceUsdcPerWeth = 1800; // fair より高く WETH 売り側
+  obs.protocols.balancer = { priceUsdcPerWeth: 1800 }; // cross-venue spread は無し
+  const r = runExecutor(s, obs, helpersFlash);
+  assertUsdcToWethSwap(r);
+  if (r.ok && r.action.type === "swap") assert.equal(r.action.slippageBps, 300);
 });
 
 test("getBaseStrategy: 未知 id / undefined は null", () => {

@@ -1,7 +1,0 @@
-{
-  "agents": [
-    { "id": "liquidator", "command": "node", "args": ["--import", "tsx", "examples/agents/liquidator.ts"], "wallet": "AUTO", "description": "Aave V3 liquidation bot" },
-    { "id": "simple", "command": "node", "args": ["--import", "tsx", "examples/agents/simple-rule.ts"], "wallet": "AUTO", "description": "uniswap arb" },
-    { "id": "noop", "command": "node", "args": ["--import", "tsx", "examples/agents/noop.ts"], "wallet": "AUTO", "baseline": true, "description": "noop" }
-  ]
-}

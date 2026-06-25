@@ -28,12 +28,17 @@ import { wethAbi } from "../../../src/abis.js";
 import { parseAction, validateAction } from "../../../src/action.js";
 import { getBalances, makeClients } from "../../../src/chain.js";
 import { loadConfig } from "../../../src/config.js";
+import { loadRunConfig } from "../../../src/runConfig.js";
 import { GMX_MARKETS, TOKENS } from "../../../src/constants.js";
 import { observationFor } from "../../../src/coordinator.js";
 import { safeStringify } from "../../../src/logger.js";
+import { baseTokens, tokenInfo } from "../../../src/markets.js";
 import { initProtocols } from "../../../src/protocols/registry.js";
 import type { FlowWallet, SimContext } from "../../../src/protocols/types.js";
-import { readFairPrice } from "../../../src/realtime/priceFeed.js";
+import {
+  readFairPrice,
+  readFairPriceFor,
+} from "../../../src/realtime/priceFeed.js";
 import { Rng } from "../../../src/rng.js";
 import type {
   AgentObservation,
@@ -105,9 +110,18 @@ function startDirectShim(): void {
   }) as typeof process.stdout.write;
 
   // ---- チェーンクライアント ----
-  const config = loadConfig();
+  // ADR 0013: coordinator が YAML 設定パスを ERIS_CONFIG で渡していれば、同じ YAML から config を
+  // 再構築する（設定の単一ソース）。無ければ従来どおり env から読む（移行期 / 旧経路）。
+  const config = process.env.ERIS_CONFIG
+    ? loadRunConfig(process.env.ERIS_CONFIG).config
+    : loadConfig();
   const adapters = initProtocols(config.enabledProtocols);
   const enabledIds = adapters.map((a) => a.id);
+  // ADR 0013: WETH 以外の base（WBTC 等）。fork 既定では空 = 完全に従来挙動。
+  // coordinator の extraBaseSymbols と同じ導出（registry の base から WETH を除く）。
+  const extraBaseSymbols = baseTokens()
+    .map((t) => t.symbol)
+    .filter((s) => s !== "WETH");
   // batch=true: 毎ブロック十数本の観測読取を Multicall3 / JSON-RPC batch に自動集約し、
   // anvil への往復を ~20 本 → 数本に抑える（44 体同時の読みストームで律速になるため）。
   const { chain, publicClient, walletClient } = makeClients(
@@ -173,7 +187,7 @@ function startDirectShim(): void {
   };
 
   const sendBuiltTx = async (
-    tx: { to: Address; data?: Hex; value?: bigint },
+    tx: { to: Address; data?: Hex; value?: bigint; gas?: bigint },
     priorityFeeWei: bigint,
     meta: Record<string, unknown>,
   ): Promise<void> => {
@@ -181,12 +195,33 @@ function startDirectShim(): void {
       const block = await publicClient.getBlock();
       const baseFee = block.baseFeePerGas ?? 0n;
       const nonce = await allocNonce();
+      let gas = tx.gas;
+      if (gas === undefined) {
+        try {
+          const estimated = await publicClient.estimateGas({
+            account: address,
+            to: tx.to,
+            data: tx.data,
+            value: tx.value ?? 0n,
+            maxFeePerGas: baseFee * 2n + priorityFeeWei,
+            maxPriorityFeePerGas: priorityFeeWei,
+          });
+          const bufferBps = BigInt(
+            process.env.ERIS_DIRECT_GAS_BUFFER_BPS ?? "13000",
+          );
+          const buffered = (estimated * bufferBps + 9_999n) / 10_000n;
+          gas = buffered > estimated + 50_000n ? buffered : estimated + 50_000n;
+        } catch {
+          // Let viem/anvil surface the original simulation failure below.
+        }
+      }
       const hash = await walletClient.sendTransaction({
         account,
         chain,
         to: tx.to,
         data: tx.data,
         value: tx.value ?? 0n,
+        gas,
         nonce,
         // baseFee 揺らぎ耐性のため headroom を持たせる（実効 tip は maxPriorityFeePerGas のまま）
         maxFeePerGas: baseFee * 2n + priorityFeeWei,
@@ -406,6 +441,8 @@ function startDirectShim(): void {
           await sendBuiltTx(tx, intent.priorityFeeWei, {
             actionType: intent.action.type,
             protocol: intent.protocol,
+            // ADR 0013: WBTC 等の market を取引したことをログに残す（WETH は undefined で従来どおり省略）。
+            base: (intent.action as { base?: string }).base,
             bundleId: intent.bundleId,
             bundleIndex: intent.bundleIndex,
             blockSeen,
@@ -440,6 +477,22 @@ function startDirectShim(): void {
         readFairPrice(publicClient, priceFeed),
         getBalances(publicClient, address),
       ]);
+      // ADR 0013: 追加 base の fair price を PriceFeed から読み ctx.fairPrices へ。これで
+      // observationFor が observation.fairPricesUsd を全 base 分埋める（agent が WBTC を観測できる）。
+      // adapter.observe は ctx.fairPrices?.[base] を見るため observationFor 前に必ず設定する。
+      // extraBaseSymbols=[]（fork 既定）なら fairPrices={WETH} で従来と byte 一致。
+      const fairPrices: Record<string, number> = { WETH: fairPrice };
+      if (extraBaseSymbols.length > 0) {
+        const extra = await Promise.all(
+          extraBaseSymbols.map((b) =>
+            readFairPriceFor(publicClient, priceFeed, tokenInfo(b).address),
+          ),
+        );
+        extraBaseSymbols.forEach((b, i) => {
+          fairPrices[b] = extra[i];
+        });
+      }
+      ctx.fairPrices = fairPrices;
       const states = await Promise.all(
         adapters.map((adapter) => adapter.readState(ctx, fairPrice)),
       );

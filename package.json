@@ -14,6 +14,7 @@
     "discrimination": "tsx scripts/discrimination.ts",
     "stress-report": "tsx scripts/stressReport.ts",
     "gen:roster": "tsx scripts/genRoster.ts",
+    "gen:local-constants": "tsx scripts/genLocalConstants.ts",
     "agent:noop": "tsx examples/agents/noop.ts",
     "agent:random": "tsx examples/agents/random.ts",
     "agent:simple": "tsx examples/agents/simple-rule.ts",
@@ -31,6 +32,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.150",
     "@anthropic-ai/sdk": "^0.98.0",
     "viem": "^2.39.3",
+    "yaml": "^2.9.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

@@ -12,9 +12,11 @@ import {
   type WalletClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { erc20Abi, wethAbi } from "./abis.js";
 import { MULTICALL3, TOKENS } from "./constants.js";
-import type { BalanceSnapshot } from "./types.js";
+import { baseTokens, tokenInfo } from "./markets.js";
+import type { BalanceSnapshot, TokenSymbol } from "./types.js";
 
 export function makeChain(chainId: number) {
   return {
@@ -80,11 +82,42 @@ export function activeStables(): Address[] {
   return ACTIVE_STABLES;
 }
 
+// ---------------------------------------------------------------------------
+// マルチアセット会計（ADR 0013）：bases は base トークン（WETH/WBTC…）の在庫マップ。
+// ACTIVE_STABLES と同型で、coordinator が有効 market から active 集合を設定する。
+// 既定 [WETH] のとき getBalances/fundWallet は従来と完全一致（WETH byte 互換）。
+// ---------------------------------------------------------------------------
+let ACTIVE_BASES: Address[] = [TOKENS.WETH.address];
+
+export function setActiveBases(addresses: Address[]): void {
+  const seen = new Set<string>();
+  const list: Address[] = [];
+  for (const a of [TOKENS.WETH.address, ...addresses]) {
+    const lower = a.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    list.push(a);
+  }
+  ACTIVE_BASES = list;
+}
+
+export function activeBases(): Address[] {
+  return ACTIVE_BASES;
+}
+
+// base アドレス(lower) -> シンボル。registry の base トークンから逆引き（WETH は常に "WETH"）。
+function baseSymbolFor(address: Address): TokenSymbol {
+  const lower = address.toLowerCase();
+  if (lower === TOKENS.WETH.address.toLowerCase()) return "WETH";
+  const match = baseTokens().find((t) => t.address.toLowerCase() === lower);
+  return match?.symbol ?? address;
+}
+
 export async function getBalances(
   publicClient: PublicClient,
   address: Address,
 ): Promise<BalanceSnapshot> {
-  const [ethWei, wethWei, ...stableBalances] = await Promise.all([
+  const [ethWei, wethWei, ...rest] = await Promise.all([
     publicClient.getBalance({ address }),
     publicClient.readContract({
       address: TOKENS.WETH.address,
@@ -92,6 +125,15 @@ export async function getBalances(
       functionName: "balanceOf",
       args: [address],
     }),
+    // base 残高（WETH を含む。WETH は wethWei と同じ読取だが bases キーを揃えるため再度読む）。
+    ...ACTIVE_BASES.map((token) =>
+      publicClient.readContract({
+        address: token,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [address],
+      }),
+    ),
     ...ACTIVE_STABLES.map((token) =>
       publicClient.readContract({
         address: token,
@@ -101,15 +143,21 @@ export async function getBalances(
       }),
     ),
   ]);
+  const baseBalances = (rest as bigint[]).slice(0, ACTIVE_BASES.length);
+  const stableBalances = (rest as bigint[]).slice(ACTIVE_BASES.length);
+  const bases: Record<string, bigint> = {};
+  ACTIVE_BASES.forEach((token, i) => {
+    // WETH は wethWei を正とし、bases["WETH"] と一致させる（byte 互換）。
+    const lower = token.toLowerCase();
+    bases[baseSymbolFor(token)] =
+      lower === TOKENS.WETH.address.toLowerCase() ? wethWei : baseBalances[i];
+  });
   const stables: Record<string, bigint> = {};
   ACTIVE_STABLES.forEach((token, i) => {
-    stables[token.toLowerCase()] = (stableBalances as bigint[])[i];
+    stables[token.toLowerCase()] = stableBalances[i];
   });
-  const usdcUnits = (stableBalances as bigint[]).reduce(
-    (sum, b) => sum + b,
-    0n,
-  );
-  return { ethWei, wethWei, usdcUnits, stables };
+  const usdcUnits = stableBalances.reduce((sum, b) => sum + b, 0n);
+  return { ethWei, wethWei, usdcUnits, bases, stables };
 }
 
 // 単一 stable の残高（adapter が自分の stable 在庫を確認するため）
@@ -216,17 +264,58 @@ export type ResetForkOptions = {
   forkUrl?: string;
   // 再フォーク先ブロック（FORK_BLOCK_NUMBER）。固定すると再実行が完全再現可能。
   forkBlockNumber?: number;
+  // ローカル(非fork)デプロイモード。fork し直さず evm_snapshot/evm_revert でリセットする。
+  localDeploy?: boolean;
+  // ローカルモードの snapshot ID 永続化ファイル。別プロセスの run 間でクリーン断面を共有する。
+  localSnapshotFile?: string;
 };
 
 // 同一プロセス内で一度捕捉した再フォーク先ブロック。multiSeedRun は 1 プロセスで全 SEED を
 // 回すため、ここで固定して全 seed が同一フォークブロック（=同一の DeFi 流動性基準）を共有する。
 let capturedForkBlock: number | undefined;
 
+// ローカルデプロイモードの snapshot ID（プロセス内で run 間に revert→再 snapshot する）。
+let localSnapshotId: Hex | undefined;
+
 export async function resetFork(
   publicClient: PublicClient,
   options: ResetForkOptions = {},
 ): Promise<void> {
-  const { forkUrl, forkBlockNumber } = options;
+  const { forkUrl, forkBlockNumber, localDeploy, localSnapshotFile } = options;
+  if (localDeploy) {
+    // 非fork: 上流が無いため anvil_reset でフォークし直せない。代わりに evm_snapshot/
+    // evm_revert で「デプロイ直後のクリーン断面」へ戻す。snapshot は revert 直後に取り直すので
+    // 必ずクリーン断面を指す。
+    //
+    // cross-process: snapshot ID をファイル永続化し、別プロセスの run も前プロセスが残した
+    // クリーン snapshot へ revert して始める（逐次起動を想定）。優先順: プロセス内メモリ >
+    // 永続ファイル。stale id（anvil 再起動）は evm_revert が false を返すので現状態を base にする
+    // (self-healing。前提 = freshly deployed anvil なら現状態はクリーン)。
+    let revertTo = localSnapshotId;
+    if (!revertTo && localSnapshotFile && existsSync(localSnapshotFile)) {
+      const persisted = readFileSync(localSnapshotFile, "utf8").trim();
+      if (persisted) revertTo = persisted as Hex;
+    }
+    if (revertTo) {
+      await publicClient
+        .request({ method: "evm_revert", params: [revertTo] } as AnvilRequest)
+        .catch(() => {
+          /* stale id: 現状態を base にする */
+        });
+    }
+    localSnapshotId = (await publicClient.request({
+      method: "evm_snapshot",
+      params: [],
+    } as AnvilRequest)) as Hex;
+    if (localSnapshotFile) {
+      try {
+        writeFileSync(localSnapshotFile, localSnapshotId);
+      } catch {
+        /* 永続化に失敗してもプロセス内は動く */
+      }
+    }
+    return;
+  }
   if (!forkUrl) {
     // 上流 RPC 不明 → soft reset。状態が完全にはクリアされないため、複数 run/seed を
     // 同一 anvil で回す場合は anvil を都度再起動するか forkUrl を設定すること。
@@ -424,6 +513,9 @@ export async function fundWallet(
   ethWei: bigint,
   wethWei: bigint,
   usdcUnits: bigint,
+  // ADR 0013: WETH 以外の base 在庫（シンボル -> 量）。既定は配らない（WBTC 初期 0 が方針）。
+  // WETH はここに入れても無視する（上の deposit 経路が正）。
+  baseAmounts?: Record<string, bigint>,
 ): Promise<void> {
   const address = accountAddress(privateKey);
   await setEthBalance(publicClient, address, ethWei + wethWei + GAS_BUFFER_WEI);
@@ -442,6 +534,13 @@ export async function fundWallet(
     // active な各 stable に usdcUnits を付与（cross-venue で各 stable 在庫を持たせる）
     for (const token of ACTIVE_STABLES) {
       await dealErc20(publicClient, token, address, usdcUnits);
+    }
+  }
+  if (baseAmounts) {
+    for (const [symbol, amount] of Object.entries(baseAmounts)) {
+      // WETH は deposit 経路で扱う。0 は配らない。
+      if (symbol === "WETH" || amount <= 0n) continue;
+      await dealErc20(publicClient, tokenInfo(symbol).address, address, amount);
     }
   }
 }

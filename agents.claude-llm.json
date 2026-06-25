@@ -5,7 +5,13 @@
       "command": "node",
       "args": ["--import", "tsx", "examples/agents/claude-llm.ts"],
       "wallet": "AGENT0_PRIVATE_KEY",
-      "description": "Claude Sonnet 4.6 autonomous strategist (NL strategy + TS executor, async revisions). Requires ANTHROPIC_API_KEY in the parent shell, or set ERIS_LLM_MOCK=1 to use the offline mock."
+      "env": {
+        "ERIS_LLM_AUTH": "ollama",
+        "ERIS_LLM_MODEL": "gpt-oss:120b",
+        "ERIS_OLLAMA_BASE_URL": "https://ollama.com/api",
+        "ERIS_OLLAMA_MAX_RETRIES": "3"
+      },
+      "description": "Ollama Cloud autonomous strategist (NL strategy + TS executor, async revisions). Backend/model are set via env above; only the secret OLLAMA_API_KEY must come from the parent shell (or .env). Set ERIS_LLM_MOCK=1 to use the offline mock."
     }
   ]
 }

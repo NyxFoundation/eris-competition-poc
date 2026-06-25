@@ -1,5 +1,6 @@
 import { keccak256, stringToBytes, type Address, type Hex } from "viem";
-import { loadAgents, loadConfig, privateKeyForWalletName } from "../config.js";
+import { privateKeyForWalletName } from "../config.js";
+import { resolveRunInputs } from "../runConfig.js";
 import { validateAction } from "../action.js";
 import {
   accountAddress,
@@ -10,13 +11,19 @@ import {
   mine,
   resetFork,
   sendAndMine,
+  setAutomine,
   setEthBalance,
   setIntervalMining,
 } from "../chain.js";
 import { RunLogger } from "../logger.js";
 import { valueUsdc } from "../pnl.js";
 import { checkRunFeeViolations } from "../postRunCheck.js";
-import { nextFairPrice, Rng } from "../rng.js";
+import {
+  nextFairPrice,
+  ouParamsForSymbol,
+  priceRngForAsset,
+  Rng,
+} from "../rng.js";
 import type {
   AgentAction,
   AgentObservation,
@@ -39,10 +46,12 @@ import {
   writeAaveOraclesStorage,
 } from "../protocols/oracles.js";
 import { GMX_MARKETS } from "../constants.js";
+import { baseTokens, gmxMarketAddresses, tokenInfo } from "../markets.js";
 import {
   buildFlowContext,
   flowOrdersToIntents,
   initialFairPrice,
+  initialFairPriceFor,
   observationFor,
   requestFlowIntents,
   submitIntent,
@@ -54,8 +63,10 @@ import { RealtimeAgentProcess } from "./agentProcess.js";
 import { RealtimeFlowProcess } from "./flowProcess.js";
 import {
   deployPriceFeed,
+  updatePriceFeedForMempool,
   updatePriceFeedMempool,
   writePriceFeedStorage,
+  writePriceFeedStorageFor,
 } from "./priceFeed.js";
 import { reconstructValueSeries } from "./reconstruct.js";
 import { EventSchedule } from "./events.js";
@@ -169,8 +180,19 @@ type SubmittedMeta = {
 // ための floor（~数十 tx ぶん）。最終的な endowment 値は較正実測で決める（ADR「決めていないこと」）。
 const MIN_ECONOMIC_GAS_ETH_WEI = 500_000_000_000_000_000n; // 0.5 ETH
 
-export async function runRealtimeSimulation(): Promise<void> {
-  const config = loadConfig();
+export async function runRealtimeSimulation(
+  // 評価ツールが per-regime SEED 等をプログラム的に差し込む（env を mutate しない）。
+  overrides: Record<string, string | number | boolean> = {},
+): Promise<void> {
+  // ADR 0013: 設定は YAML（eris.config.yaml / --config）を単一ソースに解決する。YAML が無ければ
+  // 旧来の env 駆動にフォールバックする（移行期）。configPath は子プロセスへ伝播し、direct モードの
+  // agent（directShim）が同じ YAML から config を再構築できるようにする。
+  const {
+    config,
+    agents: agentSpecs,
+    configPath,
+  } = resolveRunInputs(process.argv, overrides);
+  if (configPath) process.env.ERIS_CONFIG = configPath;
   const adapters = initProtocols(config.enabledProtocols);
   const enabledIds = adapters.map((a) => a.id);
   const directTx = config.agentDirectTx;
@@ -222,11 +244,20 @@ export async function runRealtimeSimulation(): Promise<void> {
     await resetFork(publicClient, {
       forkUrl: config.forkUrl,
       forkBlockNumber: config.forkBlockNumber,
+      localDeploy: config.localDeploy,
+      localSnapshotFile: config.localSnapshotFile,
     });
   }
 
-  // ---- agent ウォレット（プロセスは setup 完了後に起動する）----
-  const agentSpecs = loadAgents(config.agentsConfigPath);
+  // ローカルモードの mining 整合: deployer anvil は auto-mine 起動だが、別プロセスの run は
+  // 前 run の teardown(setIntervalMining 0)後の状態を継承し setup tx が mine されずハングする。
+  // setup フェーズは auto-mine を明示 ON にして全 setup tx を確実に mine する（fork は --no-mining
+  // 起動なので不要。competition 開始時に OFF へ戻して fee 競争を成立させる = 後述）。
+  if (config.localDeploy) {
+    await setAutomine(publicClient, true);
+  }
+
+  // ---- agent ウォレット（プロセスは setup 完了後に起動する。agentSpecs は YAML/env から解決済み）----
   const agentRuntimes: RealtimeAgentRuntime[] = agentSpecs.map((spec) => {
     const privateKey = privateKeyForWalletName(config, spec.wallet, spec.id);
     return {
@@ -280,7 +311,7 @@ export async function runRealtimeSimulation(): Promise<void> {
     adminPk,
     keeperPk,
     oracle: { aaveAggregators: {} },
-    gmx: { market: GMX_MARKETS.ETH_USD },
+    gmx: { market: GMX_MARKETS.ETH_USD, markets: gmxMarketAddresses() },
     pendingGmxOrders: [],
     flowWallet(protocol: ProtocolId, kind: FlowKind): FlowWallet {
       const w = flowWalletMap.get(`${protocol}:${kind}`);
@@ -348,16 +379,20 @@ export async function runRealtimeSimulation(): Promise<void> {
       // spread 注入ウォレットは毎ブロック片側 leg を出し続けるため在庫が枯れやすい。
       // cheatcode 設定で市場インパクトなく深く積んでおく（leg サイズ × run 長で枯れない）。
       const isSpread = t.key?.endsWith(":spread") ?? false;
+      const isFlow = t.key !== undefined;
       await fundWallet(
         publicClient,
         walletClient,
         chain,
         t.privateKey,
-        config.initialEthWei,
+        isFlow ? config.flowEthWei : config.initialEthWei,
         isSpread
           ? config.initialWethWei + config.crossVenueSpreadFlowMaxWethWei * 500n
           : config.initialWethWei,
         isSpread ? config.initialUsdcUnits * 200n : config.initialUsdcUnits,
+        // ADR 0013: WETH 以外の base の初期在庫（INITIAL_<SYM>_<UNIT>。既定 0 = 配らない＝byte 互換）。
+        // USDC-only 評価方針では 0 のままで、agent/flow は USDC から base を買って建てる。
+        config.initialBaseAmounts,
       );
       for (const adapter of adapters) {
         if (!adapter.setupWallet) continue;
@@ -702,6 +737,11 @@ export async function runRealtimeSimulation(): Promise<void> {
     }
 
     // ---- 競争フェーズ開始：実 N 秒ごとの interval mining へ ----
+    // ローカルモードは setup 用に auto-mine を ON にしたので、ここで OFF に戻す。
+    // auto-mine が残ると tx ごとに単独ブロック化して fee 競争が壊れる（fork は元から OFF）。
+    if (config.localDeploy) {
+      await setAutomine(publicClient, false);
+    }
     await setIntervalMining(publicClient, config.blockTimeSec);
     logger.event({
       type: "interval_mining_started",
@@ -713,6 +753,20 @@ export async function runRealtimeSimulation(): Promise<void> {
     let baseFair = latestFairPrice; // OU 状態。イベントで触らない。
     // 平均回帰価格モデルの中心（競争開始時の base fair price）。run を通して固定。
     const fairAnchor = baseFair;
+    // ADR 0013: 追加 base（WBTC 等）の独立 OU 価格。各 base は専用 Rng で進むため WETH の価格
+    // パスは不変（fork 既定では extraBaseSymbols=[] → 完全に従来と一致＝byte 互換）。
+    const extraBaseSymbols = baseTokens()
+      .map((t) => t.symbol)
+      .filter((s) => s !== "WETH");
+    const extraPriceRng: Record<string, Rng> = {};
+    const extraBaseFair: Record<string, number> = {};
+    const extraAnchor: Record<string, number> = {};
+    for (const b of extraBaseSymbols) {
+      extraPriceRng[b] = priceRngForAsset(config.seed, b);
+      const p0 = await initialFairPriceFor(ctx, b, enabledIds);
+      extraBaseFair[b] = p0;
+      extraAnchor[b] = p0;
+    }
     const schedule = new EventSchedule(
       config.stressEvents,
       config.seed,
@@ -797,6 +851,18 @@ export async function runRealtimeSimulation(): Promise<void> {
           baseFair = nextFairPrice(baseFair, rng, fairAnchor);
           const overlay = schedule.at(blockIndex);
           latestFairPrice = baseFair * overlay.wethMult;
+          // ADR 0013: 追加 base を独立 Rng で進め、effective を ctx.fairPrices に配布する。
+          const fairPrices: Record<string, number> = { WETH: latestFairPrice };
+          for (const b of extraBaseSymbols) {
+            extraBaseFair[b] = nextFairPrice(
+              extraBaseFair[b],
+              extraPriceRng[b],
+              extraAnchor[b],
+              ouParamsForSymbol(b),
+            );
+            fairPrices[b] = extraBaseFair[b] * (overlay.baseMults[b] ?? 1);
+          }
+          ctx.fairPrices = fairPrices;
 
           // keeper / oracle 書込 / state+flow は相互に独立（ウォレットも別）なので並列に走らせる。
           // tx の記録（blocks.csv）はループから外し、run 後に一括走査する（logBlock 参照）。
@@ -846,6 +912,15 @@ export async function runRealtimeSimulation(): Promise<void> {
                     priorityFeeWei: oracleFee,
                   });
                 }
+                for (const b of extraBaseSymbols) {
+                  await writePriceFeedStorageFor(
+                    publicClient,
+                    priceFeedAddress,
+                    tokenInfo(b).address,
+                    fairPrices[b],
+                    BigInt(bn),
+                  );
+                }
                 return;
               }
               const feedHash = await updatePriceFeedMempool(
@@ -860,6 +935,21 @@ export async function runRealtimeSimulation(): Promise<void> {
                 priorityFeeWei: oracleFee,
                 actionType: "priceFeedUpdate",
               });
+              for (const b of extraBaseSymbols) {
+                const extraHash = await updatePriceFeedForMempool(
+                  ctx,
+                  priceFeedAddress,
+                  tokenInfo(b).address,
+                  fairPrices[b],
+                  oracleFee,
+                );
+                submittedByHash.set(extraHash.toLowerCase(), {
+                  ownerId: "oracle",
+                  role: "system",
+                  priorityFeeWei: oracleFee,
+                  actionType: "priceFeedUpdate",
+                });
+              }
               const oracleHashes = await updateOraclesMempool(
                 ctx,
                 latestFairPrice,

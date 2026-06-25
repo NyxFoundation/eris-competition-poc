@@ -1,6 +1,12 @@
+.DS_Store
+.env
 .env.local
 .env.keys
 agents.local.json
+# ローカルの run 設定（eris.config.example.yaml はコミット、実ファイルは無視）
+eris.config.yaml
+eris.config.*.yaml
+!eris.config.example.yaml
 runs/
 cache/
 out/
@@ -9,3 +15,10 @@ dist/
 probe_tmp.mts
 .serena/
 .playwright-cli/
+
+# ローカルデプロイモードの snapshot ID
+.local-snapshot
+
+# spot runner のローカル状態（アカウント固有）
+infra/spot/.current-ami
+runs-spot-*/

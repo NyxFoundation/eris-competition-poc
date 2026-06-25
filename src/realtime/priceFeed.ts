@@ -3,7 +3,9 @@
 // agent は stdin push の代わりにこれを読む（書込 tx は次ブロック着弾なので情報は 1 ブロック遅れる。
 // 全 agent に等しく作用するため公平性は保たれる — ADR 0006 §3 に明記済みの仕様）。
 import {
+  encodeAbiParameters,
   encodeFunctionData,
+  keccak256,
   type Address,
   type Hex,
   type PublicClient,
@@ -25,6 +27,24 @@ export const priceFeedAbi = [
     name: "latestAnswer",
     stateMutability: "view",
     inputs: [],
+    outputs: [{ type: "int256" }],
+  },
+  // ADR 0013: 追加 base（WBTC 等）の per-asset 価格。WETH は上の setPrice/latestAnswer を使う。
+  {
+    type: "function",
+    name: "setPriceFor",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "token", type: "address" },
+      { name: "answer", type: "int256" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "answerOf",
+    stateMutability: "view",
+    inputs: [{ name: "token", type: "address" }],
     outputs: [{ type: "int256" }],
   },
 ] as const;
@@ -116,6 +136,85 @@ export async function readFairPrice(
     address,
     abi: priceFeedAbi,
     functionName: "latestAnswer",
+    blockNumber,
+  })) as bigint;
+  return fromPriceFeedAnswer(answer);
+}
+
+// ---------------------------------------------------------------------------
+// ADR 0013: 追加 base（WBTC 等）の価格配布。WETH は上の WETH 専用 API を使い続ける。
+// ---------------------------------------------------------------------------
+
+// 追加 base の mempool 書込（setPriceFor）。WETH は updatePriceFeedMempool を使う。
+export async function updatePriceFeedForMempool(
+  ctx: SimContext,
+  address: Address,
+  token: Address,
+  price: number,
+  priorityFeeWei: bigint,
+): Promise<Hex> {
+  return sendNoMine(
+    ctx.publicClient,
+    ctx.walletClient,
+    ctx.chain,
+    ctx.adminPk,
+    {
+      to: address,
+      data: encodeFunctionData({
+        abi: priceFeedAbi,
+        functionName: "setPriceFor",
+        args: [token, toPriceFeedAnswer(price)],
+      }),
+      gas: SETTER_GAS,
+    },
+    priorityFeeWei,
+  );
+}
+
+// _answers(slot 2) / _answerUpdatedAtBlock(slot 3) の mapping 要素 slot = keccak256(token ++ mapSlot)。
+function answerSlotFor(token: Address, mapSlot: bigint): Hex {
+  return keccak256(
+    encodeAbiParameters(
+      [{ type: "address" }, { type: "uint256" }],
+      [token, mapSlot],
+    ),
+  );
+}
+
+// ADR 0011 §1 と同様の storage 直書きを追加 base にも適用（mapping slot 2/3）。
+export async function writePriceFeedStorageFor(
+  publicClient: PublicClient,
+  address: Address,
+  token: Address,
+  price: number,
+  blockNumber: bigint,
+): Promise<void> {
+  await setStorageAt(
+    publicClient,
+    address,
+    answerSlotFor(token, 2n),
+    bigintToStorageWord(toPriceFeedAnswer(price)),
+  );
+  await setStorageAt(
+    publicClient,
+    address,
+    answerSlotFor(token, 3n),
+    bigintToStorageWord(blockNumber),
+  );
+}
+
+// 追加 base の fair price を読む（answerOf）。WETH は readFairPrice(latestAnswer)。
+export async function readFairPriceFor(
+  publicClient: PublicClient,
+  address: Address,
+  token: Address,
+  blockNumber?: bigint,
+): Promise<number> {
+  const answer = (await publicClient.readContract({
+    address,
+    abi: priceFeedAbi,
+    functionName: "answerOf",
+    args: [token],
     blockNumber,
   })) as bigint;
   return fromPriceFeedAnswer(answer);

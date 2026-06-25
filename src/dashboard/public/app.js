@@ -25,6 +25,7 @@ const S = {
   fairPrice: 0,
   poolPrice: null,
   activity: new Map(), // id -> activity
+  agentRecent: new Map(), // id -> recent tx/action rows
   history: new Map(), // id -> number[]（detail スパークライン用）
   blocks: [], // {blockNumber, timingMs, ts}
   feed: [], // 直近 tx（detail の recent 抽出用）
@@ -37,6 +38,20 @@ const S = {
   mempool: 0,
   scenario: null, // 市場ストレスシナリオ {name, runStartBlock, events:[{type,startBlock,endBlock,magnitude}]}
 };
+
+function rememberAgentRecent(row) {
+  const id = row.ownerId;
+  if (!id) return;
+  const xs = S.agentRecent.get(id) ?? [];
+  const key = row.hash
+    ? `h:${row.hash}`
+    : `${row.ts}|${row.phase}|${row.status}|${row.actionType}|${row.priorityFeeWei}`;
+  if (!xs.some((x) => x._key === key)) {
+    xs.unshift({ ...row, _key: key });
+    if (xs.length > 20) xs.length = 20;
+    S.agentRecent.set(id, xs);
+  }
+}
 
 // stress シナリオが今のブロックで注入中か（窓内か）。ADR 0009。
 function isScenarioActive() {
@@ -307,7 +322,6 @@ function addBlockCard(b) {
   card.innerHTML = `
     <div class="row1"><span class="hgt">#${fmtInt(b.blockNumber)}</span><span class="acc"></span></div>
     <div class="txc"></div>
-    <div class="tim"></div>
     <div class="ago"></div>`;
   blocksEl.appendChild(conn);
   blocksEl.appendChild(card);
@@ -351,8 +365,6 @@ function refreshBlocks() {
     const c = S.blockTx.get(n);
     const txc = c ? c.mined || c.submitted : 0;
     e.card.querySelector(".txc").textContent = `${txc} txns`;
-    e.card.querySelector(".tim").textContent =
-      e.timingMs != null ? `${Math.round(e.timingMs)}ms` : "—";
     e.card.querySelector(".ago").textContent = agoStr(e.ts, now);
   }
 }
@@ -457,7 +469,7 @@ function renderDetail() {
     : "—";
 
   const recentEl = el("d-recent");
-  const recent = S.feed.filter((t) => t.ownerId === id).slice(0, 5);
+  const recent = (S.agentRecent.get(id) ?? []).slice(0, 5);
   if (recent.length === 0) {
     recentEl.innerHTML = `<div class="recent-empty">—</div>`;
   } else {
@@ -516,6 +528,7 @@ function ensureActivity(id) {
 // ============================ tx 取り込み ============================
 function ingestTx(tx, opts) {
   const t = { ...tx, ts: tx.ts ?? Date.now() };
+  rememberAgentRecent(t);
   S.feed.unshift(t);
   if (S.feed.length > 120) S.feed.pop();
   // ブロック別 tx カウント
@@ -574,6 +587,9 @@ function applySnapshot(snap) {
   S.agents = new Map((snap.agents ?? []).map((a) => [a.id, a]));
   S.order = (snap.agents ?? []).map((a) => a.id);
   S.activity = new Map((snap.activity ?? []).map((a) => [a.id, a]));
+  S.agentRecent = new Map(
+    Object.entries(snap.agentRecent ?? {}).map(([id, rows]) => [id, rows]),
+  );
   S.ranking = snap.ranking ?? [];
   S.blocks = snap.blocks ?? [];
   S.scenario = snap.scenario ?? null;
@@ -671,6 +687,17 @@ function connect() {
     act.lastActionType = a.actionType ?? act.lastActionType;
     act.lastReason = a.reason ?? act.lastReason;
     act.lastTs = a.lastTs ?? Date.now();
+    rememberAgentRecent({
+      phase: a.event,
+      blockNumber: S.latestBlock,
+      txIndex: null,
+      ownerId: a.agentId,
+      role: "agent",
+      actionType: a.actionType ?? a.event,
+      priorityFeeWei: "0",
+      status: a.event,
+      ts: act.lastTs,
+    });
     if (S.selectedId === a.agentId) renderDetail();
   });
   es.addEventListener("pollerStatus", (e) => {

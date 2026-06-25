@@ -8,12 +8,8 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import {
-  loadAgents,
-  loadConfig,
-  privateKeyForWalletName,
-  type SimConfig,
-} from "./config.js";
+import { privateKeyForWalletName, type SimConfig } from "./config.js";
+import { resolveRunInputs } from "./runConfig.js";
 import { AgentProcess } from "./agentProcess.js";
 import { validateAction } from "./action.js";
 import {
@@ -40,6 +36,7 @@ import type {
   TxIntent,
   WalletRole,
 } from "./types.js";
+import { baseTokens, tokenInfo } from "./markets.js";
 import { enabledAdapters, initProtocols } from "./protocols/registry.js";
 import type { FlowKind, FlowWallet, SimContext } from "./protocols/types.js";
 import { updateOracles } from "./protocols/oracles.js";
@@ -92,7 +89,9 @@ type ReceiptResult = {
 const GAS_ONLY_WEI = 2_000_000_000_000_000_000_000_000n; // 2,000,000 ETH（admin/keeper: gas + Balancer seed の wrap 等）
 
 export async function runSimulation(): Promise<void> {
-  const config = loadConfig();
+  // ADR 0013: 設定は YAML（eris.config.yaml / --config）を単一ソースに解決（無ければ env フォールバック）。
+  const { config, agents: agentSpecs, configPath } = resolveRunInputs();
+  if (configPath) process.env.ERIS_CONFIG = configPath;
   // 有効 protocol の設定 + stable 統一会計の登録（registry.initProtocols に集約）
   const adapters = initProtocols(config.enabledProtocols);
   const enabledIds = adapters.map((a) => a.id);
@@ -124,7 +123,7 @@ export async function runSimulation(): Promise<void> {
   }
   logger.event({ type: "fork_reset", forked: Boolean(config.forkUrl) });
 
-  const agentSpecs = loadAgents(config.agentsConfigPath);
+  // agentSpecs は resolveRunInputs で解決済み（YAML inline ロスター or AGENTS_CONFIG）。
   const agentRuntimes: AgentRuntime[] = agentSpecs.map((spec) => {
     const privateKey = privateKeyForWalletName(config, spec.wallet, spec.id);
     return {
@@ -210,6 +209,7 @@ export async function runSimulation(): Promise<void> {
       id: string;
       role: WalletRole;
       privateKey: Hex;
+      flow?: boolean;
     }> = [
       ...agentRuntimes.map((a) => ({
         id: a.id,
@@ -222,6 +222,7 @@ export async function runSimulation(): Promise<void> {
           ? "informed-flow"
           : "uninformed-flow") as WalletRole,
         privateKey: w.privateKey,
+        flow: true,
       })),
     ];
     for (const target of fundTargets) {
@@ -236,7 +237,7 @@ export async function runSimulation(): Promise<void> {
         walletClient,
         chain,
         target.privateKey,
-        config.initialEthWei,
+        target.flow ? config.flowEthWei : config.initialEthWei,
         config.initialWethWei,
         config.initialUsdcUnits,
       );
@@ -612,6 +613,23 @@ export async function observationFor(
     agentAddress,
     fairPriceUsdcPerWeth: fairPrice,
     oraclePrices: { wethUsd: fairPrice, usdcUsd: 1 },
+    // ADR 0013: 全 base の USD 価格・残高。WETH のみのとき fairPricesUsd={WETH:fairPrice} で
+    // 既存フィールドと一致（後方互換）。WBTC を見る戦略だけ参照する。
+    fairPricesUsd: ctx.fairPrices ?? { WETH: fairPrice },
+    ...(balances.bases
+      ? {
+          baseBalances: Object.fromEntries(
+            Object.entries(balances.bases).map(([k, v]) => [k, v.toString()]),
+          ),
+        }
+      : {}),
+    // ADR 0013: 各 base の decimals。プロセス分離 agent の base 量換算用（WETH のみなら {WETH:18}）。
+    baseDecimals: Object.fromEntries(
+      Object.keys(ctx.fairPrices ?? { WETH: fairPrice }).map((b) => [
+        b,
+        tokenInfo(b).decimals,
+      ]),
+    ),
     enabledProtocols: enabledIds,
     balances: {
       ethWei: balances.ethWei.toString(),
@@ -640,9 +658,43 @@ export async function observationFor(
       maxGmxSizeUsd: config.maxGmxSizeUsd.toString(),
       maxAaveSupplyWethWei: config.maxAaveSupplyWethWei.toString(),
       maxAaveBorrowUsdcUnits: config.maxAaveBorrowUsdcUnits.toString(),
+      // ADR 0013: per-base 上限を露出。WETH は既存値、追加 base は config の per-base マップ（既定 0）。
+      baseLimits: buildBaseLimits(config),
     },
     protocols,
   };
+}
+
+// ADR 0013: base シンボル -> per-round 上限のマップを config から組む。WETH は既存の WETH 専用
+// 上限を流用し（byte 互換）、追加 base は MAX_AGENT/MAX_LP/MAX_AAVE_SUPPLY の per-base 値（既定 0）。
+function buildBaseLimits(
+  config: SimConfig,
+): NonNullable<AgentObservation["limits"]["baseLimits"]> {
+  const out: NonNullable<AgentObservation["limits"]["baseLimits"]> = {};
+  const bases = new Set<string>([
+    "WETH",
+    ...Object.keys(config.maxAgentBaseIn),
+    ...Object.keys(config.maxLpBase),
+    ...Object.keys(config.maxAaveSupplyBase),
+  ]);
+  for (const base of bases) {
+    const maxSwap =
+      base === "WETH"
+        ? config.maxAgentWethInWei
+        : (config.maxAgentBaseIn[base] ?? 0n);
+    const maxLp =
+      base === "WETH" ? config.maxLpWethWei : (config.maxLpBase[base] ?? 0n);
+    const maxAave =
+      base === "WETH"
+        ? config.maxAaveSupplyWethWei
+        : (config.maxAaveSupplyBase[base] ?? 0n);
+    out[base] = {
+      maxSwapInBaseWei: maxSwap.toString(),
+      maxLpBaseWei: maxLp.toString(),
+      maxAaveSupplyBaseWei: maxAave.toString(),
+    };
+  }
+  return out;
 }
 
 // orderflow bot プロセスに FlowContext を渡して FlowOrder[] を受け取り、TxIntent に変換する。
@@ -674,6 +726,59 @@ export async function buildFlowContext(
       usdcBorrowed: r.usdcBorrowed.toString(),
     };
   }
+  const flowBalances: FlowContextWire["flowBalances"] = {};
+  for (const protocol of enabledIds) {
+    for (const kind of ["informed", "uninformed", "spread"] as FlowKind[]) {
+      const wallet = ctx.flowWallet(protocol, kind);
+      const b = await getBalances(ctx.publicClient, wallet.address);
+      flowBalances[`${protocol}:${kind}`] = {
+        wethWei: b.wethWei.toString(),
+        usdcUnits: b.usdcUnits.toString(),
+      };
+    }
+  }
+
+  // ADR 0013 Phase 8: WETH 以外の base の AMM flow context。flow max>0 かつ価格が揃う base のみ
+  // 載せる（max=0/未設定なら省略 → buildFlowOrders が当該 base を反復せず RNG 非消費 = byte 互換）。
+  const extraBases: NonNullable<FlowContextWire["extraBases"]> = [];
+  for (const t of baseTokens()) {
+    if (t.symbol === "WETH") continue;
+    const max = ctx.config.baseFlowMax?.[t.symbol] ?? 0n;
+    if (max <= 0n) continue;
+    const basePoolPrices: NonNullable<
+      FlowContextWire["extraBases"]
+    >[number]["poolPrices"] = {};
+    for (const id of ["uniswap", "balancer", "curve"] as const) {
+      if (!enabledIds.includes(id)) continue;
+      const s = stateById.get(id) as
+        | {
+            markets?: Array<{
+              market: { base: string };
+              priceUsdcPerWeth: number;
+            }>;
+          }
+        | undefined;
+      const ms = s?.markets?.find((m) => m.market.base === t.symbol);
+      if (
+        ms &&
+        typeof ms.priceUsdcPerWeth === "number" &&
+        ms.priceUsdcPerWeth > 0
+      )
+        basePoolPrices[id] = ms.priceUsdcPerWeth;
+    }
+    const fairPriceUsd = ctx.fairPrices?.[t.symbol] ?? 0;
+    if (fairPriceUsd <= 0 || Object.keys(basePoolPrices).length === 0) continue;
+    const maxStr = max.toString();
+    extraBases.push({
+      base: t.symbol,
+      poolPrices: basePoolPrices,
+      fairPriceUsd,
+      uninformedFlowMaxBaseWei: maxStr,
+      informedFlowMaxBaseWei: maxStr,
+      balancerFlowMaxBaseWei: maxStr,
+      curveFlowMaxBaseWei: maxStr,
+    });
+  }
 
   return {
     round,
@@ -681,6 +786,9 @@ export async function buildFlowContext(
     protocols: enabledIds,
     poolPrices,
     aaveReserves,
+    flowBalances,
+    usdcOnlyFlow: ctx.config.initialWethWei === 0n,
+    ...(extraBases.length > 0 ? { extraBases } : {}),
     limits: {
       uninformedFlowMaxWethWei: ctx.config.uninformedFlowMaxWethWei.toString(),
       informedFlowMaxWethWei: ctx.config.informedFlowMaxWethWei.toString(),
@@ -703,7 +811,10 @@ export function flowOrdersToIntents(
 ): TxIntent[] {
   const intents: TxIntent[] = [];
   for (const order of orders) {
-    const wallet = ctx.flowWallet(order.protocol, order.kind);
+    const wallet = ctx.flowWallet(
+      order.walletProtocol ?? order.protocol,
+      order.kind,
+    );
     intents.push({
       ownerId: wallet.id,
       role: order.kind === "informed" ? "informed-flow" : "uninformed-flow",
@@ -799,6 +910,23 @@ export async function initialFairPrice(
     return getPoolPriceUsdcPerWeth(ctx.publicClient);
   }
   return 3000;
+}
+
+// ADR 0013: 追加 base（WBTC 等）の初期 fair price。uniswap の当該 market pool 価格を採用し、
+// 無ければ既定（WBTC=60000）。WETH は従来の initialFairPrice にフォールバック。
+export async function initialFairPriceFor(
+  ctx: SimContext,
+  base: string,
+  enabledIds: ProtocolId[],
+): Promise<number> {
+  if (base === "WETH") return initialFairPrice(ctx, enabledIds);
+  if (enabledIds.includes("uniswap")) {
+    const { getPoolState } = await import("./protocols/uniswap.js");
+    const s = await getPoolState(ctx.publicClient);
+    const m = s.markets.find((ms) => ms.market.base === base);
+    if (m) return m.priceUsdcPerWeth;
+  }
+  return base === "WBTC" ? 60000 : 3000;
 }
 
 function uniswapPoolPrice(

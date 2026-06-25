@@ -1,8 +1,35 @@
-import type { Hex } from "viem";
+import type { Address, Hex } from "viem";
 
-export type TokenSymbol = "WETH" | "USDC";
+// トークンレジストリ（src/markets.ts の TOKENS）のキー。リテラル union を剥がし string 化
+// （トークン追加を定数追加だけで行えるようにするため。ADR 0013）。実在は TOKENS で管理する。
+export type TokenSymbol = string;
+// base = USD 価格を持つ取引対象（WETH/WBTC…）、stable = $1 固定の決済通貨（USDC 相当）。
+export type TokenKind = "base" | "stable";
 
 export type ProtocolId = "uniswap" | "balancer" | "curve" | "gmx" | "aave";
+
+// ---------------------------------------------------------------------------
+// market leg（venue 固有メタ。ADR 0013）。protocol × base ごとに 1 つ。
+// MARKET_LEGS（constants）が protocol→base→leg のテーブルを持ち、markets.ts が
+// MarketConfig へ組み立てる。新トークンは leg を 1 つ足すだけで market が増える。
+// ---------------------------------------------------------------------------
+export type UniswapLeg = { pool: Address; fee: number; tickSpacing: number };
+export type BalancerLeg = { poolId: Hex; tokens: Address[]; stable: Address };
+export type CurveLeg = {
+  pool: Address;
+  baseIndex: number;
+  quoteIndex: number;
+  stable: Address;
+};
+export type GmxLeg = { market: Address };
+export type AaveLeg = Record<string, never>;
+export type MarketLegs = {
+  uniswap: Record<TokenSymbol, UniswapLeg>;
+  balancer: Record<TokenSymbol, BalancerLeg>;
+  curve: Record<TokenSymbol, CurveLeg>;
+  gmx: Record<TokenSymbol, GmxLeg>;
+  aave: Record<TokenSymbol, AaveLeg>;
+};
 
 // ---------------------------------------------------------------------------
 // アクション型
@@ -12,6 +39,8 @@ export type ProtocolId = "uniswap" | "balancer" | "curve" | "gmx" | "aave";
 export type SwapAction = {
   type: "swap";
   tokenIn: TokenSymbol;
+  // 取引 market の base（既定 WETH。ADR 0013）。tokenIn は base か quote のどちらか。
+  base?: TokenSymbol;
   amountIn: string;
   maxPriorityFeePerGasWei?: string;
   slippageBps?: number;
@@ -19,16 +48,23 @@ export type SwapAction = {
 
 export type MintLiquidityAction = {
   type: "mintLiquidity";
+  // ADR 0013: market の base（既定 WETH）。base 指定時は amountBase/QuoteDesired を使う。
+  base?: TokenSymbol;
   tickLower: number;
   tickUpper: number;
+  // WETH market 互換フィールド（base 未指定時に必須）。
   amountWethDesired: string;
   amountUsdcDesired: string;
+  // 汎用フィールド（base 指定時に使用）。
+  amountBaseDesired?: string;
+  amountQuoteDesired?: string;
   slippageBps?: number;
   maxPriorityFeePerGasWei?: string;
 };
 
 export type RemoveLiquidityAction = {
   type: "removeLiquidity";
+  base?: TokenSymbol; // ADR 0013: market の base（既定 WETH）。amountWethMin は base min。
   tokenId: string;
   liquidity: string;
   amountWethMin?: string;
@@ -38,6 +74,7 @@ export type RemoveLiquidityAction = {
 
 export type CollectFeesAction = {
   type: "collectFees";
+  base?: TokenSymbol; // ADR 0013: market の base（既定 WETH）
   tokenId: string;
   maxPriorityFeePerGasWei?: string;
 };
@@ -46,6 +83,7 @@ export type CollectFeesAction = {
 export type BalancerSwapAction = {
   type: "balancerSwap";
   tokenIn: TokenSymbol;
+  base?: TokenSymbol; // ADR 0013: market の base（既定 WETH）
   amountIn: string;
   slippageBps?: number;
   maxPriorityFeePerGasWei?: string;
@@ -54,6 +92,7 @@ export type BalancerSwapAction = {
 export type CurveSwapAction = {
   type: "curveSwap";
   tokenIn: TokenSymbol;
+  base?: TokenSymbol; // ADR 0013: market の base（既定 WETH）
   amountIn: string;
   slippageBps?: number;
   maxPriorityFeePerGasWei?: string;
@@ -89,6 +128,7 @@ export type AaveRepayAction = {
 export type GmxIncreaseAction = {
   type: "gmxIncrease";
   isLong: boolean;
+  base?: TokenSymbol; // ADR 0013: index market の base（既定 WETH = ETH/USD）
   collateral: TokenSymbol;
   collateralAmount: string; // token units
   sizeDeltaUsd: string; // GMX 1e30 スケール USD
@@ -98,6 +138,7 @@ export type GmxIncreaseAction = {
 export type GmxDecreaseAction = {
   type: "gmxDecrease";
   isLong: boolean;
+  base?: TokenSymbol; // ADR 0013: index market の base（既定 WETH = ETH/USD）
   collateral: TokenSymbol;
   collateralDeltaAmount: string; // 引き出す担保(token units)。0 可
   sizeDeltaUsd: string; // GMX 1e30 スケール USD
@@ -162,11 +203,22 @@ export type LpPositionObservation = {
   tickLower: number;
   tickUpper: number;
   liquidity: string;
+  // 命名は WETH/USDC 互換のまま。WBTC market の position では base=WBTC 量・quote=USDC 量が入る。
   tokensOwedWethWei: string;
   tokensOwedUsdcUnits: string;
   amountWethWei: string;
   amountUsdcUnits: string;
   valueUsdc: number;
+  // ADR 0013: WETH 以外の market（"WBTC/USDC" 等）。未指定は WETH/USDC。
+  market?: string;
+};
+
+export type UniswapMarketObservation = {
+  pair: string;
+  fee: number;
+  priceUsdcPerWeth: number; // base/USD（命名は WETH 互換のまま。値は当該 base の価格）
+  tick: number;
+  tickSpacing: number;
 };
 
 export type UniswapObservation = {
@@ -178,11 +230,18 @@ export type UniswapObservation = {
     tickSpacing: number;
   };
   positions: LpPositionObservation[];
+  // ADR 0013: WETH 以外の market（WBTC/USDC 等）。WETH market は pool/positions に載せ続ける。
+  markets?: Record<string, UniswapMarketObservation>;
 };
 
 export type AmmObservation = {
   priceUsdcPerWeth: number;
   reserves?: { weth: string; usdc: string };
+  // ADR 0013: WETH 以外の market（priceUsdcPerWeth は当該 base/USD）。
+  markets?: Record<
+    string,
+    { priceUsdcPerWeth: number; reserves?: { weth: string; usdc: string } }
+  >;
 };
 
 export type GmxPositionObservation = {
@@ -198,6 +257,11 @@ export type GmxPositionObservation = {
 export type GmxObservation = {
   marketPriceUsd: number;
   position?: GmxPositionObservation;
+  // ADR 0013: WETH 以外の index market（BTC/USD 等）。
+  markets?: Record<
+    string,
+    { marketPriceUsd: number; position?: GmxPositionObservation }
+  >;
 };
 
 export type AaveObservation = {
@@ -207,6 +271,7 @@ export type AaveObservation = {
   availableBorrowsBase: string;
   supplied: Partial<Record<TokenSymbol, string>>;
   borrowed: Partial<Record<TokenSymbol, string>>;
+  poolLiquidity?: Partial<Record<TokenSymbol, string>>;
 };
 
 export type ProtocolObservations = {
@@ -225,6 +290,14 @@ export type AgentObservation = {
   agentAddress: string;
   fairPriceUsdcPerWeth: number;
   oraclePrices: { wethUsd: number; usdcUsd: number };
+  // ADR 0013: マルチアセット。WETH market は上記既存フィールドに載せ続け、追加 base はここに。
+  // 既存戦略は未参照でも動く（後方互換）。WBTC を見る戦略だけ参照する。
+  fairPricesUsd?: Record<TokenSymbol, number>;
+  baseBalances?: Record<TokenSymbol, string>;
+  // ADR 0013: base シンボル -> decimals（WETH=18 / WBTC=8）。プロセス分離した agent が base 量を
+  // 単位換算するのに使う（agent は tokenInfo を呼べないため observation 経由で渡す）。
+  baseDecimals?: Record<TokenSymbol, number>;
+  markets?: string[];
   enabledProtocols: ProtocolId[];
   balances: {
     ethWei: string;
@@ -255,6 +328,17 @@ export type AgentObservation = {
     maxGmxSizeUsd: string;
     maxAaveSupplyWethWei: string;
     maxAaveBorrowUsdcUnits: string;
+    // ADR 0013: base シンボル -> per-round 上限（base units, decimal string）。WETH は上の
+    // maxWethInWei 等と同値で互換維持。追加 base（WBTC 等）の上限はここに載る。"0" = 上限なし
+    // （balance bound）。base 非依存の agent は base 売りサイズをこの値で頭打ちにできる。
+    baseLimits?: Record<
+      TokenSymbol,
+      {
+        maxSwapInBaseWei: string;
+        maxLpBaseWei: string;
+        maxAaveSupplyBaseWei: string;
+      }
+    >;
   };
   protocols: ProtocolObservations;
   // 競争シグナル（ADR 0011。economicGas で priority-fee オークションを実力化する観測）。
@@ -330,6 +414,8 @@ export type BalanceSnapshot = {
   ethWei: bigint;
   wethWei: bigint;
   usdcUnits: bigint; // active stable の合算（表示/PnL 用）
+  // ADR 0013: base シンボル -> 残高（WETH/WBTC 等）。wethWei は bases["WETH"] と同値で互換維持。
+  bases?: Record<string, bigint>;
   // stable トークンアドレス(小文字) -> 残高。検証は venue ごとの stable をこのマップで個別確認する。
   stables?: Record<string, bigint>;
 };

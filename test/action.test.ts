@@ -179,6 +179,30 @@ test("validateAction: USDC-only でも 買い→売り bundle は通る（ADR 00
   assert.equal(result.ok, true);
 });
 
+test("validateAction: balances.bases ありでも 買い→売り bundle は通る（work.bases 同期。ADR 0013）", () => {
+  // direct モードの getBalances は bases={WETH:wethWei,...} を返す。この場合 adapter.validate は
+  // 残高を bases[base] から引くため、buy leg の出力 WETH を creditBase で bases["WETH"] に積めないと
+  // sell leg が 0 残高で reject される。bases を同期している回帰テスト。
+  const usdcOnlyWithBases: BalanceSnapshot = {
+    ethWei: 1n,
+    wethWei: 0n,
+    usdcUnits: 100n,
+    bases: { WETH: 0n },
+  };
+  const result = validateAction(
+    parseAction({
+      type: "bundle",
+      actions: [
+        { type: "swap", tokenIn: "USDC", amountIn: "90" },
+        { type: "swap", tokenIn: "WETH", amountIn: "10" },
+      ],
+    }),
+    observation,
+    usdcOnlyWithBases,
+  );
+  assert.equal(result.ok, true);
+});
+
 test("validateAction: USDC-only で単発の WETH 売りは残高不足で reject（credit 元が無い）", () => {
   const usdcOnly: BalanceSnapshot = {
     ethWei: 1n,

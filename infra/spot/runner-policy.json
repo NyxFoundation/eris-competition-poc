@@ -1,0 +1,51 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DescribeReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeKeyPairs",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeInstances",
+        "ec2:DescribeImages",
+        "ssm:GetParameters"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "KeyPairAndSecurityGroup",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:ImportKeyPair",
+        "ec2:CreateSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "LaunchSpot",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "*"
+    },
+    {
+      "Sid": "TagOnCreateOnly",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "*",
+      "Condition": { "StringEquals": { "ec2:CreateAction": "RunInstances" } }
+    },
+    {
+      "Sid": "TerminateOnlyOwnSpot",
+      "Effect": "Allow",
+      "Action": "ec2:TerminateInstances",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "ec2:ResourceTag/project": "eris-spot" }
+      }
+    }
+  ]
+}

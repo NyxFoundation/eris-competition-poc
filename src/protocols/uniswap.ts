@@ -16,13 +16,14 @@ import {
   swapRouterAbi,
   wethAbi,
 } from "../abis.js";
+import { TOKENS, UNISWAP, stableBalanceOf } from "../constants.js";
 import {
-  TOKENS,
-  UNISWAP,
-  tokenAddress,
-  oppositeToken,
-  stableBalanceOf,
-} from "../constants.js";
+  marketFor,
+  marketsFor,
+  tokenInfo,
+  type MarketConfig,
+} from "../markets.js";
+import { resolveMarket } from "./marketHelpers.js";
 import type {
   AgentObservation,
   BalanceSnapshot,
@@ -30,60 +31,132 @@ import type {
   LpPositionObservation,
   SwapAction,
   TokenSymbol,
+  UniswapMarketObservation,
   UniswapObservation,
 } from "../types.js";
-import type { BuiltTx, ProtocolAdapter, ValidationResult } from "./types.js";
+import type {
+  BuiltTx,
+  ProtocolAdapter,
+  SimContext,
+  ValidationResult,
+} from "./types.js";
 
 const DECIMAL_INTEGER = /^[0-9]+$/;
 
-type UniswapState = {
-  priceUsdcPerWeth: number;
+type UniswapMarketState = {
+  market: MarketConfig;
+  priceUsdcPerWeth: number; // base/USD（命名は WETH 互換。値は当該 base の price）
   tick: number;
   tickSpacing: number;
 };
 
-// Arbitrum では WETH(0x82aF) < USDC(0xaf88) → token0=WETH。アドレス比較で動的判定。
-function wethIsToken0(): boolean {
-  return TOKENS.WETH.address.toLowerCase() < TOKENS.USDC.address.toLowerCase();
+type UniswapState = {
+  // WETH market（後方互換でトップレベル維持）。
+  priceUsdcPerWeth: number;
+  tick: number;
+  tickSpacing: number;
+  // 全 uniswap market（WETH 含む）。fork 既定では WETH のみ。
+  markets: UniswapMarketState[];
+};
+
+function wethMarket(): MarketConfig {
+  const m = marketFor("uniswap", "WETH");
+  if (!m) throw new Error("uniswap: WETH market not configured");
+  return m;
 }
 
-function sortedTokens(): { token0: Address; token1: Address } {
-  return wethIsToken0()
-    ? { token0: TOKENS.WETH.address, token1: TOKENS.USDC.address }
-    : { token0: TOKENS.USDC.address, token1: TOKENS.WETH.address };
+function legOf(market: MarketConfig) {
+  if (!market.uniswap)
+    throw new Error(`uniswap: market ${market.key} has no leg`);
+  return market.uniswap;
 }
 
-// slot0 の sqrtPriceX96 → USDC per WETH。pool 価格の単一定義。
-// getPoolState（live）と reconstruct/dashboard の断面読取（slot0 を multicall で
-// まとめて取る経路）が同じ式を共有する（価格の二重定義を避ける）。
-export function poolPriceUsdcPerWethFromSqrtX96(sqrtPriceX96: bigint): number {
+// market の base/quote とソート（token0/token1 はアドレス昇順）。
+function sortedTokensFor(market: MarketConfig): {
+  token0: Address;
+  token1: Address;
+  baseIsToken0: boolean;
+} {
+  const baseAddr = tokenInfo(market.base).address;
+  const quoteAddr = tokenInfo(market.quote).address;
+  const baseIsToken0 = baseAddr.toLowerCase() < quoteAddr.toLowerCase();
+  return baseIsToken0
+    ? { token0: baseAddr, token1: quoteAddr, baseIsToken0 }
+    : { token0: quoteAddr, token1: baseAddr, baseIsToken0 };
+}
+
+// swap の tokenIn(base|quote シンボル) -> in/out アドレス。
+function swapLeg(
+  market: MarketConfig,
+  tokenIn: TokenSymbol,
+): { assetIn: Address; assetOut: Address } {
+  const baseAddr = tokenInfo(market.base).address;
+  const quoteAddr = tokenInfo(market.quote).address;
+  return tokenIn === market.base
+    ? { assetIn: baseAddr, assetOut: quoteAddr }
+    : { assetIn: quoteAddr, assetOut: baseAddr };
+}
+
+// slot0 の sqrtPriceX96 -> quote per base（decimals 一般化。base/quote の桁差を吸収）。
+export function poolPriceFromSqrtX96(
+  sqrtPriceX96: bigint,
+  market: MarketConfig,
+): number {
+  const { baseIsToken0 } = sortedTokensFor(market);
+  const baseDec = tokenInfo(market.base).decimals;
+  const quoteDec = tokenInfo(market.quote).decimals;
   const ratio = Number(sqrtPriceX96) / 2 ** 96;
   const rawToken1PerToken0 = ratio * ratio;
-  // raw(token1/token0) -> USDC per WETH
-  return wethIsToken0() ? rawToken1PerToken0 * 1e12 : 1e12 / rawToken1PerToken0;
+  const scale = 10 ** (baseDec - quoteDec);
+  // raw(token1/token0) -> quote per base
+  return baseIsToken0 ? rawToken1PerToken0 * scale : scale / rawToken1PerToken0;
 }
 
-export async function getPoolState(
+// 後方互換: WETH/USDC の sqrtPriceX96 -> USDC per WETH。reconstruct/dashboard が共有する。
+export function poolPriceUsdcPerWethFromSqrtX96(sqrtPriceX96: bigint): number {
+  return poolPriceFromSqrtX96(sqrtPriceX96, wethMarket());
+}
+
+async function getMarketState(
   publicClient: PublicClient,
-): Promise<UniswapState> {
+  market: MarketConfig,
+): Promise<UniswapMarketState> {
+  const leg = legOf(market);
   const [slot0, tickSpacing] = await Promise.all([
     publicClient.readContract({
-      address: UNISWAP.poolWethUsdc500,
+      address: leg.pool,
       abi: poolAbi,
       functionName: "slot0",
     }),
     publicClient
       .readContract({
-        address: UNISWAP.poolWethUsdc500,
+        address: leg.pool,
         abi: poolAbi,
         functionName: "tickSpacing",
       })
-      .catch(() => UNISWAP.tickSpacing),
+      .catch(() => leg.tickSpacing),
   ]);
   return {
-    priceUsdcPerWeth: poolPriceUsdcPerWethFromSqrtX96(slot0[0]),
+    market,
+    priceUsdcPerWeth: poolPriceFromSqrtX96(slot0[0], market),
     tick: Number(slot0[1]),
     tickSpacing: Number(tickSpacing),
+  };
+}
+
+export async function getPoolState(
+  publicClient: PublicClient,
+): Promise<UniswapState> {
+  const markets = marketsFor("uniswap");
+  const states = await Promise.all(
+    markets.map((m) => getMarketState(publicClient, m)),
+  );
+  const weth = states.find((s) => s.market.base === "WETH") ?? states[0];
+  return {
+    priceUsdcPerWeth: weth.priceUsdcPerWeth,
+    tick: weth.tick,
+    tickSpacing: weth.tickSpacing,
+    markets: states,
   };
 }
 
@@ -95,7 +168,9 @@ export async function getPoolPriceUsdcPerWeth(
 
 async function quoteExactInput(
   publicClient: PublicClient,
-  tokenIn: TokenSymbol,
+  market: MarketConfig,
+  assetIn: Address,
+  assetOut: Address,
   amountIn: bigint,
 ): Promise<bigint> {
   const data = encodeFunctionData({
@@ -103,10 +178,10 @@ async function quoteExactInput(
     functionName: "quoteExactInputSingle",
     args: [
       {
-        tokenIn: tokenAddress(tokenIn),
-        tokenOut: tokenAddress(oppositeToken(tokenIn)),
+        tokenIn: assetIn,
+        tokenOut: assetOut,
         amountIn,
-        fee: UNISWAP.fee,
+        fee: legOf(market).fee,
         sqrtPriceLimitX96: 0n,
       },
     ],
@@ -123,19 +198,27 @@ async function quoteExactInput(
 async function buildSwapData(
   publicClient: PublicClient,
   recipient: Address,
+  market: MarketConfig,
   action: SwapAction,
   slippageBps: number,
 ): Promise<Hex> {
   const amountIn = BigInt(action.amountIn);
-  const quoted = await quoteExactInput(publicClient, action.tokenIn, amountIn);
+  const { assetIn, assetOut } = swapLeg(market, action.tokenIn);
+  const quoted = await quoteExactInput(
+    publicClient,
+    market,
+    assetIn,
+    assetOut,
+    amountIn,
+  );
   return encodeFunctionData({
     abi: swapRouterAbi,
     functionName: "exactInputSingle",
     args: [
       {
-        tokenIn: tokenAddress(action.tokenIn),
-        tokenOut: tokenAddress(oppositeToken(action.tokenIn)),
-        fee: UNISWAP.fee,
+        tokenIn: assetIn,
+        tokenOut: assetOut,
+        fee: legOf(market).fee,
         recipient,
         deadline: deadline(),
         amountIn,
@@ -149,20 +232,26 @@ async function buildSwapData(
 async function buildLpActionData(
   publicClient: PublicClient,
   owner: Address,
+  market: MarketConfig,
   action: LeafAction,
   slippageBps: number,
 ): Promise<Hex> {
-  const { token0, token1 } = sortedTokens();
-  const w0 = wethIsToken0();
+  const { token0, token1, baseIsToken0 } = sortedTokensFor(market);
+  const fee = legOf(market).fee;
   if (action.type === "mintLiquidity") {
-    const amountWeth = BigInt(action.amountWethDesired);
-    const amountUsdc = BigInt(action.amountUsdcDesired);
-    const amount0Desired = w0 ? amountWeth : amountUsdc;
-    const amount1Desired = w0 ? amountUsdc : amountWeth;
+    // base 指定時は amountBase/QuoteDesired、未指定（WETH 既定）は amountWeth/UsdcDesired。
+    const amountBase = BigInt(
+      action.amountBaseDesired ?? action.amountWethDesired,
+    );
+    const amountQuote = BigInt(
+      action.amountQuoteDesired ?? action.amountUsdcDesired,
+    );
+    const amount0Desired = baseIsToken0 ? amountBase : amountQuote;
+    const amount1Desired = baseIsToken0 ? amountQuote : amountBase;
     const mintParams = (amount0Min: bigint, amount1Min: bigint) => ({
       token0,
       token1,
-      fee: UNISWAP.fee,
+      fee,
       tickLower: action.tickLower,
       tickUpper: action.tickUpper,
       amount0Desired,
@@ -193,8 +282,8 @@ async function buildLpActionData(
   }
 
   if (action.type === "removeLiquidity") {
-    const amountWethMin = BigInt(action.amountWethMin ?? "0");
-    const amountUsdcMin = BigInt(action.amountUsdcMin ?? "0");
+    const amountBaseMin = BigInt(action.amountWethMin ?? "0");
+    const amountQuoteMin = BigInt(action.amountUsdcMin ?? "0");
     return encodeFunctionData({
       abi: nonfungiblePositionManagerAbi,
       functionName: "decreaseLiquidity",
@@ -202,8 +291,8 @@ async function buildLpActionData(
         {
           tokenId: BigInt(action.tokenId),
           liquidity: BigInt(action.liquidity),
-          amount0Min: w0 ? amountWethMin : amountUsdcMin,
-          amount1Min: w0 ? amountUsdcMin : amountWethMin,
+          amount0Min: baseIsToken0 ? amountBaseMin : amountQuoteMin,
+          amount1Min: baseIsToken0 ? amountQuoteMin : amountBaseMin,
           deadline: deadline(),
         },
       ],
@@ -228,26 +317,54 @@ async function buildLpActionData(
   throw new Error(`Unsupported LP action: ${action.type}`);
 }
 
+// position の (token0,token1,fee) が属する uniswap market を解決。WETH/USDC 以外も対応。
+function positionMarketOf(
+  token0: Address,
+  token1: Address,
+  fee: number,
+  markets: MarketConfig[],
+): MarketConfig | undefined {
+  for (const m of markets) {
+    const { token0: t0, token1: t1 } = sortedTokensFor(m);
+    if (
+      token0.toLowerCase() === t0.toLowerCase() &&
+      token1.toLowerCase() === t1.toLowerCase() &&
+      fee === legOf(m).fee
+    ) {
+      return m;
+    }
+  }
+  return undefined;
+}
+
 export async function getLpPositions(
   publicClient: PublicClient,
   owner: Address,
-  fairPriceUsdcPerWeth: number,
-  // 呼び側が readState 済みの tick を渡せば pool の再読取を省く（observe の二重読み防止）
-  knownTick?: number,
+  // base シンボル -> fair price(USD)。WETH のみのとき従来と一致。
+  fairPriceByBase: Record<string, number>,
+  // pool アドレス(lower) -> tick。observe が readState 済みの tick を渡せば再読取を省く。
+  knownTickByPool?: Record<string, number>,
 ): Promise<LpPositionObservation[]> {
-  const [tick, balance] = await Promise.all([
-    knownTick !== undefined
-      ? Promise.resolve(knownTick)
-      : getPoolState(publicClient).then((s) => s.tick),
-    publicClient.readContract({
-      address: UNISWAP.nonfungiblePositionManager,
-      abi: nonfungiblePositionManagerAbi,
-      functionName: "balanceOf",
-      args: [owner],
+  const markets = marketsFor("uniswap");
+  // 各 market の tick（未提供なら読む）。
+  const tickByPool: Record<string, number> = { ...(knownTickByPool ?? {}) };
+  await Promise.all(
+    markets.map(async (m) => {
+      const pool = legOf(m).pool.toLowerCase();
+      if (tickByPool[pool] === undefined) {
+        const s = await getMarketState(publicClient, m);
+        tickByPool[pool] = s.tick;
+      }
     }),
-  ]);
+  );
 
-  // NFT 列挙は直列にせず並列発行する（batch=true クライアントでは multicall に束なる）
+  const balance = await publicClient.readContract({
+    address: UNISWAP.nonfungiblePositionManager,
+    abi: nonfungiblePositionManagerAbi,
+    functionName: "balanceOf",
+    args: [owner],
+  });
+
   const indices = Array.from({ length: Number(balance) }, (_, i) => BigInt(i));
   const tokenIds = await Promise.all(
     indices.map((i) =>
@@ -270,7 +387,6 @@ export async function getLpPositions(
     ),
   );
 
-  const w0 = wethIsToken0();
   const positions: LpPositionObservation[] = [];
   for (let i = 0; i < tokenIds.length; i++) {
     const tokenId = tokenIds[i];
@@ -288,33 +404,39 @@ export async function getLpPositions(
       tokensOwed0,
       tokensOwed1,
     ] = rawPositions[i];
-    if (!isWethUsdcPosition(token0, token1, fee)) continue;
+    const market = positionMarketOf(token0, token1, fee, markets);
+    if (!market) continue;
+    const { baseIsToken0 } = sortedTokensFor(market);
+    const tick = tickByPool[legOf(market).pool.toLowerCase()] ?? 0;
     const amounts = liquidityToTokenAmounts({
       liquidity,
       tick,
       tickLower,
       tickUpper,
     });
-    const amountWeth = w0 ? amounts.amount0 : amounts.amount1;
-    const amountUsdc = w0 ? amounts.amount1 : amounts.amount0;
-    const owedWeth = w0 ? tokensOwed0 : tokensOwed1;
-    const owedUsdc = w0 ? tokensOwed1 : tokensOwed0;
+    const amountBase = baseIsToken0 ? amounts.amount0 : amounts.amount1;
+    const amountQuote = baseIsToken0 ? amounts.amount1 : amounts.amount0;
+    const owedBase = baseIsToken0 ? tokensOwed0 : tokensOwed1;
+    const owedQuote = baseIsToken0 ? tokensOwed1 : tokensOwed0;
+    const basePrice = fairPriceByBase[market.base] ?? 0;
     positions.push({
       tokenId: tokenId.toString(),
       tickLower,
       tickUpper,
       liquidity: liquidity.toString(),
-      tokensOwedWethWei: owedWeth.toString(),
-      tokensOwedUsdcUnits: owedUsdc.toString(),
-      amountWethWei: amountWeth.toString(),
-      amountUsdcUnits: amountUsdc.toString(),
+      tokensOwedWethWei: owedBase.toString(),
+      tokensOwedUsdcUnits: owedQuote.toString(),
+      amountWethWei: amountBase.toString(),
+      amountUsdcUnits: amountQuote.toString(),
       valueUsdc: valuePositionUsdc(
-        amountWeth,
-        amountUsdc,
-        owedWeth,
-        owedUsdc,
-        fairPriceUsdcPerWeth,
+        amountBase,
+        amountQuote,
+        owedBase,
+        owedQuote,
+        market,
+        basePrice,
       ),
+      ...(market.base === "WETH" ? {} : { market: market.key }),
     });
   }
   return positions;
@@ -360,33 +482,27 @@ function deadline(): bigint {
 }
 const DEADLINE_FAR_FUTURE = BigInt(2 ** 32 - 1); // ~ year 2106
 
-function isWethUsdcPosition(
-  token0: Address,
-  token1: Address,
-  fee: number,
-): boolean {
-  const { token0: t0, token1: t1 } = sortedTokens();
-  return (
-    token0.toLowerCase() === t0.toLowerCase() &&
-    token1.toLowerCase() === t1.toLowerCase() &&
-    fee === UNISWAP.fee
-  );
-}
-
+// base/quote 量 + owed を当該 base の USD 価格で評価（quote は $1）。
 function valuePositionUsdc(
-  amountWethWei: bigint,
-  amountUsdcUnits: bigint,
-  owedWethWei: bigint,
-  owedUsdcUnits: bigint,
-  fairPriceUsdcPerWeth: number,
+  amountBaseWei: bigint,
+  amountQuoteUnits: bigint,
+  owedBaseWei: bigint,
+  owedQuoteUnits: bigint,
+  market: MarketConfig,
+  basePriceUsd: number,
 ): number {
-  const weth = Number(formatUnits(amountWethWei + owedWethWei, 18));
-  const usdc = Number(formatUnits(amountUsdcUnits + owedUsdcUnits, 6));
-  return usdc + weth * fairPriceUsdcPerWeth;
+  const baseDec = tokenInfo(market.base).decimals;
+  const quoteDec = tokenInfo(market.quote).decimals;
+  const base = Number(formatUnits(amountBaseWei + owedBaseWei, baseDec));
+  const quote = Number(
+    formatUnits(amountQuoteUnits + owedQuoteUnits, quoteDec),
+  );
+  return quote + base * basePriceUsd;
 }
 
-// 歴史ブロック再構成（ADR 0006 §4）: positions(tokenId) の生 tuple から
-// getLpPositions と同じ式で LP 価値を出す純粋関数。WETH/USDC 以外のポジションは 0。
+// 歴史ブロック再構成（ADR 0006 §4）: positions(tokenId) の生 tuple から LP 価値を出す純粋関数。
+// reconstruct は WETH 価格を渡すため、当面 WETH/USDC market のみ評価する（WBTC 等は Phase 7 で
+// fairByBase を渡せるようになるまで 0）。WETH 既定の採点は従来と byte 一致。
 export function lpPositionValueUsdc(
   position: readonly [
     bigint,
@@ -419,20 +535,65 @@ export function lpPositionValueUsdc(
     tokensOwed0,
     tokensOwed1,
   ] = position;
-  if (!isWethUsdcPosition(token0, token1, fee)) return 0;
+  const markets = marketsFor("uniswap");
+  const market = positionMarketOf(token0, token1, fee, markets);
+  // 後方互換: reconstruct が単一 WETH 価格を渡すため、WETH market 以外は当面 0（Phase 7 で対応）。
+  if (!market || market.base !== "WETH") return 0;
+  const { baseIsToken0 } = sortedTokensFor(market);
   const amounts = liquidityToTokenAmounts({
     liquidity,
     tick,
     tickLower,
     tickUpper,
   });
-  const w0 = wethIsToken0();
   return valuePositionUsdc(
-    w0 ? amounts.amount0 : amounts.amount1,
-    w0 ? amounts.amount1 : amounts.amount0,
-    w0 ? tokensOwed0 : tokensOwed1,
-    w0 ? tokensOwed1 : tokensOwed0,
+    baseIsToken0 ? amounts.amount0 : amounts.amount1,
+    baseIsToken0 ? amounts.amount1 : amounts.amount0,
+    baseIsToken0 ? tokensOwed0 : tokensOwed1,
+    baseIsToken0 ? tokensOwed1 : tokensOwed0,
+    market,
     fairPriceUsdcPerWeth,
+  );
+}
+
+// reconstruct（採点）用: position の market を解決し、tickByPool と fairByBase で全 base 対応の
+// LP 価値を出す（WBTC/USDC 等）。fork 既定（WETH のみ）では lpPositionValueUsdc と一致。
+export function lpPositionValueUsdcMulti(
+  position: Parameters<typeof lpPositionValueUsdc>[0],
+  tickByPool: Record<string, number>,
+  fairByBase: Record<string, number>,
+): number {
+  const [
+    ,
+    ,
+    token0,
+    token1,
+    fee,
+    tickLower,
+    tickUpper,
+    liquidity,
+    ,
+    ,
+    tokensOwed0,
+    tokensOwed1,
+  ] = position;
+  const market = positionMarketOf(token0, token1, fee, marketsFor("uniswap"));
+  if (!market) return 0;
+  const { baseIsToken0 } = sortedTokensFor(market);
+  const tick = tickByPool[legOf(market).pool.toLowerCase()] ?? 0;
+  const amounts = liquidityToTokenAmounts({
+    liquidity,
+    tick,
+    tickLower,
+    tickUpper,
+  });
+  return valuePositionUsdc(
+    baseIsToken0 ? amounts.amount0 : amounts.amount1,
+    baseIsToken0 ? amounts.amount1 : amounts.amount0,
+    baseIsToken0 ? tokensOwed0 : tokensOwed1,
+    baseIsToken0 ? tokensOwed1 : tokensOwed0,
+    market,
+    fairByBase[market.base] ?? 0,
   );
 }
 
@@ -471,32 +632,57 @@ function addSlippage(
   action.slippageBps = slippageBps;
 }
 
+// action.base（既定 WETH）を読み、当該 market を解決する（parse 用）。
+function parseBase(obj: Record<string, unknown>): {
+  base: string;
+  market: MarketConfig;
+} {
+  const base = typeof obj.base === "string" ? obj.base : "WETH";
+  const market = marketFor("uniswap", base);
+  if (!market) throw new Error(`uniswap: no market for base "${base}"`);
+  return { base, market };
+}
+
 function parse(obj: Record<string, unknown>): LeafAction | null {
   if (obj.type === "swap") {
-    if (obj.tokenIn !== "WETH" && obj.tokenIn !== "USDC")
-      throw new Error("tokenIn must be WETH or USDC");
+    const { base, market } = parseBase(obj);
+    if (obj.tokenIn !== market.base && obj.tokenIn !== market.quote)
+      throw new Error(`tokenIn must be ${market.base} or ${market.quote}`);
     requireDecimalString(obj.amountIn, "amountIn");
     const action: SwapAction = {
       type: "swap",
       tokenIn: obj.tokenIn,
       amountIn: obj.amountIn,
     };
+    if (base !== "WETH") action.base = base;
     addPriorityFee(action, obj);
     addSlippage(action, obj);
     return action;
   }
   if (obj.type === "mintLiquidity") {
+    const { base } = parseBase(obj);
     const tickLower = requireInteger(obj.tickLower, "tickLower");
     const tickUpper = requireInteger(obj.tickUpper, "tickUpper");
-    requireDecimalString(obj.amountWethDesired, "amountWethDesired");
-    requireDecimalString(obj.amountUsdcDesired, "amountUsdcDesired");
     const action: LeafAction = {
       type: "mintLiquidity",
       tickLower,
       tickUpper,
-      amountWethDesired: obj.amountWethDesired,
-      amountUsdcDesired: obj.amountUsdcDesired,
+      // 後方互換: WETH 既定は amountWeth/UsdcDesired を必須。base 指定は amountBase/QuoteDesired。
+      amountWethDesired: "0",
+      amountUsdcDesired: "0",
     };
+    if (base === "WETH") {
+      requireDecimalString(obj.amountWethDesired, "amountWethDesired");
+      requireDecimalString(obj.amountUsdcDesired, "amountUsdcDesired");
+      action.amountWethDesired = obj.amountWethDesired;
+      action.amountUsdcDesired = obj.amountUsdcDesired;
+    } else {
+      requireDecimalString(obj.amountBaseDesired, "amountBaseDesired");
+      requireDecimalString(obj.amountQuoteDesired, "amountQuoteDesired");
+      action.base = base;
+      action.amountBaseDesired = obj.amountBaseDesired;
+      action.amountQuoteDesired = obj.amountQuoteDesired;
+    }
     addPriorityFee(action, obj);
     addSlippage(action as { slippageBps?: number }, obj);
     return action;
@@ -509,6 +695,8 @@ function parse(obj: Record<string, unknown>): LeafAction | null {
       tokenId: obj.tokenId,
       liquidity: obj.liquidity,
     };
+    if (typeof obj.base === "string" && obj.base !== "WETH")
+      action.base = obj.base;
     if (obj.amountWethMin !== undefined) {
       requireDecimalString(obj.amountWethMin, "amountWethMin");
       action.amountWethMin = obj.amountWethMin;
@@ -523,6 +711,8 @@ function parse(obj: Record<string, unknown>): LeafAction | null {
   if (obj.type === "collectFees") {
     requireDecimalString(obj.tokenId, "tokenId");
     const action: LeafAction = { type: "collectFees", tokenId: obj.tokenId };
+    if (typeof obj.base === "string" && obj.base !== "WETH")
+      action.base = obj.base;
     addPriorityFee(action, obj);
     return action;
   }
@@ -540,27 +730,45 @@ function validate(
     const amountIn = BigInt(action.amountIn);
     if (amountIn <= 0n)
       return { ok: false, reason: "amountIn must be positive" };
-    const maxAllowed =
-      action.tokenIn === "WETH"
-        ? BigInt(obs.limits.maxWethInWei)
-        : BigInt(obs.limits.maxUsdcInUnits);
-    if (amountIn > maxAllowed)
+    const base = action.base ?? "WETH";
+    const market = marketFor("uniswap", base);
+    if (!market) return { ok: false, reason: `no uniswap market for ${base}` };
+    const inIsBase = action.tokenIn === market.base;
+    // ADR 0013: per-round 上限を全 base で適用。base-input 側は per-base 上限（WETH=maxWethInWei、
+    // 追加 base は limits.baseLimits[base]。"0"=上限なし=balance bound）。quote-input 側は共有の
+    // maxUsdcInUnits。WETH は maxWethInWei が常に >0 なので従来と同一挙動（byte 互換）。
+    if (inIsBase) {
+      const maxBaseIn =
+        base === "WETH"
+          ? BigInt(obs.limits.maxWethInWei)
+          : BigInt(obs.limits.baseLimits?.[base]?.maxSwapInBaseWei ?? "0");
+      if (maxBaseIn > 0n && amountIn > maxBaseIn)
+        return {
+          ok: false,
+          reason: "amountIn exceeds configured per-round limit",
+        };
+    } else if (amountIn > BigInt(obs.limits.maxUsdcInUnits)) {
       return {
         ok: false,
         reason: "amountIn exceeds configured per-round limit",
       };
-    const balance =
-      action.tokenIn === "WETH"
-        ? balances.wethWei
-        : stableBalanceOf(balances, TOKENS.USDC.address);
+    }
+    const balance = inIsBase
+      ? (balances.bases?.[market.base] ?? balances.wethWei)
+      : stableBalanceOf(balances, TOKENS.USDC.address);
     if (amountIn > balance)
       return { ok: false, reason: "amountIn exceeds balance" };
     return { ok: true };
   }
   if (action.type === "mintLiquidity") {
-    const weth = BigInt(action.amountWethDesired);
-    const usdc = BigInt(action.amountUsdcDesired);
-    if (weth <= 0n && usdc <= 0n)
+    const base = action.base ?? "WETH";
+    const baseAmt = BigInt(
+      action.amountBaseDesired ?? action.amountWethDesired,
+    );
+    const quoteAmt = BigInt(
+      action.amountQuoteDesired ?? action.amountUsdcDesired,
+    );
+    if (baseAmt <= 0n && quoteAmt <= 0n)
       return { ok: false, reason: "LP desired amount must be positive" };
     if (action.tickLower >= action.tickUpper)
       return { ok: false, reason: "tickLower must be less than tickUpper" };
@@ -570,17 +778,24 @@ function validate(
     ) {
       return { ok: false, reason: "ticks must align to pool tick spacing" };
     }
+    // ADR 0013: LP 上限を全 base で適用。base 側は per-base 上限（WETH=maxLpWethWei、追加 base は
+    // limits.baseLimits[base]。"0"=上限なし）。quote 側は共有の maxLpUsdcUnits。WETH は byte 互換。
+    const maxLpBase =
+      base === "WETH"
+        ? BigInt(obs.limits.maxLpWethWei)
+        : BigInt(obs.limits.baseLimits?.[base]?.maxLpBaseWei ?? "0");
     if (
-      weth > BigInt(obs.limits.maxLpWethWei) ||
-      usdc > BigInt(obs.limits.maxLpUsdcUnits)
+      (maxLpBase > 0n && baseAmt > maxLpBase) ||
+      quoteAmt > BigInt(obs.limits.maxLpUsdcUnits)
     )
       return {
         ok: false,
         reason: "LP desired amounts exceed configured LP limits",
       };
+    const baseBal = balances.bases?.[base] ?? balances.wethWei;
     if (
-      weth > balances.wethWei ||
-      usdc > stableBalanceOf(balances, TOKENS.USDC.address)
+      baseAmt > baseBal ||
+      quoteAmt > stableBalanceOf(balances, TOKENS.USDC.address)
     )
       return { ok: false, reason: "LP desired amounts exceed balance" };
     if (uni.positions.length >= obs.limits.maxOpenPositions)
@@ -607,15 +822,6 @@ function validate(
   return { ok: true };
 }
 
-function capToBalance(
-  tokenIn: TokenSymbol,
-  desired: bigint,
-  balances: BalanceSnapshot,
-): bigint {
-  const balance = tokenIn === "WETH" ? balances.wethWei : balances.usdcUnits;
-  return desired > balance ? balance : desired;
-}
-
 // ---------------------------------------------------------------------------
 // adapter
 // ---------------------------------------------------------------------------
@@ -632,40 +838,63 @@ export const uniswapAdapter: ProtocolAdapter = {
 
   async observe(ctx, state, agent, fairPrice): Promise<UniswapObservation> {
     const s = state as UniswapState;
+    const fairByBase = ctx.fairPrices ?? { WETH: fairPrice };
+    const tickByPool: Record<string, number> = {};
+    for (const ms of s.markets)
+      tickByPool[legOf(ms.market).pool.toLowerCase()] = ms.tick;
     const positions = await getLpPositions(
       ctx.publicClient,
       agent,
-      fairPrice,
-      s.tick,
+      fairByBase,
+      tickByPool,
     );
-    return {
+    const weth =
+      s.markets.find((m) => m.market.base === "WETH") ?? s.markets[0];
+    const obs: UniswapObservation = {
       pool: {
         pair: "WETH/USDC",
-        fee: UNISWAP.fee,
-        priceUsdcPerWeth: s.priceUsdcPerWeth,
-        tick: s.tick,
-        tickSpacing: s.tickSpacing,
+        fee: legOf(weth.market).fee,
+        priceUsdcPerWeth: weth.priceUsdcPerWeth,
+        tick: weth.tick,
+        tickSpacing: weth.tickSpacing,
       },
       positions,
     };
+    const extra: Record<string, UniswapMarketObservation> = {};
+    for (const ms of s.markets) {
+      if (ms.market.base === "WETH") continue;
+      extra[ms.market.key] = {
+        pair: ms.market.key,
+        fee: legOf(ms.market).fee,
+        priceUsdcPerWeth: ms.priceUsdcPerWeth,
+        tick: ms.tick,
+        tickSpacing: ms.tickSpacing,
+      };
+    }
+    if (Object.keys(extra).length > 0) obs.markets = extra;
+    return obs;
   },
 
   async buildTxs(ctx, owner, action): Promise<BuiltTx[]> {
     if (action.type === "swap") {
+      const market = resolveMarket("uniswap", action as SwapAction);
       const slippageBps = (action as SwapAction).slippageBps ?? 50;
       const data = await buildSwapData(
         ctx.publicClient,
         owner,
+        market,
         action as SwapAction,
         slippageBps,
       );
       return [{ to: UNISWAP.swapRouter, data }];
     }
+    const market = resolveMarket("uniswap", action as { base?: TokenSymbol });
     const slippageBps =
       action.type === "mintLiquidity" ? (action.slippageBps ?? 50) : 0;
     const data = await buildLpActionData(
       ctx.publicClient,
       owner,
+      market,
       action,
       slippageBps,
     );
@@ -673,17 +902,28 @@ export const uniswapAdapter: ProtocolAdapter = {
   },
 
   async valueUsdc(ctx, agent, _state, fairPrice): Promise<number> {
-    const positions = await getLpPositions(ctx.publicClient, agent, fairPrice);
+    const fairByBase = ctx.fairPrices ?? { WETH: fairPrice };
+    const positions = await getLpPositions(ctx.publicClient, agent, fairByBase);
     return positions.reduce((sum, p) => sum + p.valueUsdc, 0);
   },
 
   async setupWallet(): Promise<BuiltTx[]> {
-    return [
-      approveTx(TOKENS.WETH.address, UNISWAP.swapRouter),
-      approveTx(TOKENS.WETH.address, UNISWAP.nonfungiblePositionManager),
-      approveTx(TOKENS.USDC.address, UNISWAP.swapRouter),
-      approveTx(TOKENS.USDC.address, UNISWAP.nonfungiblePositionManager),
-    ];
+    const txs: BuiltTx[] = [];
+    const seen = new Set<string>();
+    const approveBoth = (token: Address) => {
+      const key = token.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      txs.push(
+        approveTx(token, UNISWAP.swapRouter),
+        approveTx(token, UNISWAP.nonfungiblePositionManager),
+      );
+    };
+    for (const m of marketsFor("uniswap")) {
+      approveBoth(tokenInfo(m.base).address);
+      approveBoth(tokenInfo(m.quote).address);
+    }
+    return txs;
   },
 };
 

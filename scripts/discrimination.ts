@@ -27,7 +27,12 @@
 // 出力: JSON を stdout、人間向け markdown を runs/<latest>/discrimination.md に。
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadAgents } from "../src/config.js";
+import type { AgentSpec } from "../src/types.js";
+import {
+  loadConfigDoc,
+  parseCliFlags,
+  resolveRunInputs,
+} from "../src/runConfig.js";
 import {
   aggregateAgents,
   collapseNetPnlByRegime,
@@ -43,99 +48,130 @@ import {
   statsFromRunDirs,
 } from "../src/multiSeedRun.js";
 
-process.env.AGENTS_CONFIG ??= "agents.p1.json";
-// 実時間 run の長さはブロック数で固定（ADR 0005 §1）。
-process.env.ERIS_RUN_BLOCKS ??= "60";
-process.env.ERIS_RUN_SECONDS ??= "0";
+// しきい値・パラメータは eris.config.yaml の `discrimination:` セクション + CLI フラグで指定（env 退役）。
+// 優先順位: CLI フラグ > YAML セクション > 既定。
+type Params = Record<string, unknown>;
+type Flags = Record<string, string>;
 
-function numEnv(value: string | undefined, fallback: number): number {
-  if (value === undefined || value.trim() === "") return fallback;
-  const parsed = Number(value);
+function num(
+  section: Params,
+  flags: Flags,
+  key: string,
+  fallback: number,
+): number {
+  const raw = flags[key] ?? section[key];
+  if (raw === undefined || raw === null || String(raw).trim() === "")
+    return fallback;
+  const parsed = Number(raw);
   if (!Number.isFinite(parsed))
-    throw new Error(`expected number env value, got ${value}`);
+    throw new Error(`expected number for ${key}, got ${raw}`);
   return parsed;
 }
 
-function thresholdsFromEnv(): DiscriminationThresholds {
+function posInt(
+  section: Params,
+  flags: Flags,
+  key: string,
+  fallback: number,
+): number {
+  const raw = flags[key] ?? section[key];
+  if (raw === undefined || raw === null || String(raw).trim() === "")
+    return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1)
+    throw new Error(`expected positive integer for ${key}, got ${raw}`);
+  return parsed;
+}
+
+function asList(raw: unknown): string[] {
+  if (Array.isArray(raw))
+    return raw.map((s) => String(s).trim()).filter(Boolean);
+  return String(raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function thresholdsFrom(
+  section: Params,
+  flags: Flags,
+): DiscriminationThresholds {
   return {
-    pnlMargin: numEnv(
-      process.env.DISC_PNL_MARGIN,
-      DEFAULT_THRESHOLDS.pnlMargin,
-    ),
-    sharpeMargin: numEnv(
-      process.env.DISC_SHARPE_MARGIN,
+    pnlMargin: num(section, flags, "pnlMargin", DEFAULT_THRESHOLDS.pnlMargin),
+    sharpeMargin: num(
+      section,
+      flags,
+      "sharpeMargin",
       DEFAULT_THRESHOLDS.sharpeMargin,
     ),
-    minBeatFraction: numEnv(
-      process.env.DISC_MIN_BEAT_FRACTION,
+    minBeatFraction: num(
+      section,
+      flags,
+      "minBeatFraction",
       DEFAULT_THRESHOLDS.minBeatFraction,
     ),
-    c1CiLevel: numEnv(
-      process.env.DISC_C1_CI_LEVEL,
-      DEFAULT_THRESHOLDS.c1CiLevel,
-    ),
-    bootstrapIterations: numEnv(
-      process.env.DISC_BOOTSTRAP_ITERS,
+    c1CiLevel: num(section, flags, "c1CiLevel", DEFAULT_THRESHOLDS.c1CiLevel),
+    bootstrapIterations: num(
+      section,
+      flags,
+      "bootstrapIterations",
       DEFAULT_THRESHOLDS.bootstrapIterations,
     ),
-    // DISC_C1_PAIRED=0 で unpaired にロールバック（既定は paired = run 内同一市場の対）。
-    c1Paired: (process.env.DISC_C1_PAIRED ?? "1").trim() !== "0",
-    minSpearman: numEnv(
-      process.env.DISC_MIN_SPEARMAN,
+    // c1Paired=0 で unpaired にロールバック（既定は paired = run 内同一市場の対）。
+    c1Paired: String(flags.c1Paired ?? section.c1Paired ?? "1").trim() !== "0",
+    minSpearman: num(
+      section,
+      flags,
+      "minSpearman",
       DEFAULT_THRESHOLDS.minSpearman,
     ),
-    maxGapCv: numEnv(process.env.DISC_MAX_GAP_CV, DEFAULT_THRESHOLDS.maxGapCv),
-    minSharpeSpread: numEnv(
-      process.env.DISC_MIN_SHARPE_SPREAD,
+    maxGapCv: num(section, flags, "maxGapCv", DEFAULT_THRESHOLDS.maxGapCv),
+    minSharpeSpread: num(
+      section,
+      flags,
+      "minSharpeSpread",
       DEFAULT_THRESHOLDS.minSharpeSpread,
     ),
   };
 }
 
-// baseline の id 集合を解決。env BASELINE_IDS が最優先、無ければロスターの baseline:true。
-function resolveBaselineIds(configPath: string): Set<string> {
-  const fromEnv = (process.env.BASELINE_IDS ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (fromEnv.length) return new Set(fromEnv);
-  return new Set(
-    loadAgents(configPath)
-      .filter((a) => a.baseline)
-      .map((a) => a.id),
-  );
+// baseline の id 集合を解決。baselineIds 指定が最優先、無ければロスターの baseline:true。
+function resolveBaselineIds(
+  agents: AgentSpec[],
+  section: Params,
+  flags: Flags,
+): Set<string> {
+  const explicit = asList(flags.baselineIds ?? section.baselineIds);
+  if (explicit.length) return new Set(explicit);
+  return new Set(agents.filter((a) => a.baseline).map((a) => a.id));
 }
 
-// 超過リターンの基準 agent。env DISC_BENCHMARK_ID > noop > 最初の baseline。
-function resolveBenchmarkId(baselineIds: Set<string>): string | undefined {
-  const env = process.env.DISC_BENCHMARK_ID?.trim();
-  if (env) return env;
+// 超過リターンの基準 agent。benchmarkId 指定 > noop > 最初の baseline。
+function resolveBenchmarkId(
+  baselineIds: Set<string>,
+  section: Params,
+  flags: Flags,
+): string | undefined {
+  const explicit = (
+    flags.benchmarkId ?? (section.benchmarkId as string | undefined)
+  )?.trim();
+  if (explicit) return explicit;
   if (baselineIds.has("noop")) return "noop";
   return [...baselineIds][0];
 }
 
-function splitEnvList(value: string | undefined): string[] {
-  return (value ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-function intEnv(value: string | undefined, fallback: number): number {
-  if (value === undefined || value.trim() === "") return fallback;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1)
-    throw new Error(`expected positive integer env value, got ${value}`);
-  return parsed;
-}
-
 async function main(): Promise<void> {
-  const configPath = process.env.AGENTS_CONFIG as string;
-  const baselineIds = resolveBaselineIds(configPath);
-  const benchmarkId = resolveBenchmarkId(baselineIds);
+  // 設定・ロスターは YAML（eris.config.yaml）を単一ソースに解決。判定パラメータは
+  // `discrimination:` セクション + CLI フラグ。
+  const { config, agents: roster } = resolveRunInputs();
+  const flags = parseCliFlags();
+  const section = (loadConfigDoc().discrimination ?? {}) as Params;
+  const configPath = config.agentsConfigPath;
+  const baselineIds = resolveBaselineIds(roster, section, flags);
+  const benchmarkId = resolveBenchmarkId(baselineIds, section, flags);
   if (baselineIds.size === 0) {
     console.error(
-      '[discrimination] warning: baseline agent が無い（ロスターで "baseline": true か env BASELINE_IDS を指定）。C1 は評価不能。',
+      '[discrimination] warning: baseline agent が無い（ロスターで "baseline": true か baselineIds 指定）。C1 は評価不能。',
     );
   }
   if (!benchmarkId) {
@@ -144,8 +180,14 @@ async function main(): Promise<void> {
     );
   }
 
-  const fromRuns = splitEnvList(process.env.DISC_FROM_RUNS);
-  const replications = intEnv(process.env.REPLICATIONS, 5);
+  const fromRuns = asList(flags.fromRuns ?? section.fromRuns);
+  const replications = posInt(section, flags, "replications", 5);
+  const fromRunsRegimes = flags.fromRunsRegimes ?? section.fromRunsRegimes;
+  const regimesRaw =
+    flags.regimes ??
+    (Array.isArray(section.regimes)
+      ? section.regimes.join(",")
+      : (section.regimes as string | undefined));
   const { byAgent, runs } = fromRuns.length
     ? (console.error(
         `[discrimination] offline: 既存 ${fromRuns.length} run を再判定（benchmark=${benchmarkId ?? "none"}）`,
@@ -153,14 +195,12 @@ async function main(): Promise<void> {
       statsFromRunDirs(
         fromRuns,
         benchmarkId,
-        process.env.DISC_FROM_RUNS_REGIMES
-          ? parseRegimes(process.env.DISC_FROM_RUNS_REGIMES, "")
-          : undefined,
+        fromRunsRegimes ? parseRegimes(String(fromRunsRegimes), "") : undefined,
       ))
     : await collectReplicationStats(
         // C2 は複数 regime を必須とする（同一 regime だけ反復すると C2 が
-        // タイミングノイズ耐性に化ける。ADR 0005 §2）。SEEDS は旧名の別名。
-        parseRegimes(process.env.REGIMES ?? process.env.SEEDS, "1,2,3"),
+        // タイミングノイズ耐性に化ける。ADR 0005 §2）。
+        parseRegimes(regimesRaw, "1,2,3"),
         replications,
         benchmarkId,
       );
@@ -175,7 +215,7 @@ async function main(): Promise<void> {
   const agents = aggregateAgents(byAgent);
   // C2 用: regime 内の反復を代表値(median PnL)へ畳み、各スロット = 1 regime にする。
   const rankAgents = aggregateAgents(collapseNetPnlByRegime(byAgent, regimeOf));
-  const thresholds = thresholdsFromEnv();
+  const thresholds = thresholdsFrom(section, flags);
   const verdict = computeVerdict(agents, baselineIds, thresholds, {
     rankAgents,
     regimeCount: regimes.length,
@@ -202,11 +242,11 @@ async function main(): Promise<void> {
   const out = {
     regimes,
     replications,
-    runBlocks: Number(process.env.ERIS_RUN_BLOCKS),
+    runBlocks: config.runBlocks,
     agentsConfig: configPath,
     benchmarkId: benchmarkId ?? null,
-    forkBlock: process.env.FORK_BLOCK_NUMBER ?? null,
-    enabledProtocols: process.env.ENABLED_PROTOCOLS ?? null,
+    forkBlock: config.forkBlockNumber ?? null,
+    enabledProtocols: config.enabledProtocols.join(","),
     runs,
     verdict,
     agents,

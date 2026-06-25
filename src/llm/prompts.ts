@@ -15,13 +15,14 @@ Your job has two phases:
 2. REVISION: When given the previous strategy plus the last N round records and a reason ("scheduled" or "pnl_drop"), produce a new strategy version.
 
 ## Revision discipline (read carefully)
-- AIM FOR A REAL IMPROVEMENT each revision, not a cosmetic ±few% tweak. Name the metric you expect to move (more captured edge, fewer idle/missed rounds, better sizing, fewer reverts) and change params or the executor decisively enough to actually move it. A micro-nudge you don't expect to matter is a wasted revision.
-- Change params as BOLDLY as the attribution justifies. If the recent log shows systematic under-sizing, over-trading, a threshold that is clearly too tight/loose, or a missed venue/signal, move the relevant params meaningfully — not by a token amount.
-- Use change_type "executor_logic" WHENEVER you have a concrete improvement hypothesis grounded in the log: capturing an edge the current code ignores, removing a structural inefficiency, or fixing a cited failure. A proven bug is NOT required — a well-argued, data-grounded improvement is enough. Put the evidence in why_executor_change.
+- Preserve proven base behavior. Many agents start from hand-tuned frozen strategies; a revision must improve the measured weakness without deleting profitable actions or changing the strategy class.
+- Prefer change_type "params_only" unless the attribution/logs identify a structural executor issue. Use "executor_logic" only when the current code cannot express the fix with parameters.
+- AIM FOR A REAL IMPROVEMENT each revision, not a cosmetic ±few% tweak. Name the metric you expect to move (more captured edge, fewer idle/missed rounds, better sizing, fewer reverts/lower gas) and change only the smallest surface that can move it.
+- Change params as much as the attribution justifies, but do not increase frequency, size, or priority fee unless α per notional and revert feedback support it.
 - ANTI-HALLUCINATION still holds: never invent a bug or an opportunity the observation/logs do not show. balancerSwap / curveSwap / aaveSupply / aaveBorrow / gmxIncrease / gmxDecrease ARE valid AgentAction types (see SIM_RULES). Ground every change in the data you were given.
-- A safety net auto-reverts any revision that worsens realized PnL, so EXPLORE BOLDLY — a change that turns out worse is rolled back automatically. The one thing to protect: do not discard an action the attribution shows is clearly profitable unless you replace it with something better.
+- The safety net is a last resort, not a license to over-trade. Treat reverts, gas, overbidding, and churn as direct PnL losses.
 
-Be opinionated. Start simple, then push for edge. Iterate.`;
+Be opinionated, but keep the base intact unless the evidence clearly says it is the source of losses.`;
 
 export const SIM_RULES = `# Simulation Rules
 
@@ -160,6 +161,69 @@ export type Phase = "init" | "revise";
 
 export type ReviseReason = "scheduled" | "pnl_drop";
 
+export function baseSpecificGuidance(
+  id: string | undefined = process.env.ERIS_BASE_STRATEGY,
+): string {
+  const base = (id ?? "").toLowerCase();
+  const common = [
+    "- Protect the base strategy class: tune thresholds, sizing, cooldowns, slippage, and bidding before rewriting the executor.",
+    "- Reverts and priority fees are costs. If α is small or revert feedback is high, skip marginal trades instead of bidding more.",
+    "- A stronger frozen peer is evidence that the base shape works; preserve the profitable action path and remove only the observed drag.",
+  ];
+  let specific: string[];
+  if (base === "crossvenue" || base === "cvbal" || base === "venue") {
+    specific = [
+      "- Cross-venue AMM edge comes from buying the cheap venue and selling the rich venue. Do not turn it into a one-leg directional trade.",
+      "- Favor a higher spread threshold, smaller size, or better venue selection when reverts/gas rise; only size up when αNetUsd is positive after gas and avgNotional is not already large.",
+      "- Keep both legs balanced in bundles where possible so inventory drift does not dominate PnL.",
+    ];
+  } else if (base === "statarb" || base === "arb" || base === "adaptivearb") {
+    specific = [
+      "- Statistical/gap arbitrage should skip weak signals. Raise entry thresholds or add cooldowns when recent α is negative or reverts cluster.",
+      "- Do not chase every fair/pool gap; require enough edge to cover slippage, gas, and competition.",
+      "- Tune sizing from α per notional. A larger gross value move is not a reason to increase size.",
+    ];
+  } else if (base === "gmxtrend" || base === "gmxrev" || base === "gmxperp") {
+    specific = [
+      "- GMX actions are expensive and can churn. Prefer fewer opens/closes with clear trend/reversion confirmation.",
+      "- Cap leverage/size when pnlUsd or recent α is unstable; avoid reopening immediately after a close unless the signal materially changed.",
+      "- If GMX reverts or gas dominate, reduce action frequency before increasing bids.",
+    ];
+  } else if (base === "aave" || base === "aaveloop") {
+    specific = [
+      "- Aave strategies must preserve health factor and avoid supply/borrow/repay churn.",
+      "- Improve by tuning LTV, borrow fraction, and idle thresholds; do not add directional swaps unless the log proves borrow inventory is being used profitably.",
+      "- When WETH is unavailable, prefer USDC-first setup or no-op over repeated failing WETH actions.",
+    ];
+  } else if (
+    base === "lp" ||
+    base === "dnlp" ||
+    base === "fairmm" ||
+    base === "jitlp" ||
+    base === "ladder" ||
+    base === "lpyield"
+  ) {
+    specific = [
+      "- LP strategies earn through fees/range placement, not constant mint churn. Avoid repeated mint/remove unless price exits the range or fees justify it.",
+      "- Respect token availability. If WETH is unavailable, do not keep minting WETH-heavy positions; use smaller ranges, USDC-first preparation, or skip.",
+      "- For hedged LP, preserve the hedge relationship; do not remove the GMX/Aave hedge unless attribution shows it is the loss source.",
+    ];
+  } else if (base === "flasharb") {
+    specific = [
+      "- Flash arbitrage should run only when spread exceeds all flashloan, swap, and gas costs. Atomic revert still burns gas.",
+      "- Prefer raising spreadThreshold or lowering flashUsdc/maxFlashUsdc when failures rise; do not bid maximum for tiny edges.",
+      "- Keep poolLiquidityReserveBps and minFlashLiquidityUsdc conservative so thin Aave pool liquidity is skipped instead of reverted.",
+      "- Use rawTx only when FlashArb is deployed and the venue pair is present.",
+    ];
+  } else {
+    specific = [
+      "- Keep the executor simple and observable. Add a new venue or action type only when the recent log shows a missed profitable edge.",
+      "- If the current base is mostly profitable, revise conservatively and document why the expected α improvement exceeds added gas/revert risk.",
+    ];
+  }
+  return ["## Base-specific guidance", ...common, ...specific].join("\n");
+}
+
 export function buildInitMessage(obs: AgentObservation): string {
   const pool = obs.protocols.uniswap?.pool;
   const poolLine = pool
@@ -177,6 +241,8 @@ You are starting a fresh run. Design your strategy from scratch.
 - Fair price: ${obs.fairPriceUsdcPerWeth.toFixed(2)} USDC/WETH (gap=${gapPct}%)
 - Inventory: ${obs.inventory.valueUsdc.toFixed(2)} USDC total (WETH=${obs.inventory.weth.toFixed(4)}, USDC=${obs.inventory.usdc.toFixed(2)}, ETH=${obs.inventory.eth.toFixed(4)})
 - Limits: maxSwapIn WETH=${obs.limits.maxWethInWei}wei, USDC=${obs.limits.maxUsdcInUnits}units; bundle<=${obs.limits.maxBundleActions}; positions<=${obs.limits.maxOpenPositions}
+
+${baseSpecificGuidance()}
 
 ## Your task
 Call set_strategy with notes + params + executor_ts. Pick a strategy you can iterate on as evidence accumulates.`;
@@ -196,17 +262,17 @@ export function buildReviseMessage(
   const gwei = (wei: string): string => (Number(BigInt(wei)) / 1e9).toFixed(1);
   const bidStr = (r: RoundRecord): string =>
     r.bidding
-      ? ` | bid=${gwei(r.bidding.bidWei)}gw vs comp=${gwei(r.bidding.competitorMaxWei)}gw txi=${r.bidding.lastTxIndex ?? "-"} revert=${(r.bidding.recentRevertRate * 100).toFixed(0)}%`
+      ? ` | bid=${gwei(r.bidding.bidWei)}gw vs comp=${gwei(r.bidding.competitorMaxWei)}gw txi=${r.bidding.lastTxIndex ?? "-"} revert=${(r.bidding.recentRevertRate * 100).toFixed(0)}%/${r.bidding.recentSampleSize}`
       : "";
   const lines = recent.map(
     (r) =>
-      `  r${r.round}: pool=${r.poolPrice.toFixed(2)} fair=${r.fairPrice.toFixed(2)} usd=${r.inventoryUsd.toFixed(2)} action=${r.action.type}${r.action.summary ? ` (${r.action.summary})` : ""}${r.executorOk ? "" : ` [ERR: ${r.executorReason ?? ""}]`}${bidStr(r)}`,
+      `  r${r.round}: pool=${r.poolPrice.toFixed(2)} fair=${r.fairPrice.toFixed(2)} usd=${r.inventoryUsd.toFixed(2)} pos=${(r.positionValueUsd ?? 0).toFixed(2)} ppos=${r.protocolPositions ?? r.openPositions} action=${r.action.type}${r.action.notionalUsd !== undefined ? ` notional=${r.action.notionalUsd.toFixed(2)}` : ""}${r.action.summary ? ` (${r.action.summary})` : ""}${r.executorOk ? "" : ` [ERR: ${r.executorReason ?? ""}]`}${bidStr(r)}`,
   );
   // 入札データがあるとき、revise に priority-fee オークションの調整を促す（ADR 0011）。
   const hasBidding = recent.some((r) => r.bidding);
   const biddingHint = hasBidding
     ? `\n## Priority-fee auction feedback (per round above: bid vs comp = your fee vs the best competitor fee; txi = your tx position, 0=first; revert% = recent reverts)
-- revert% high with txi>0 → you were FRONT-RUN (someone bid above you and took the arb); your swap reverted and wasted gas. Raise your bid ABOVE comp.
+- revert% high with txi>0 → you may be front-run or trading stale/tiny edges. Either bid just above comp when edge covers gas, or skip/cool down when it does not.
 - bid >> comp with low revert → you are OVERPAYING (winning by far more than needed); every extra gwei is burned PnL. Lower toward comp + a small margin.
 - The target is the MINIMUM bid that wins, capped at the trade's value. Tune your maxPriorityFeePerGasWei logic in executor_ts using obs.competition.\n`
     : "";
@@ -236,18 +302,21 @@ ${attribution}
 ## Recent ${recent.length} rounds
 ${lines.join("\n")}
 ${biddingHint}
+${baseSpecificGuidance()}
+
 ## Your task
 Produce an updated strategy that is MEANINGFULLY BETTER, not a token tweak. The current strategy may have
 started from a hand-tuned base (see notes above) — improve it where the attribution shows headroom
-(missed/idle rounds, mis-sizing, reverts, an ignored venue or signal). Make a decisive change rather than a
-±few% nudge when the evidence supports it.
+(missed/idle rounds, mis-sizing, reverts, an ignored venue or signal). Prefer params_only when it can fix the
+issue; use executor_logic only for a structural issue that params cannot express.
 
 CRITICAL — size off α, not total value: judge sizing/aggression ONLY by the α attribution (trade edge), never by
 total value or per-round inventory change (those are dominated by price drift β that does NOT scale with size).
 Increasing trade size scales α AND its costs (slippage, price impact, gas); if α per round is already small or
 the base sizing is at a sensible level, sizing up will lose more to slippage than it gains. Only size up when the
 α attribution clearly shows captured edge left on the table (e.g. α-positive rounds repeatedly hitting a size cap).
-If the base already captures the available α cleanly, the best revision may be a small, targeted one — or none.
+If the base already captures the available α cleanly, the best revision may be a small, targeted one — or no
+material change. Do not increase size/frequency just because total equity moved.
 
 PRIORITY-FEE AUCTION (set maxPriorityFeePerGasWei per action): the block orders txs by priority fee, descending.
 If a competitor lands before you on the SAME opportunity, the arb is already gone and YOUR swap REVERTS — you pay
@@ -259,6 +328,8 @@ gas and capture nothing. So bidding is not optional for contested trades. BUT do
 - Use the feedback: high competition.recentRevertRate (you are being front-run) → raise your margin. lastTxIndex
   consistently > 0 with low revert → you may be fine; lastTxIndex high with high revert → bid more or skip. The skill
   is bidding the MINIMUM that wins, not the most.
+- If recentRevertRate is high and αNetUsd is not clearly positive, reduce trade frequency/size or add cooldowns before
+  increasing the bid.
 
 Include a "change contract" alongside notes/params/executor_ts:
 - change_type: "params_only" or "executor_logic"
@@ -266,8 +337,7 @@ Include a "change contract" alongside notes/params/executor_ts:
 - rollback_condition: what evidence would mean this change failed
 - why_executor_change: REQUIRED if change_type is "executor_logic" — cite the attribution/log evidence motivating the rewrite (an improvement hypothesis is enough; a proven bug is not required)
 
-Rules: aim for a real improvement; use executor_logic freely when you have a data-grounded hypothesis; never
-invent a bug or opportunity the log does not show (see Revision discipline). A safety net auto-reverts changes
-that worsen PnL, so explore boldly. Keep a clearly-profitable action alive unless you replace it with something
-better. Briefly note what changed vs v${prev.version} and why.`;
+Rules: aim for a real improvement; preserve profitable base behavior; never invent a bug or opportunity the log
+does not show (see Revision discipline). Keep a clearly-profitable action alive unless you replace it with
+something demonstrably better. Briefly note what changed vs v${prev.version} and why.`;
 }

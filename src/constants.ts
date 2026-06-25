@@ -1,33 +1,46 @@
 import type { Address } from "viem";
+import type { MarketLegs, TokenSymbol } from "./types.js";
+import { LOCAL_DEPLOYMENT } from "./constants.local.js";
 
 // ---------------------------------------------------------------------------
 // Arbitrum One。単一フォーク上で全プロトコルを動かす。
 // アドレスは anvil-oracle-fork/bot/src/config.ts および bot/src/aave/config.ts から移植。
+//
+// ERIS_LOCAL_DEPLOY=1 のときは eris-app-deployer のローカルデプロイ済アドレス
+// (scripts/genLocalConstants.ts が生成する constants.local.ts) を overlay する。
+// それ以外 (fork) は下の Arbitrum 既定を使う。
 // ---------------------------------------------------------------------------
 
-export const CHAIN_ID = 42161;
+const L = process.env.ERIS_LOCAL_DEPLOY === "1" ? LOCAL_DEPLOYMENT : null;
 
-export type TokenSymbol = "WETH" | "USDC";
+export const CHAIN_ID = L?.CHAIN_ID ?? 42161;
 
-export const TOKENS = {
-  WETH: {
-    address: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1" as Address,
-    decimals: 18,
-  },
-  USDC: {
-    address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address,
-    decimals: 6,
-  },
-} as const;
+// TokenSymbol は types.ts の単一定義（=string、ADR 0013）に統一。constants 経由で import
+// している既存箇所のため re-export する。
+export type { TokenSymbol };
+
+// ADR 0013: トークンレジストリ。Record<symbol,...> 型注釈で TokenSymbol(=string) による
+// インデックスアクセスを許可する。local-deploy では WBTC 等が overlay で増える。
+export const TOKENS: Record<string, { address: Address; decimals: number }> =
+  L?.TOKENS ?? {
+    WETH: {
+      address: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1" as Address,
+      decimals: 18,
+    },
+    USDC: {
+      address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address,
+      decimals: 6,
+    },
+  };
 
 // stable 統一会計: native USDC / USDC.e / USDT(USD₮0) をすべて $1・6 桁の「USDC 相当」とみなす。
 // Arbitrum では Balancer/Curve の深い WETH/stable プールが USDC.e / USDT ペアのため、
 // venue ごとに異なる stable を使いつつ残高・PnL は合算する。
-export const USDC_VARIANTS = {
+export const USDC_VARIANTS = L?.USDC_VARIANTS ?? {
   native: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831" as Address,
   bridged: "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8" as Address, // USDC.e
   usdt: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9" as Address, // USD₮0
-} as const;
+};
 
 export function tokenAddress(symbol: TokenSymbol): Address {
   return TOKENS[symbol].address;
@@ -61,7 +74,7 @@ export function symbolForAddress(addr: Address): TokenSymbol | undefined {
 // WETH/USDC(native) 0.05% プール。フォークブロックで存在を確認すること。
 // 注: Arbitrum では WETH(0x82aF) < USDC(0xaf88) のため token0=WETH, token1=USDC。
 // ---------------------------------------------------------------------------
-export const UNISWAP = {
+export const UNISWAP = L?.UNISWAP ?? {
   poolWethUsdc500: "0xC6962004f452bE9203591991D15f6b388e09E8D0" as Address,
   swapRouter: "0xE592427A0AEce92De3Edee1F18E0157C05861564" as Address,
   nonfungiblePositionManager:
@@ -69,11 +82,12 @@ export const UNISWAP = {
   quoterV2: "0x61fFE014bA17989E743c5F6cB21bF9697530B21e" as Address,
   fee: 500,
   tickSpacing: 10,
-} as const;
+};
 
-// Multicall3（全チェーン共通の標準デプロイ）。歴史ブロック断面の一括読取（ADR 0006 §4）に使う。
+// Multicall3。fork(Arbitrum)では全チェーン共通の標準デプロイ。ローカルでは deployer が
+// 配置したアドレスを overlay。歴史ブロック断面の一括読取（ADR 0006 §4）に使う。
 export const MULTICALL3 =
-  "0xcA11bde05977b3631167028862bE2a173976CA11" as Address;
+  L?.MULTICALL3 ?? ("0xcA11bde05977b3631167028862bE2a173976CA11" as Address);
 
 export const WETH_USDC_FEE = UNISWAP.fee;
 export const WETH_USDC_TICK_SPACING = UNISWAP.tickSpacing;
@@ -86,7 +100,7 @@ export const MAX_BUNDLE_ACTIONS = 5;
 // フォーク時点では枯渇しているため setupGlobal で admin が joinPool して seed する。
 // stable は native USDC を使用（プールに含まれる）。
 // ---------------------------------------------------------------------------
-export const BALANCER = {
+export const BALANCER = L?.BALANCER ?? {
   vault: "0xBA12222222228d8Ba445958a75a0704d566BF2C8" as Address,
   queries: "0xE39B5e3B6D74016b2F6A9673D7d7493B6DF549d5" as Address,
   pool: "0x3b106b7ae88c3f8869b5221d2bbae398afc26737" as Address,
@@ -103,23 +117,23 @@ export const BALANCER = {
   seedWethWei: 200_000_000_000_000_000_000n, // 200 WETH
   seedUsdcUnits: 420_000_000_000n, // 420,000 USDC
   seedUsdtUnits: 420_000_000_000n, // 420,000 USDT
-} as const;
+};
 
 // ---------------------------------------------------------------------------
 // Curve (Arbitrum) tricrypto 0x960ea3: coins [USDT(0), WBTC(1), WETH(2)]（深い）。
 // WETH<->USDT leg のみ使用。stable は USDT。
 // ---------------------------------------------------------------------------
-export const CURVE = {
+export const CURVE = L?.CURVE ?? {
   pool: "0x960ea3e3C7FB317332d990873d354E18d7645590" as Address,
   wethIndex: 2,
   usdtIndex: 0,
   usdcToken: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9" as Address, // USDT
-} as const;
+};
 
 // ---------------------------------------------------------------------------
 // GMX v2 (gmx-synthetics) Arbitrum One デプロイアドレス
 // ---------------------------------------------------------------------------
-export const GMX = {
+export const GMX = L?.GMX ?? {
   RoleStore: "0x3c3d99FD298f679DBC2CEcd132b4eC4d0F5e6e72" as Address,
   DataStore: "0xFD70de6b91282D8017aA4E741e9Ae325CAb992d8" as Address,
   Oracle: "0x7F01614cA5198Ec979B1aAd1DAF0DE7e0a215BDF" as Address,
@@ -131,16 +145,16 @@ export const GMX = {
   LiquidationHandler: "0xaf157Eb8e2398A8E1Fc1dA929974652b9ba9BC25" as Address,
   Reader: "0x470fbC46bcC0f16532691Df360A07d8Bf5ee0789" as Address,
   Config: "0x0BBbbF9D0cbdE8069e926c859E530B00Bfe90072" as Address,
-} as const;
+};
 
-export const GMX_MARKETS = {
+export const GMX_MARKETS = L?.GMX_MARKETS ?? {
   ETH_USD: "0x70d95587d40A2caf56bd97485aB3Eec10Bee6336" as Address, // ETH/USD [WETH-USDC]
-} as const;
+};
 
 // ---------------------------------------------------------------------------
 // Aave v3 (Arbitrum)
 // ---------------------------------------------------------------------------
-export const AAVE = {
+export const AAVE = L?.AAVE ?? {
   PoolAddressesProvider:
     "0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb" as Address,
   Pool: "0x794a61358D6845594F94dc1DB02A252b5b4814aD" as Address,
@@ -148,7 +162,44 @@ export const AAVE = {
   AclAdmin: "0xFF1137243698CaA18EE364Cc966CF0e02A4e6327" as Address,
   AclManager: "0xa72636CbcAa8F5FF95B2cc47F3CDEe83F3294a0B" as Address,
   PoolDataProvider: "0x243Aa95cAC2a25651eda86e80bEe66114413c43b" as Address,
-} as const;
+};
+
+// ---------------------------------------------------------------------------
+// market leg レジストリ（ADR 0013）。protocol × base ごとの venue 固有 leg。
+// fork 既定は WETH/USDC のみ（既存の venue 定数から構築）。local-deploy では
+// genLocalConstants が WBTC 等を加えた MARKET_LEGS を overlay する（L?.MARKET_LEGS）。
+// markets.ts がこれを MarketConfig へ組み立て、adapter が回す。新トークンは leg 追加で増える。
+// ---------------------------------------------------------------------------
+export const MARKET_LEGS: MarketLegs = L?.MARKET_LEGS ?? {
+  uniswap: {
+    WETH: {
+      pool: UNISWAP.poolWethUsdc500,
+      fee: UNISWAP.fee,
+      tickSpacing: UNISWAP.tickSpacing,
+    },
+  },
+  balancer: {
+    WETH: {
+      poolId: BALANCER.poolId,
+      tokens: BALANCER.tokens,
+      stable: BALANCER.usdcToken,
+    },
+  },
+  curve: {
+    WETH: {
+      pool: CURVE.pool,
+      baseIndex: CURVE.wethIndex,
+      quoteIndex: CURVE.usdtIndex,
+      stable: CURVE.usdcToken,
+    },
+  },
+  gmx: {
+    WETH: { market: GMX_MARKETS.ETH_USD },
+  },
+  aave: {
+    WETH: {},
+  },
+};
 
 // ---------------------------------------------------------------------------
 // USDC 調達用 whale（フォークブロックで残高があるものを順に試す）

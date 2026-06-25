@@ -7,88 +7,215 @@
 // この v1 を磨いていく。offline ゲート(P3)で勝った版をここへ書き戻して恒久化する。
 import type { Strategy } from "./strategy.js";
 
-// arb: uniswap/balancer/curve の各 venue で pool↔fair の gap を見て、最も乖離した venue を fair へ
-// 寄せる swap。利益比例で priority fee を入札。3 venue 対応(最大乖離 venue を選ぶ)。
-// (examples/agents/arb-bot.ts の発展。obs だけで完結する純粋判断)
+// ADR 0013: executor が全 active base（WETH/WBTC…）を一様に走査するための observation 正規化関数。
+// WETH はトップレベル（protocols.uniswap.pool / protocols.balancer / protocols.curve）、追加 base は
+// protocols.*.markets["<base>/USDC"] に入る差異を吸収し、[{base,fair,venues,baseBalanceWei,
+// baseDecimals,maxSwapInBaseWei}] へ正規化する。WETH のみの observation では WETH 1 view だけを返し、
+// venue 順（uniswap→balancer→curve）も従来の push 順と一致するため WETH 経路は byte 互換。
+// examples/agents/lib/markets.ts（src/marketView.ts）の sandbox 版（plain JS でインライン）。
+const MARKET_VIEWS_FN = `
+function marketViews(obs) {
+  var fairByBase = obs.fairPricesUsd || { WETH: obs.fairPriceUsdcPerWeth };
+  var p = obs.protocols || {};
+  var bases = Object.keys(fairByBase).sort(function (a, b) { return a === "WETH" ? -1 : b === "WETH" ? 1 : (a < b ? -1 : 1); });
+  var SWAP = { uniswap: "swap", balancer: "balancerSwap", curve: "curveSwap" };
+  var protos = ["uniswap", "balancer", "curve"];
+  var views = [];
+  for (var bi = 0; bi < bases.length; bi++) {
+    var base = bases[bi];
+    var fair = fairByBase[base];
+    if (!(fair > 0)) continue;
+    var venues = [];
+    for (var pi = 0; pi < protos.length; pi++) {
+      var proto = protos[pi];
+      var price;
+      if (proto === "uniswap") {
+        price = base === "WETH"
+          ? (p.uniswap && p.uniswap.pool ? p.uniswap.pool.priceUsdcPerWeth : undefined)
+          : (p.uniswap && p.uniswap.markets && p.uniswap.markets[base + "/USDC"] ? p.uniswap.markets[base + "/USDC"].priceUsdcPerWeth : undefined);
+      } else {
+        var amm = proto === "balancer" ? p.balancer : p.curve;
+        price = base === "WETH"
+          ? (amm ? amm.priceUsdcPerWeth : undefined)
+          : (amm && amm.markets && amm.markets[base + "/USDC"] ? amm.markets[base + "/USDC"].priceUsdcPerWeth : undefined);
+      }
+      if (typeof price === "number" && price > 0) venues.push({ protocol: proto, swapType: SWAP[proto], price: price });
+    }
+    if (venues.length === 0) continue;
+    var baseBal = base === "WETH" ? obs.balances.wethWei : ((obs.baseBalances && obs.baseBalances[base]) || "0");
+    var dec = (obs.baseDecimals && obs.baseDecimals[base]) || 18;
+    var maxIn = base === "WETH" ? obs.limits.maxWethInWei : ((obs.limits.baseLimits && obs.limits.baseLimits[base] && obs.limits.baseLimits[base].maxSwapInBaseWei) || "0");
+    views.push({ base: base, fair: fair, venues: venues, baseBalanceWei: baseBal, baseDecimals: dec, maxSwapInBaseWei: maxIn });
+  }
+  return views;
+}`.trim();
+
+// arb: 全 active base（WETH/WBTC…）× uniswap/balancer/curve を横断し、pool↔fair の gap が最大の
+// (base, venue) を fair へ寄せる swap。利益比例で priority fee を入札。base!=="WETH" のときだけ action に
+// base を付与（WETH のみの観測では従来と同一出力 = byte 互換）。
+// (examples/agents/arb-bot.ts の発展。obs だけで完結する純粋判断。ADR 0013 で base 非依存化)
 const ARB_EXECUTOR = `
-const p = obs.protocols || {};
-const fair = obs.fairPriceUsdcPerWeth;
-if (!(fair > 0)) return { type: "noop", reason: "invalid fair" };
-const venues = [];
-if (p.uniswap && p.uniswap.pool && p.uniswap.pool.priceUsdcPerWeth > 0) venues.push({ swapType: "swap", price: p.uniswap.pool.priceUsdcPerWeth });
-if (p.balancer && p.balancer.priceUsdcPerWeth > 0) venues.push({ swapType: "balancerSwap", price: p.balancer.priceUsdcPerWeth });
-if (p.curve && p.curve.priceUsdcPerWeth > 0) venues.push({ swapType: "curveSwap", price: p.curve.priceUsdcPerWeth });
-if (venues.length === 0) return { type: "noop", reason: "no venue" };
-let best = null; let bestGap = 0;
-for (let i = 0; i < venues.length; i++) { const g = fair / venues[i].price - 1; if (Math.abs(g) > Math.abs(bestGap)) { bestGap = g; best = venues[i]; } }
-if (!best || Math.abs(bestGap) < params.gapThreshold) return { type: "noop", reason: "gap too small" };
-const tokenIn = bestGap > 0 ? "USDC" : "WETH";
-const maxLimit = BigInt(tokenIn === "WETH" ? obs.limits.maxWethInWei : obs.limits.maxUsdcInUnits);
-const balance = BigInt(tokenIn === "WETH" ? obs.balances.wethWei : obs.balances.usdcUnits);
-const cap = balance < maxLimit ? balance : maxLimit;
-const sizeBps = Math.min(params.maxSizeBps, Math.max(params.minSizeBps, Math.floor(Math.abs(bestGap) * params.sizeGain)));
-const amountIn = (cap * BigInt(sizeBps)) / 10000n;
-if (amountIn <= 0n) return { type: "noop", reason: "computed size zero" };
-const sizeUsdc = tokenIn === "USDC" ? Number(amountIn) / 1e6 : (Number(amountIn) / 1e18) * fair;
-const profitUsdc = sizeUsdc * Math.abs(bestGap);
-const profitWei = Math.floor((profitUsdc / fair) * 1e9) * 1e9;
+${MARKET_VIEWS_FN}
+const fair0 = obs.fairPriceUsdcPerWeth;
+if (!(fair0 > 0)) return { type: "noop", reason: "invalid fair" };
+const views = marketViews(obs);
+if (views.length === 0) return { type: "noop", reason: "no venue" };
+function minBI(a, b) { return a < b ? a : b; }
+const usdcBal = BigInt(obs.balances.usdcUnits || "0");
+const maxUsdc = BigInt(obs.limits.maxUsdcInUnits);
+let best = null;
+let bestRawGapAbs = 0;
+let seed = null;
+for (let vi = 0; vi < views.length; vi++) {
+  const view = views[vi];
+  const fair = view.fair;
+  const baseScale = Math.pow(10, view.baseDecimals);
+  const baseBal = BigInt(view.baseBalanceWei || "0");
+  const maxBaseIn = BigInt(view.maxSwapInBaseWei || "0");
+  const venues = view.venues;
+  for (let i = 0; i < venues.length; i++) {
+    const v = venues[i];
+    const g = fair / v.price - 1;
+    const gapAbs = Math.abs(g);
+    if (gapAbs > bestRawGapAbs) bestRawGapAbs = gapAbs;
+    if (gapAbs < params.gapThreshold) continue;
+    const tokenIn = g > 0 ? "USDC" : view.base;
+    const cap = tokenIn === "USDC" ? minBI(usdcBal, maxUsdc) : (maxBaseIn > 0n ? minBI(baseBal, maxBaseIn) : baseBal);
+    if (cap <= 0n) continue;
+    const sizeBps = Math.min(params.maxSizeBps, Math.max(params.minSizeBps, Math.floor(gapAbs * params.sizeGain)));
+    const amountIn = (cap * BigInt(sizeBps)) / 10000n;
+    if (amountIn <= 0n) continue;
+    const sizeUsdc = tokenIn === "USDC" ? Number(amountIn) / 1e6 : (Number(amountIn) / baseScale) * fair;
+    const score = sizeUsdc * gapAbs;
+    if (!best || score > best.score) best = { base: view.base, swapType: v.swapType, fair: fair, gap: g, gapAbs, tokenIn, amountIn, sizeBps, sizeUsdc, score };
+  }
+  if (!seed && params.enableInventorySeed && usdcBal > 0n && baseBal <= 0n) {
+    let cheapest = venues[0];
+    for (let i = 1; i < venues.length; i++) if (venues[i].price < cheapest.price) cheapest = venues[i];
+    const maxPremium = Number(params.maxSeedPremiumBps ?? 0) / 10000;
+    if (cheapest && cheapest.price <= fair * (1 + maxPremium)) {
+      const targetBps = Math.max(0, Math.floor(Number(params.targetWethInventoryBps ?? 0)));
+      const seedBps = Math.max(0, Math.floor(Number(params.seedUsdcBps ?? 0)));
+      const totalUsd = obs.inventory && obs.inventory.valueUsdc > 0 ? obs.inventory.valueUsdc : Number(usdcBal) / 1e6;
+      const targetUnits = BigInt(Math.floor(totalUsd * targetBps / 10000 * 1e6));
+      const byBps = (minBI(usdcBal, maxUsdc) * BigInt(seedBps)) / 10000n;
+      const minSeed = BigInt(Math.floor(Number(params.minSeedUsd ?? 0) * 1e6));
+      let amount = byBps < targetUnits ? byBps : targetUnits;
+      if (amount >= minSeed && amount > 0n) seed = { base: view.base, swapType: cheapest.swapType, amount };
+    }
+  }
+}
+if (!best && seed) {
+  helpers.log("seed venue=" + seed.swapType + " usdc=" + (Number(seed.amount) / 1e6).toFixed(2));
+  const a = { type: seed.swapType, tokenIn: "USDC", amountIn: seed.amount.toString(), maxPriorityFeePerGasWei: obs.limits.defaultPriorityFeePerGasWei, slippageBps: Math.floor(Number(params.seedSlippageBps ?? params.slippageBps ?? 75)) };
+  if (seed.base !== "WETH") a.base = seed.base;
+  return a;
+}
+if (!best) return { type: "noop", reason: bestRawGapAbs < params.gapThreshold ? "gap too small" : "no funded executable edge" };
+const profitUsdc = best.sizeUsdc * best.gapAbs;
+const profitWei = Math.floor((profitUsdc / best.fair) * 1e9) * 1e9;
 const bidPerGas = Math.floor((profitWei * params.bidProfitFraction) / 180000);
 const minBid = BigInt(obs.limits.defaultPriorityFeePerGasWei);
 const maxBid = BigInt(obs.limits.maxPriorityFeePerGasWei);
 let bid = BigInt(bidPerGas > 0 ? bidPerGas : 0);
 if (bid < minBid) bid = minBid;
 if (bid > maxBid) bid = maxBid;
-helpers.log("venue=" + best.swapType + " gap=" + (bestGap * 10000).toFixed(1) + "bps size=" + sizeBps + " bid=" + bid.toString());
-return { type: best.swapType, tokenIn: tokenIn, amountIn: amountIn.toString(), maxPriorityFeePerGasWei: bid.toString(), slippageBps: params.slippageBps };
+helpers.log("venue=" + best.swapType + " gap=" + (best.gap * 10000).toFixed(1) + "bps size=" + best.sizeBps + " bid=" + bid.toString());
+const out = { type: best.swapType, tokenIn: best.tokenIn, amountIn: best.amountIn.toString(), maxPriorityFeePerGasWei: bid.toString(), slippageBps: params.slippageBps };
+if (best.base !== "WETH") out.base = best.base;
+return out;
 `.trim();
 
-// adaptivearb: arb と同じ最大乖離 venue swap だが、入札を「競争シグナル(ADR 0011)で勝てる最小限を
-// 機会価値の範囲で」決める。obs.competition の競合最高入札を僅かに上回るだけ積み(margin)、ただし
-// profit×ceilFraction/gas の機会価値上限で頭打ちにする(過剰入札を罰せられない)。front-run が多い
+// adaptivearb: arb と同じく全 base × venue で最大乖離を取るが、入札を「競争シグナル(ADR 0011)で
+// 勝てる最小限を機会価値の範囲で」決める。obs.competition の競合最高入札を僅かに上回るだけ積み(margin)、
+// ただし profit×ceilFraction/gas の機会価値上限で頭打ち(過剰入札を罰せられない)。front-run が多い
 // (recentRevertRate 高)なら margin を上げて確実に前へ。revise で margin / ceilFraction を磨く。
-// (examples/agents/adaptive-arb.ts の executor 移植。経済ガス土俵で arb の固定割合入札を上回る狙い)
+// (examples/agents/adaptive-arb.ts の executor 移植。ADR 0013 で base 非依存化)
 const ADAPTIVE_ARB_EXECUTOR = `
-const p = obs.protocols || {};
-const fair = obs.fairPriceUsdcPerWeth;
-if (!(fair > 0)) return { type: "noop", reason: "invalid fair" };
-const venues = [];
-if (p.uniswap && p.uniswap.pool && p.uniswap.pool.priceUsdcPerWeth > 0) venues.push({ swapType: "swap", price: p.uniswap.pool.priceUsdcPerWeth });
-if (p.balancer && p.balancer.priceUsdcPerWeth > 0) venues.push({ swapType: "balancerSwap", price: p.balancer.priceUsdcPerWeth });
-if (p.curve && p.curve.priceUsdcPerWeth > 0) venues.push({ swapType: "curveSwap", price: p.curve.priceUsdcPerWeth });
-if (venues.length === 0) return { type: "noop", reason: "no venue" };
-let best = null; let bestGap = 0;
-for (let i = 0; i < venues.length; i++) { const g = fair / venues[i].price - 1; if (Math.abs(g) > Math.abs(bestGap)) { bestGap = g; best = venues[i]; } }
-if (!best || Math.abs(bestGap) < params.gapThreshold) return { type: "noop", reason: "gap too small" };
-const tokenIn = bestGap > 0 ? "USDC" : "WETH";
-const maxLimit = BigInt(tokenIn === "WETH" ? obs.limits.maxWethInWei : obs.limits.maxUsdcInUnits);
-const balance = BigInt(tokenIn === "WETH" ? obs.balances.wethWei : obs.balances.usdcUnits);
-const cap = balance < maxLimit ? balance : maxLimit;
-const sizeBps = Math.min(params.maxSizeBps, Math.max(params.minSizeBps, Math.floor(Math.abs(bestGap) * params.sizeGain)));
-const amountIn = (cap * BigInt(sizeBps)) / 10000n;
-if (amountIn <= 0n) return { type: "noop", reason: "computed size zero" };
+${MARKET_VIEWS_FN}
+const fair0 = obs.fairPriceUsdcPerWeth;
+if (!(fair0 > 0)) return { type: "noop", reason: "invalid fair" };
+const views = marketViews(obs);
+if (views.length === 0) return { type: "noop", reason: "no venue" };
 const ONE_GWEI = 1000000000n;
-// 機会価値(per gas)の上限 = profit × ceilFraction / gas。これを超えて積むと net を削る。
-const sizeUsdc = tokenIn === "USDC" ? Number(amountIn) / 1e6 : (Number(amountIn) / 1e18) * fair;
-const profitUsdc = sizeUsdc * Math.abs(bestGap);
-const profitWei = BigInt(Math.max(0, Math.floor((profitUsdc / fair) * 1e9))) * ONE_GWEI;
-const ceilNum = BigInt(Math.max(0, Math.floor(params.ceilFraction * 10000)));
-const gasUnits = BigInt(Math.max(1, Math.floor(params.gasUnitsEstimate)));
-const ceilingPerGas = (profitWei * ceilNum) / 10000n / gasUnits;
-// 競争シグナル: 競合の最高入札を margin% だけ上回る(勝てる最小限)。front-run 多発なら margin↑。
 const comp = obs.competition;
 const competitorMax = BigInt((comp && comp.maxCompetitorPriorityFeeWei) || "0");
 const revertRate = (comp && comp.recentRevertRate) || 0;
 const marginPct = BigInt(Math.floor(revertRate > params.frontrunRevertThreshold ? params.marginPctFrontrun : params.marginPctNormal));
-let margin = (competitorMax * marginPct) / 100n;
-if (margin < ONE_GWEI) margin = ONE_GWEI;
-let bid = competitorMax + margin;
-if (bid > ceilingPerGas) bid = ceilingPerGas;
 const minBid = BigInt(obs.limits.defaultPriorityFeePerGasWei);
 const maxBid = BigInt(obs.limits.maxPriorityFeePerGasWei);
-if (bid < minBid) bid = minBid;
-if (bid > maxBid) bid = maxBid;
-helpers.log("venue=" + best.swapType + " gap=" + (bestGap * 10000).toFixed(1) + "bps size=" + sizeBps + " bid=" + bid.toString() + " comp=" + competitorMax.toString());
-return { type: best.swapType, tokenIn: tokenIn, amountIn: amountIn.toString(), maxPriorityFeePerGasWei: bid.toString(), slippageBps: params.slippageBps };
+function minBI(a, b) { return a < b ? a : b; }
+function bidFor(sizeUsdc, gapAbs, fair) {
+  // 機会価値(per gas)の上限 = profit × ceilFraction / gas。これを超えて積むと net を削る。
+  const profitUsdc = sizeUsdc * gapAbs;
+  const profitWei = BigInt(Math.max(0, Math.floor((profitUsdc / fair) * 1e9))) * ONE_GWEI;
+  const ceilNum = BigInt(Math.max(0, Math.floor(params.ceilFraction * 10000)));
+  const gasUnits = BigInt(Math.max(1, Math.floor(params.gasUnitsEstimate)));
+  const ceilingPerGas = (profitWei * ceilNum) / 10000n / gasUnits;
+  let margin = (competitorMax * marginPct) / 100n;
+  if (margin < ONE_GWEI) margin = ONE_GWEI;
+  let bid = competitorMax + margin;
+  if (bid > ceilingPerGas) bid = ceilingPerGas;
+  if (bid < minBid) bid = minBid;
+  if (bid > maxBid) bid = maxBid;
+  return bid.toString();
+}
+const usdcBal = BigInt(obs.balances.usdcUnits || "0");
+const maxUsdc = BigInt(obs.limits.maxUsdcInUnits);
+let best = null;
+let bestRawGapAbs = 0;
+let seed = null;
+for (let vi = 0; vi < views.length; vi++) {
+  const view = views[vi];
+  const fair = view.fair;
+  const baseScale = Math.pow(10, view.baseDecimals);
+  const baseBal = BigInt(view.baseBalanceWei || "0");
+  const maxBaseIn = BigInt(view.maxSwapInBaseWei || "0");
+  const venues = view.venues;
+  for (let i = 0; i < venues.length; i++) {
+    const v = venues[i];
+    const g = fair / v.price - 1;
+    const gapAbs = Math.abs(g);
+    if (gapAbs > bestRawGapAbs) bestRawGapAbs = gapAbs;
+    if (gapAbs < params.gapThreshold) continue;
+    const tokenIn = g > 0 ? "USDC" : view.base;
+    const cap = tokenIn === "USDC" ? minBI(usdcBal, maxUsdc) : (maxBaseIn > 0n ? minBI(baseBal, maxBaseIn) : baseBal);
+    if (cap <= 0n) continue;
+    const sizeBps = Math.min(params.maxSizeBps, Math.max(params.minSizeBps, Math.floor(gapAbs * params.sizeGain)));
+    const amountIn = (cap * BigInt(sizeBps)) / 10000n;
+    if (amountIn <= 0n) continue;
+    const sizeUsdc = tokenIn === "USDC" ? Number(amountIn) / 1e6 : (Number(amountIn) / baseScale) * fair;
+    const score = sizeUsdc * gapAbs;
+    const bid = bidFor(sizeUsdc, gapAbs, fair);
+    if (!best || score > best.score) best = { base: view.base, swapType: v.swapType, gap: g, gapAbs, tokenIn, amountIn, sizeBps, score, bid };
+  }
+  if (!seed && params.enableInventorySeed && usdcBal > 0n && baseBal <= 0n) {
+    let cheapest = venues[0];
+    for (let i = 1; i < venues.length; i++) if (venues[i].price < cheapest.price) cheapest = venues[i];
+    const maxPremium = Number(params.maxSeedPremiumBps ?? 0) / 10000;
+    if (cheapest && cheapest.price <= fair * (1 + maxPremium)) {
+      const targetBps = Math.max(0, Math.floor(Number(params.targetWethInventoryBps ?? 0)));
+      const seedBps = Math.max(0, Math.floor(Number(params.seedUsdcBps ?? 0)));
+      const totalUsd = obs.inventory && obs.inventory.valueUsdc > 0 ? obs.inventory.valueUsdc : Number(usdcBal) / 1e6;
+      const targetUnits = BigInt(Math.floor(totalUsd * targetBps / 10000 * 1e6));
+      const byBps = (minBI(usdcBal, maxUsdc) * BigInt(seedBps)) / 10000n;
+      const minSeed = BigInt(Math.floor(Number(params.minSeedUsd ?? 0) * 1e6));
+      let amount = byBps < targetUnits ? byBps : targetUnits;
+      if (amount >= minSeed && amount > 0n) seed = { base: view.base, swapType: cheapest.swapType, amount };
+    }
+  }
+}
+if (!best && seed) {
+  helpers.log("seed venue=" + seed.swapType + " usdc=" + (Number(seed.amount) / 1e6).toFixed(2));
+  const a = { type: seed.swapType, tokenIn: "USDC", amountIn: seed.amount.toString(), maxPriorityFeePerGasWei: minBid.toString(), slippageBps: Math.floor(Number(params.seedSlippageBps ?? params.slippageBps ?? 75)) };
+  if (seed.base !== "WETH") a.base = seed.base;
+  return a;
+}
+if (!best) return { type: "noop", reason: bestRawGapAbs < params.gapThreshold ? "gap too small" : "no funded executable edge" };
+helpers.log("venue=" + best.swapType + " gap=" + (best.gap * 10000).toFixed(1) + "bps size=" + best.sizeBps + " bid=" + best.bid + " comp=" + competitorMax.toString());
+const out = { type: best.swapType, tokenIn: best.tokenIn, amountIn: best.amountIn.toString(), maxPriorityFeePerGasWei: best.bid, slippageBps: params.slippageBps };
+if (best.base !== "WETH") out.base = best.base;
+return out;
 `.trim();
 
 // lp: 現在 tick の周りに集中流動性を供給する素朴な v1。既にポジションがあれば hold。
@@ -97,6 +224,7 @@ const LP_EXECUTOR = `
 const uni = obs.protocols && obs.protocols.uniswap;
 if (!uni || !uni.pool) return { type: "noop", reason: "uniswap disabled" };
 if (uni.positions && uni.positions.length > 0) return { type: "noop", reason: "holding LP position" };
+const fee = obs.limits.defaultPriorityFeePerGasWei;
 const spacing = uni.pool.tickSpacing;
 const center = Math.round(uni.pool.tick / spacing) * spacing;
 const width = Math.max(1, params.widthSpacings) * spacing;
@@ -107,11 +235,25 @@ const usdcUnits = BigInt(obs.balances.usdcUnits);
 const maxLpWeth = BigInt(obs.limits.maxLpWethWei);
 const maxLpUsdc = BigInt(obs.limits.maxLpUsdcUnits);
 const fracNum = BigInt(Math.max(0, Math.floor(params.depositFraction * 10000)));
+const targetWeth = (maxLpWeth * fracNum) / 10000n;
+const targetUsdc = (maxLpUsdc * fracNum) / 10000n;
+if (wethWei < targetWeth && usdcUnits > 0n) {
+  const fair = obs.fairPriceUsdcPerWeth;
+  const missing = targetWeth - wethWei;
+  if (fair > 0 && missing > 0n) {
+    const wantUsdc = BigInt(Math.ceil((Number(missing) / 1e18) * fair * 1.05 * 1e6));
+    const reserveUsdc = usdcUnits > targetUsdc ? targetUsdc : 0n;
+    const available = usdcUnits > reserveUsdc ? usdcUnits - reserveUsdc : usdcUnits / 2n;
+    const maxIn = BigInt(obs.limits.maxUsdcInUnits);
+    let amt = wantUsdc < available ? wantUsdc : available; if (amt > maxIn) amt = maxIn;
+    if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: Math.max(Number(params.slippageBps || 75), 300), maxPriorityFeePerGasWei: fee };
+  }
+}
 const wethDesired = ((wethWei < maxLpWeth ? wethWei : maxLpWeth) * fracNum) / 10000n;
 const usdcDesired = ((usdcUnits < maxLpUsdc ? usdcUnits : maxLpUsdc) * fracNum) / 10000n;
-if (wethDesired <= 0n && usdcDesired <= 0n) return { type: "noop", reason: "no inventory to LP" };
+if (wethDesired <= 0n || usdcDesired <= 0n) return { type: "noop", reason: "need both sides to LP" };
 helpers.log("mint range [" + tickLower + "," + tickUpper + "]");
-return { type: "mintLiquidity", tickLower: tickLower, tickUpper: tickUpper, amountWethDesired: wethDesired.toString(), amountUsdcDesired: usdcDesired.toString(), slippageBps: params.slippageBps };
+return { type: "mintLiquidity", tickLower: tickLower, tickUpper: tickUpper, amountWethDesired: wethDesired.toString(), amountUsdcDesired: usdcDesired.toString(), maxPriorityFeePerGasWei: fee, slippageBps: params.slippageBps };
 `.trim();
 
 // venue: 有効な AMM venue (uniswap/balancer/curve) のうち fair から最も乖離した
@@ -126,16 +268,23 @@ if (p.uniswap && p.uniswap.pool) venues.push({ swapType: "swap", price: p.uniswa
 if (p.balancer) venues.push({ swapType: "balancerSwap", price: p.balancer.priceUsdcPerWeth });
 if (p.curve) venues.push({ swapType: "curveSwap", price: p.curve.priceUsdcPerWeth });
 let best = null; let bestGap = 0;
+const wethBal = BigInt(obs.balances.wethWei);
+const usdcBal = BigInt(obs.balances.usdcUnits);
 for (const v of venues) {
   if (!(v.price > 0)) continue;
-  const gap = Math.abs(fair / v.price - 1);
-  if (gap > bestGap) { bestGap = gap; best = v; }
+  const rawGap = fair / v.price - 1;
+  const tokenIn = rawGap > 0 ? "USDC" : "WETH";
+  const balance = tokenIn === "WETH" ? wethBal : usdcBal;
+  if (balance <= 0n) continue;
+  const gap = Math.abs(rawGap);
+  if (gap > bestGap) { bestGap = gap; best = { swapType: v.swapType, price: v.price, tokenIn: tokenIn, balance: balance }; }
 }
-if (!best || bestGap < params.gapThreshold) return { type: "noop", reason: "no venue gap" };
-const tokenIn = best.price < fair ? "USDC" : "WETH";
+if (!best || bestGap < params.gapThreshold) return { type: "noop", reason: "no funded venue gap" };
+const tokenIn = best.tokenIn;
 const max = BigInt(tokenIn === "WETH" ? obs.limits.maxWethInWei : obs.limits.maxUsdcInUnits);
+const cap = best.balance < max ? best.balance : max;
 const sizeBps = Math.min(params.maxSizeBps, Math.max(params.minSizeBps, Math.floor(bestGap * params.sizeGain)));
-const amountIn = (max * BigInt(sizeBps)) / 10000n;
+const amountIn = (cap * BigInt(sizeBps)) / 10000n;
 if (amountIn <= 0n) return { type: "noop", reason: "computed size zero" };
 helpers.log("venue=" + best.swapType + " gap=" + (bestGap * 10000).toFixed(1) + "bps size=" + sizeBps);
 return { type: best.swapType, tokenIn: tokenIn, amountIn: amountIn.toString(), maxPriorityFeePerGasWei: obs.limits.defaultPriorityFeePerGasWei, slippageBps: params.slippageBps };
@@ -150,6 +299,16 @@ const suppliedWeth = BigInt((aave.supplied && aave.supplied.WETH) || "0");
 const borrowedUsdc = BigInt((aave.borrowed && aave.borrowed.USDC) || "0");
 const wethWei = BigInt(obs.balances.wethWei);
 const fee = obs.limits.defaultPriorityFeePerGasWei;
+// USDC-only 配布対応: 担保供給用の WETH が無ければ先に USDC→WETH swap で調達する。
+if (suppliedWeth === 0n && wethWei === 0n) {
+  const fair = obs.fairPriceUsdcPerWeth; const usdcUnits = BigInt(obs.balances.usdcUnits);
+  const maxSupplyW = BigInt(obs.limits.maxAaveSupplyWethWei);
+  if (fair > 0 && usdcUnits > 0n && maxSupplyW > 0n) {
+    const wantUsdc = BigInt(Math.ceil((Number(maxSupplyW) / 1e18) * fair * params.supplyFraction * 1.05 * 1e6));
+    const maxIn = BigInt(obs.limits.maxUsdcInUnits); let amt = wantUsdc < usdcUnits ? wantUsdc : usdcUnits; if (amt > maxIn) amt = maxIn;
+    if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: 300, maxPriorityFeePerGasWei: fee };
+  }
+}
 if (suppliedWeth === 0n && wethWei > 0n) {
   const maxSupply = BigInt(obs.limits.maxAaveSupplyWethWei);
   const half = wethWei / 2n;
@@ -190,19 +349,50 @@ if (!(std > 0)) return { type: "noop", reason: "no variance" };
 const venues = [{ swapType: "swap", price: uni.pool.priceUsdcPerWeth }];
 if (p.balancer && p.balancer.priceUsdcPerWeth > 0) venues.push({ swapType: "balancerSwap", price: p.balancer.priceUsdcPerWeth });
 if (p.curve && p.curve.priceUsdcPerWeth > 0) venues.push({ swapType: "curveSwap", price: p.curve.priceUsdcPerWeth });
-let best = venues[0]; let bestGap = fair / venues[0].price - 1;
-for (let i = 1; i < venues.length; i++) { const g = fair / venues[i].price - 1; if (Math.abs(g) > Math.abs(bestGap)) { bestGap = g; best = venues[i]; } }
+const wethBal = BigInt(obs.balances.wethWei);
+const usdcBal = BigInt(obs.balances.usdcUnits);
+function minBI(a, b) { return a < b ? a : b; }
+let best = null; let bestGap = 0; let bestBalance = 0n;
+for (let i = 0; i < venues.length; i++) {
+  const g = fair / venues[i].price - 1;
+  const side = g > 0 ? "USDC" : "WETH";
+  const bal = side === "WETH" ? wethBal : usdcBal;
+  if (bal <= 0n) continue;
+  if (!best || Math.abs(g) > Math.abs(bestGap)) { bestGap = g; best = venues[i]; bestBalance = bal; }
+}
+function seedWeth(reason) {
+  if (!params.enableInventorySeed || usdcBal <= 0n || wethBal > 0n) return null;
+  let cheapest = venues[0];
+  for (let i = 1; i < venues.length; i++) if (venues[i].price < cheapest.price) cheapest = venues[i];
+  const maxPremium = Number(params.maxSeedPremiumBps ?? 0) / 10000;
+  if (!cheapest || cheapest.price > fair * (1 + maxPremium)) return null;
+  const maxUsdc = BigInt(obs.limits.maxUsdcInUnits);
+  const totalUsd = obs.inventory && obs.inventory.valueUsdc > 0 ? obs.inventory.valueUsdc : Number(usdcBal) / 1e6;
+  const targetUnits = BigInt(Math.floor(totalUsd * Number(params.targetWethInventoryBps ?? 0) / 10000 * 1e6));
+  const byBps = (minBI(usdcBal, maxUsdc) * BigInt(Math.max(0, Math.floor(Number(params.seedUsdcBps ?? 0))))) / 10000n;
+  const minSeed = BigInt(Math.floor(Number(params.minSeedUsd ?? 0) * 1e6));
+  let amount = byBps < targetUnits ? byBps : targetUnits;
+  if (amount < minSeed || amount <= 0n) return null;
+  helpers.log("seed " + reason + " venue=" + cheapest.swapType + " usdc=" + (Number(amount) / 1e6).toFixed(2));
+  return { type: cheapest.swapType, tokenIn: "USDC", amountIn: amount.toString(), maxPriorityFeePerGasWei: obs.limits.defaultPriorityFeePerGasWei, slippageBps: Math.floor(Number(params.seedSlippageBps ?? params.slippageBps ?? 75)) };
+}
+if (!best) return seedWeth("no funded venue") || { type: "noop", reason: "no funded venue gap" };
 const z = (bestGap - mean) / std;
 const absZ = Math.abs(z);
-if (absZ < params.zEnter) return { type: "noop", reason: "|z|=" + absZ.toFixed(2) + " < enter" };
+const fallbackGapThreshold = Number(params.fallbackGapThreshold ?? Infinity);
+if (absZ < params.zEnter && Math.abs(bestGap) < fallbackGapThreshold) {
+  return seedWeth("|z| below enter") || { type: "noop", reason: "|z|=" + absZ.toFixed(2) + " < enter" };
+}
 const tokenIn = bestGap > 0 ? "USDC" : "WETH";
 const max = BigInt(tokenIn === "WETH" ? obs.limits.maxWethInWei : obs.limits.maxUsdcInUnits);
+const cap = bestBalance < max ? bestBalance : max;
 const span = Math.max(0.0001, params.zAggressive - params.zEnter);
 const t = Math.max(0, Math.min(1, (absZ - params.zEnter) / span));
-const sizeBps = Math.floor(params.minSizeBps + (params.maxSizeBps - params.minSizeBps) * t);
-const amountIn = (max * BigInt(sizeBps)) / 10000n;
+const fallbackSizeBps = Math.max(1, Math.floor(Number(params.fallbackSizeBps ?? params.minSizeBps)));
+const sizeBps = absZ < params.zEnter ? fallbackSizeBps : Math.floor(params.minSizeBps + (params.maxSizeBps - params.minSizeBps) * t);
+const amountIn = (cap * BigInt(sizeBps)) / 10000n;
 if (amountIn <= 0n) return { type: "noop", reason: "computed size zero" };
-helpers.log("venue=" + best.swapType + " z=" + z.toFixed(2) + " size=" + sizeBps);
+helpers.log("venue=" + best.swapType + " z=" + z.toFixed(2) + " gap=" + (bestGap * 10000).toFixed(1) + "bps size=" + sizeBps);
 return { type: best.swapType, tokenIn: tokenIn, amountIn: amountIn.toString(), maxPriorityFeePerGasWei: obs.limits.defaultPriorityFeePerGasWei, slippageBps: params.slippageBps };
 `.trim();
 
@@ -239,6 +429,17 @@ const fee = obs.limits.defaultPriorityFeePerGasWei;
 if (!uni || !uni.pool) return { type: "noop", reason: "uniswap disabled" };
 const positions = uni.positions || [];
 if (positions.length === 0) {
+  // USDC-only 配布対応: LP 用 WETH が無ければ先に USDC→WETH swap で調達する。
+  const needWeth = BigInt(obs.limits.maxLpWethWei) / 2n;
+  const wethWei = BigInt(obs.balances.wethWei);
+  if (wethWei < needWeth) {
+    const fair = obs.fairPriceUsdcPerWeth; const usdcUnits = BigInt(obs.balances.usdcUnits);
+    if (fair > 0 && usdcUnits > 0n) {
+      const wantUsdc = BigInt(Math.ceil((Number(needWeth - wethWei) / 1e18) * fair * 1.05 * 1e6));
+      const maxIn = BigInt(obs.limits.maxUsdcInUnits); let amt = wantUsdc < usdcUnits ? wantUsdc : usdcUnits; if (amt > maxIn) amt = maxIn;
+      if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: 300, maxPriorityFeePerGasWei: fee };
+    }
+  }
   const spacing = uni.pool.tickSpacing;
   const center = Math.floor(uni.pool.tick / spacing) * spacing;
   const w = Math.max(1, Math.floor(params.rangeSpacings)) * spacing;
@@ -276,6 +477,16 @@ const sizeRaw = BigInt(Math.max(0, Math.round(params.sizeUsd))) * (10n ** 30n);
 const maxSize = BigInt(obs.limits.maxGmxSizeUsd);
 const sizeUsd = sizeRaw < maxSize ? sizeRaw : maxSize;
 if (collWei <= 0n || sizeUsd <= 0n) return { type: "noop", reason: "computed size zero" };
+// USDC-only 配布対応: collateral 用 WETH が無ければ先に USDC→WETH swap で調達する。
+const wethWei = BigInt(obs.balances.wethWei);
+if (wethWei < collWei) {
+  const fair = obs.fairPriceUsdcPerWeth; const usdcUnits = BigInt(obs.balances.usdcUnits);
+  if (fair > 0 && usdcUnits > 0n) {
+    const wantUsdc = BigInt(Math.ceil((Number(collWei - wethWei) / 1e18) * fair * 1.05 * 1e6));
+    const maxIn = BigInt(obs.limits.maxUsdcInUnits); let amt = wantUsdc < usdcUnits ? wantUsdc : usdcUnits; if (amt > maxIn) amt = maxIn;
+    if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: 300, maxPriorityFeePerGasWei: fee };
+  }
+}
 return { type: "gmxIncrease", isLong: params.isLong !== false, collateral: "WETH", collateralAmount: collWei.toString(), sizeDeltaUsd: sizeUsd.toString(), maxPriorityFeePerGasWei: fee };
 `.trim();
 
@@ -312,6 +523,16 @@ const sizeUsd = sizeRaw < maxSize ? sizeRaw : maxSize;
 const collWei = BigInt(Math.max(0, Math.round(params.collateralWeth * 1000))) * (10n ** 15n);
 if (sizeUsd <= 0n) return { type: "noop", reason: "computed size zero" };
 helpers.log("dev=" + (dev * 10000).toFixed(1) + "bps long=" + (dev < 0));
+// USDC-only 配布対応: collateral 用 WETH が無ければ先に USDC→WETH swap で調達する。
+const wethWei = BigInt(obs.balances.wethWei);
+if (wethWei < collWei) {
+  const usdcUnits = BigInt(obs.balances.usdcUnits);
+  if (usdcUnits > 0n) {
+    const wantUsdc = BigInt(Math.ceil((Number(collWei - wethWei) / 1e18) * price * 1.05 * 1e6));
+    const maxIn = BigInt(obs.limits.maxUsdcInUnits); let amt = wantUsdc < usdcUnits ? wantUsdc : usdcUnits; if (amt > maxIn) amt = maxIn;
+    if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: 300, maxPriorityFeePerGasWei: fee };
+  }
+}
 return { type: "gmxIncrease", isLong: dev < 0, collateral: "WETH", collateralAmount: collWei.toString(), sizeDeltaUsd: sizeUsd.toString(), maxPriorityFeePerGasWei: fee };
 `.trim();
 
@@ -348,6 +569,16 @@ const sizeUsd = sizeRaw < maxSize ? sizeRaw : maxSize;
 const collWei = BigInt(Math.max(0, Math.round(params.collateralWeth * 1000))) * (10n ** 15n);
 if (sizeUsd <= 0n) return { type: "noop", reason: "computed size zero" };
 helpers.log("trend=" + (trend * 10000).toFixed(1) + "bps up=" + upTrend);
+// USDC-only 配布対応: collateral 用 WETH が無ければ先に USDC→WETH swap で調達する。
+const wethWei = BigInt(obs.balances.wethWei);
+if (wethWei < collWei) {
+  const fair = obs.fairPriceUsdcPerWeth; const usdcUnits = BigInt(obs.balances.usdcUnits);
+  if (fair > 0 && usdcUnits > 0n) {
+    const wantUsdc = BigInt(Math.ceil((Number(collWei - wethWei) / 1e18) * fair * 1.05 * 1e6));
+    const maxIn = BigInt(obs.limits.maxUsdcInUnits); let amt = wantUsdc < usdcUnits ? wantUsdc : usdcUnits; if (amt > maxIn) amt = maxIn;
+    if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: 300, maxPriorityFeePerGasWei: fee };
+  }
+}
 return { type: "gmxIncrease", isLong: upTrend, collateral: "WETH", collateralAmount: collWei.toString(), sizeDeltaUsd: sizeUsd.toString(), maxPriorityFeePerGasWei: fee };
 `.trim();
 
@@ -368,12 +599,24 @@ const spacing = uni.pool.tickSpacing;
 const offset = Math.round(Math.log(fair / pool) / Math.log(1.0001));
 const center = Math.round((uni.pool.tick + offset) / spacing) * spacing;
 const w = Math.max(1, Math.floor(params.rangeSpacings)) * spacing;
+if (uni.pool.tick <= center - w || uni.pool.tick >= center + w) return { type: "noop", reason: "pool tick outside fair LP range" };
 const frac = BigInt(Math.max(0, Math.min(10000, Math.floor(params.depositFraction * 10000))));
 const wethWei = BigInt(obs.balances.wethWei); const usdcUnits = BigInt(obs.balances.usdcUnits);
 const maxW = BigInt(obs.limits.maxLpWethWei); const maxU = BigInt(obs.limits.maxLpUsdcUnits);
+const targetW = (maxW * frac) / 10000n;
+const targetU = (maxU * frac) / 10000n;
+if (wethWei < targetW && usdcUnits > 0n) {
+  const missing = targetW - wethWei;
+  const wantUsdc = BigInt(Math.ceil((Number(missing) / 1e18) * fair * 1.05 * 1e6));
+  const reserveUsdc = usdcUnits > targetU ? targetU : 0n;
+  const available = usdcUnits > reserveUsdc ? usdcUnits - reserveUsdc : usdcUnits / 2n;
+  const maxIn = BigInt(obs.limits.maxUsdcInUnits);
+  let amt = wantUsdc < available ? wantUsdc : available; if (amt > maxIn) amt = maxIn;
+  if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: Math.max(Number(params.slippageBps || 75), 300), maxPriorityFeePerGasWei: fee };
+}
 const wethDesired = ((wethWei < maxW ? wethWei : maxW) * frac) / 10000n;
 const usdcDesired = ((usdcUnits < maxU ? usdcUnits : maxU) * frac) / 10000n;
-if (wethDesired <= 0n && usdcDesired <= 0n) return { type: "noop", reason: "no inventory to LP" };
+if (wethDesired <= 0n || usdcDesired <= 0n) return { type: "noop", reason: "need both sides to LP" };
 helpers.log("fair-anchored mint center=" + center + " offset=" + offset);
 return { type: "mintLiquidity", tickLower: center - w, tickUpper: center + w, amountWethDesired: wethDesired.toString(), amountUsdcDesired: usdcDesired.toString(), maxPriorityFeePerGasWei: fee, slippageBps: params.slippageBps };
 `.trim();
@@ -401,9 +644,23 @@ const w = Math.max(1, Math.floor(params.rangeTicks)) * spacing;
 const frac = BigInt(Math.max(0, Math.min(10000, Math.floor(params.mintBudgetBps))));
 const wethWei = BigInt(obs.balances.wethWei); const usdcUnits = BigInt(obs.balances.usdcUnits);
 const maxW = BigInt(obs.limits.maxLpWethWei); const maxU = BigInt(obs.limits.maxLpUsdcUnits);
+const targetW = (maxW * frac) / 10000n;
+const targetU = (maxU * frac) / 10000n;
+if (wethWei < targetW && usdcUnits > 0n) {
+  const fair = obs.fairPriceUsdcPerWeth;
+  const missing = targetW - wethWei;
+  if (fair > 0 && missing > 0n) {
+    const wantUsdc = BigInt(Math.ceil((Number(missing) / 1e18) * fair * 1.05 * 1e6));
+    const reserveUsdc = usdcUnits > targetU ? targetU : 0n;
+    const available = usdcUnits > reserveUsdc ? usdcUnits - reserveUsdc : usdcUnits / 2n;
+    const maxIn = BigInt(obs.limits.maxUsdcInUnits);
+    let amt = wantUsdc < available ? wantUsdc : available; if (amt > maxIn) amt = maxIn;
+    if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: Math.max(Number(params.slippageBps || 75), 300), maxPriorityFeePerGasWei: fee };
+  }
+}
 const wethDesired = ((wethWei < maxW ? wethWei : maxW) * frac) / 10000n;
 const usdcDesired = ((usdcUnits < maxU ? usdcUnits : maxU) * frac) / 10000n;
-if (wethDesired <= 0n && usdcDesired <= 0n) return { type: "noop", reason: "no inventory to LP" };
+if (wethDesired <= 0n || usdcDesired <= 0n) return { type: "noop", reason: "need both sides to LP" };
 helpers.log("JIT mint vol=" + (vol * 10000).toFixed(1) + "bps");
 return { type: "mintLiquidity", tickLower: center - w, tickUpper: center + w, amountWethDesired: wethDesired.toString(), amountUsdcDesired: usdcDesired.toString(), maxPriorityFeePerGasWei: fee, slippageBps: params.slippageBps };
 `.trim();
@@ -430,9 +687,23 @@ const totalFrac = Math.max(0, Math.min(10000, Math.floor(params.mintBudgetBps)))
 const perStep = BigInt(Math.floor(totalFrac / steps));
 const wethWei = BigInt(obs.balances.wethWei); const usdcUnits = BigInt(obs.balances.usdcUnits);
 const maxW = BigInt(obs.limits.maxLpWethWei); const maxU = BigInt(obs.limits.maxLpUsdcUnits);
+const targetW = (maxW * perStep) / 10000n;
+const targetU = (maxU * perStep) / 10000n;
+if (wethWei < targetW && usdcUnits > 0n) {
+  const fair = obs.fairPriceUsdcPerWeth;
+  const missing = targetW - wethWei;
+  if (fair > 0 && missing > 0n) {
+    const wantUsdc = BigInt(Math.ceil((Number(missing) / 1e18) * fair * 1.05 * 1e6));
+    const reserveUsdc = usdcUnits > targetU ? targetU : 0n;
+    const available = usdcUnits > reserveUsdc ? usdcUnits - reserveUsdc : usdcUnits / 2n;
+    const maxIn = BigInt(obs.limits.maxUsdcInUnits);
+    let amt = wantUsdc < available ? wantUsdc : available; if (amt > maxIn) amt = maxIn;
+    if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: Math.max(Number(params.slippageBps || 75), 300), maxPriorityFeePerGasWei: fee };
+  }
+}
 const wethDesired = ((wethWei < maxW ? wethWei : maxW) * perStep) / 10000n;
 const usdcDesired = ((usdcUnits < maxU ? usdcUnits : maxU) * perStep) / 10000n;
-if (wethDesired <= 0n && usdcDesired <= 0n) return { type: "noop", reason: "no inventory to LP" };
+if (wethDesired <= 0n || usdcDesired <= 0n) return { type: "noop", reason: "need both sides to LP" };
 helpers.log("ladder step " + (step + 1) + "/" + steps + " center=" + segCenter);
 return { type: "mintLiquidity", tickLower: segCenter - halfWidth, tickUpper: segCenter + halfWidth, amountWethDesired: wethDesired.toString(), amountUsdcDesired: usdcDesired.toString(), maxPriorityFeePerGasWei: fee, slippageBps: params.slippageBps };
 `.trim();
@@ -451,6 +722,11 @@ const coll = Number(aave.totalCollateralBase) / 1e8;
 const debt = Number(aave.totalDebtBase) / 1e8;
 const avail = Number(aave.availableBorrowsBase) / 1e8;
 const underTarget = coll === 0 || debt / coll < params.targetLtv;
+// 0) USDC-only 配布対応: 未開始(担保ゼロ・手元 WETH ゼロ)なら USDC→WETH swap で carry の種を作る。
+if (coll === 0 && wethWei === 0n && usdcUnits > 1000000n) {
+  const amountIn = usdcUnits < maxIn ? usdcUnits : maxIn;
+  if (amountIn > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amountIn.toString(), slippageBps: Math.max(Number(params.slippageBps || 75), 300), maxPriorityFeePerGasWei: fee };
+}
 // 1) 手元 WETH を supply して担保を積む(初期 WETH + swap で得た WETH。carry の土台)
 if (wethWei > 0n && underTarget) {
   const maxSupply = BigInt(obs.limits.maxAaveSupplyWethWei);
@@ -473,7 +749,7 @@ if (underTarget && coll > 0) {
 //    集約残高(USDC.e/USDT 込み)で native 残高を超えて reject されるのを避ける。
 if (underTarget && coll > 0 && usdcUnits > 1000000n) {
   const amountIn = usdcUnits < maxIn ? usdcUnits : maxIn;
-  return { type: "swap", tokenIn: "USDC", amountIn: amountIn.toString(), slippageBps: params.slippageBps, maxPriorityFeePerGasWei: fee };
+  return { type: "swap", tokenIn: "USDC", amountIn: amountIn.toString(), slippageBps: Math.max(Number(params.slippageBps || 75), 300), maxPriorityFeePerGasWei: fee };
 }
 return { type: "noop", reason: "target leverage reached" };
 `.trim();
@@ -520,12 +796,25 @@ if (live === 0) {
   const offset = Math.round(Math.log(fair / pool) / Math.log(1.0001));
   const center = Math.round((uni.pool.tick + offset) / spacing) * spacing;
   const w = Math.max(1, Math.floor(params.rangeSpacings)) * spacing;
+  if (uni.pool.tick <= center - w || uni.pool.tick >= center + w) return { type: "noop", reason: "pool tick outside fair LP range" };
   const frac = BigInt(Math.max(0, Math.min(10000, Math.floor(params.depositFraction * 10000))));
   const wethWei = BigInt(obs.balances.wethWei); const usdcUnits = BigInt(obs.balances.usdcUnits);
   const maxW = BigInt(obs.limits.maxLpWethWei); const maxU = BigInt(obs.limits.maxLpUsdcUnits);
+  // USDC-only 配布対応: LP 用 WETH が無ければ先に USDC→WETH swap で調達する。
+  const targetW = (maxW * frac) / 10000n;
+  const targetU = (maxU * frac) / 10000n;
+  if (wethWei < targetW && usdcUnits > 0n) {
+    const missing = targetW - wethWei;
+    const wantUsdc = BigInt(Math.ceil((Number(missing) / 1e18) * fair * 1.05 * 1e6));
+    const reserveUsdc = usdcUnits > targetU ? targetU : 0n;
+    const available = usdcUnits > reserveUsdc ? usdcUnits - reserveUsdc : usdcUnits / 2n;
+    const maxInLp = BigInt(obs.limits.maxUsdcInUnits); let amt = wantUsdc < usdcUnits ? wantUsdc : usdcUnits; if (amt > maxInLp) amt = maxInLp;
+    if (amt > available) amt = available;
+    if (amt > 0n) return { type: "swap", tokenIn: "USDC", amountIn: amt.toString(), slippageBps: Math.max(Number(params.slippageBps || 75), 300), maxPriorityFeePerGasWei: fee };
+  }
   const wd = ((wethWei < maxW ? wethWei : maxW) * frac) / 10000n;
   const ud = ((usdcUnits < maxU ? usdcUnits : maxU) * frac) / 10000n;
-  if (wd > 0n || ud > 0n) return { type: "mintLiquidity", tickLower: center - w, tickUpper: center + w, amountWethDesired: wd.toString(), amountUsdcDesired: ud.toString(), maxPriorityFeePerGasWei: fee, slippageBps: params.slippageBps };
+  if (wd > 0n && ud > 0n) return { type: "mintLiquidity", tickLower: center - w, tickUpper: center + w, amountWethDesired: wd.toString(), amountUsdcDesired: ud.toString(), maxPriorityFeePerGasWei: fee, slippageBps: params.slippageBps };
 }
 // LP 配分後の遊休 USDC を Aave に park(余剰だけ)。1 回の supply は maxUsdcInUnits で上限を切り、
 // 集約残高(USDC.e/USDT 込み)で native USDC 残高を超えて reject されるのを避ける。
@@ -549,24 +838,105 @@ return { type: "noop", reason: "LP + idle parked" };
 // (examples/agents/flash-arb.ts + examples/lib/flash.ts の executor 移植。calldata を sandbox 内で構築)
 const FLASH_ARB_EXECUTOR = `
 const p = obs.protocols || {};
-const uni = (p.uniswap && p.uniswap.pool) ? p.uniswap.pool.priceUsdcPerWeth : 0;
+const uniPool = (p.uniswap && p.uniswap.pool) ? p.uniswap.pool : undefined;
+const uni = uniPool ? uniPool.priceUsdcPerWeth : 0;
 const bal = p.balancer ? p.balancer.priceUsdcPerWeth : 0;
-if (!(uni > 0) || !(bal > 0)) return { type: "noop", reason: "need uniswap+balancer prices" };
 const flashAddr = helpers.ADDRESSES.FLASH_ARB;
-if (!flashAddr) return { type: "noop", reason: "FlashArb not deployed (needs ERIS_FLASH_ARB=1)" };
-const spread = Math.abs(uni / bal - 1);
-if (spread < params.spreadThreshold) return { type: "noop", reason: "spread too small" };
-const flashUsdc = Math.max(0, Math.floor(params.flashUsdc));
-if (flashUsdc <= 0) return { type: "noop", reason: "flashUsdc zero" };
-const mode = uni < bal ? 0 : 1;
-const amount = BigInt(flashUsdc) * 1000000n;
-const paramsType = [{ type: "tuple", components: [ { name: "mode", type: "uint8" }, { name: "wethMinOut", type: "uint256" }, { name: "usdcMinOut", type: "uint256" }, { name: "profitTo", type: "address" } ] }];
-const encoded = helpers.encodeAbiParameters(paramsType, [{ mode: mode, wethMinOut: 0n, usdcMinOut: 0n, profitTo: obs.agentAddress }]);
-const flashAbi = [{ type: "function", name: "flashLoanSimple", stateMutability: "nonpayable", inputs: [ { name: "receiverAddress", type: "address" }, { name: "asset", type: "address" }, { name: "amount", type: "uint256" }, { name: "params", type: "bytes" }, { name: "referralCode", type: "uint16" } ], outputs: [] }];
-const data = helpers.encodeFunctionData({ abi: flashAbi, functionName: "flashLoanSimple", args: [flashAddr, helpers.ADDRESSES.USDC, amount, encoded, 0] });
 const fee = obs.limits.defaultPriorityFeePerGasWei;
-helpers.log("flash mode=" + mode + " spread=" + (spread * 10000).toFixed(1) + "bps usdc=" + flashUsdc);
-return { type: "rawTx", tx: { to: helpers.ADDRESSES.AAVE_POOL, data: data }, maxPriorityFeePerGasWei: fee };
+const flashNotes = [];
+if (flashAddr && uni > 0 && bal > 0) {
+  const spread = Math.abs(uni / bal - 1);
+  if (spread >= params.spreadThreshold) {
+    const requestedFlashUsdc = Math.max(0, Math.floor(params.flashUsdc));
+    const maxFlashUsdcParam = Number(params.maxFlashUsdc ?? requestedFlashUsdc);
+    const maxFlashUsdc = Number.isFinite(maxFlashUsdcParam) ? Math.max(0, Math.floor(maxFlashUsdcParam)) : requestedFlashUsdc;
+    let flashUsdc = Math.min(requestedFlashUsdc, maxFlashUsdc);
+    const poolUsdcRaw = p.aave && p.aave.poolLiquidity ? p.aave.poolLiquidity.USDC : undefined;
+    if (typeof poolUsdcRaw === "string" && /^[0-9]+$/.test(poolUsdcRaw)) {
+      const poolUsdcUnits = BigInt(poolUsdcRaw);
+      const reserveBpsRaw = Number(params.poolLiquidityReserveBps ?? 1000);
+      const reserveBps = Math.max(0, Math.min(10000, Math.floor(Number.isFinite(reserveBpsRaw) ? reserveBpsRaw : 1000)));
+      const usableUnits = (poolUsdcUnits * BigInt(10000 - reserveBps)) / 10000n;
+      const minFlashLiquidityUsdcRaw = Number(params.minFlashLiquidityUsdc ?? 1000);
+      const minFlashLiquidityUsdc = Math.max(0, Math.floor(Number.isFinite(minFlashLiquidityUsdcRaw) ? minFlashLiquidityUsdcRaw : 1000));
+      const minUsableUnits = BigInt(minFlashLiquidityUsdc) * 1000000n;
+      if (usableUnits < minUsableUnits) return { type: "noop", reason: "flash liquidity too low: " + (Number(poolUsdcUnits) / 1e6).toFixed(2) + " USDC" };
+      const requestedUnits = BigInt(flashUsdc) * 1000000n;
+      const cappedUnits = usableUnits < requestedUnits ? usableUnits : requestedUnits;
+      flashUsdc = Number(cappedUnits / 1000000n);
+    }
+    if (flashUsdc > 0) {
+      const mode = uni < bal ? 0 : 1;
+      const uniFeeBps = Number(params.uniFeeBps ?? 30);
+      const balancerFeeBps = Number(params.balancerFeeBps ?? 30);
+      const flashPremiumBps = Number(params.flashPremiumBps ?? 5);
+      const priceImpactBps = Number(params.priceImpactBps ?? 500);
+      const minProfitUsdc = Number(params.minProfitUsdc ?? 5);
+      const venueRatio = mode === 0 ? bal / uni : uni / bal;
+      const feeHaircut = (1 - uniFeeBps / 10000) * (1 - balancerFeeBps / 10000) * (1 - priceImpactBps / 10000);
+      const expectedOut = flashUsdc * venueRatio * feeHaircut;
+      const owed = flashUsdc * (1 + flashPremiumBps / 10000);
+      const expectedProfit = expectedOut - owed;
+      if (expectedProfit >= minProfitUsdc) {
+        const amount = BigInt(flashUsdc) * 1000000n;
+        const paramsType = [{ type: "tuple", components: [ { name: "mode", type: "uint8" }, { name: "wethMinOut", type: "uint256" }, { name: "usdcMinOut", type: "uint256" }, { name: "profitTo", type: "address" } ] }];
+        const encoded = helpers.encodeAbiParameters(paramsType, [{ mode: mode, wethMinOut: 0n, usdcMinOut: 0n, profitTo: obs.agentAddress }]);
+        const flashAbi = [{ type: "function", name: "flashLoanSimple", stateMutability: "nonpayable", inputs: [ { name: "receiverAddress", type: "address" }, { name: "asset", type: "address" }, { name: "amount", type: "uint256" }, { name: "params", type: "bytes" }, { name: "referralCode", type: "uint16" } ], outputs: [] }];
+        const data = helpers.encodeFunctionData({ abi: flashAbi, functionName: "flashLoanSimple", args: [flashAddr, helpers.ADDRESSES.USDC, amount, encoded, 0] });
+        helpers.log("flash mode=" + mode + " spread=" + (spread * 10000).toFixed(1) + "bps usdc=" + flashUsdc);
+        return { type: "rawTx", tx: { to: helpers.ADDRESSES.AAVE_POOL, data: data }, maxPriorityFeePerGasWei: fee };
+      }
+      flashNotes.push("flash edge below costs");
+    } else {
+      flashNotes.push("flashUsdc zero");
+    }
+  } else {
+    flashNotes.push("spread too small");
+  }
+} else {
+  flashNotes.push(flashAddr ? "need uniswap+balancer prices" : "FlashArb not deployed");
+}
+if (uniPool && uni > 0 && obs.fairPriceUsdcPerWeth > 0) {
+  const fair = obs.fairPriceUsdcPerWeth;
+  const gap = fair / uni - 1;
+  const absGapBps = Math.abs(gap) * 10000;
+  const thresholdBps = Number(params.fairGapThresholdBps ?? Infinity);
+  if (absGapBps >= thresholdBps) {
+    const tokenIn = gap > 0 ? "USDC" : "WETH";
+    const balance = BigInt(tokenIn === "WETH" ? obs.balances.wethWei : obs.balances.usdcUnits);
+    const limit = BigInt(tokenIn === "WETH" ? obs.limits.maxWethInWei : obs.limits.maxUsdcInUnits);
+    const cap = balance < limit ? balance : limit;
+    if (cap > 0n) {
+      const rawSizeBps = Math.floor(absGapBps * Number(params.fairArbSizeGain ?? 0) / 10000);
+      const sizeBps = Math.max(1, Math.min(Number(params.fairArbMaxSizeBps ?? 1), rawSizeBps));
+      const amountIn = (cap * BigInt(sizeBps)) / 10000n;
+      const notionalUsdc = tokenIn === "USDC" ? Number(amountIn) / 1e6 : Number(amountIn) / 1e18 * uni;
+      const minTrade = Number(params.fairArbMinTradeUsdc ?? 0);
+      if (amountIn > 0n && notionalUsdc >= minTrade) {
+        helpers.log("fairArb tokenIn=" + tokenIn + " gapBps=" + absGapBps.toFixed(1) + " sizeBps=" + sizeBps);
+        return { type: "swap", tokenIn: tokenIn, amountIn: amountIn.toString(), maxPriorityFeePerGasWei: fee, slippageBps: Math.floor(Number(params.fairArbSlippageBps ?? params.slippageBps ?? 75)) };
+      }
+    }
+  }
+  if (params.enableInventorySeed && BigInt(obs.balances.wethWei || "0") <= 0n && BigInt(obs.balances.usdcUnits || "0") > 0n) {
+    const usdcBal = BigInt(obs.balances.usdcUnits);
+    const maxUsdc = BigInt(obs.limits.maxUsdcInUnits);
+    const maxPremium = Number(params.maxSeedPremiumBps ?? 0) / 10000;
+    if (uni <= fair * (1 + maxPremium)) {
+      const totalUsd = obs.inventory && obs.inventory.valueUsdc > 0 ? obs.inventory.valueUsdc : Number(usdcBal) / 1e6;
+      const targetUnits = BigInt(Math.floor(totalUsd * Number(params.targetWethInventoryBps ?? 0) / 10000 * 1e6));
+      const cap = usdcBal < maxUsdc ? usdcBal : maxUsdc;
+      const byBps = (cap * BigInt(Math.max(0, Math.floor(Number(params.seedUsdcBps ?? 0))))) / 10000n;
+      const minSeed = BigInt(Math.floor(Number(params.minSeedUsd ?? 0) * 1e6));
+      const amount = byBps < targetUnits ? byBps : targetUnits;
+      if (amount >= minSeed && amount > 0n) {
+        helpers.log("seed flash fallback usdc=" + (Number(amount) / 1e6).toFixed(2));
+        return { type: "swap", tokenIn: "USDC", amountIn: amount.toString(), maxPriorityFeePerGasWei: fee, slippageBps: Math.floor(Number(params.seedSlippageBps ?? params.slippageBps ?? 75)) };
+      }
+    }
+  }
+}
+return { type: "noop", reason: flashNotes.join("; ") + "; no fair fallback" };
 `.trim();
 
 // id → ベース戦略(version を除いた雛形)。
@@ -581,6 +951,12 @@ const BASE_STRATEGIES: Record<string, Omit<Strategy, "version">> = {
       sizeGain: 200000,
       bidProfitFraction: 0.3,
       slippageBps: 75,
+      enableInventorySeed: true,
+      targetWethInventoryBps: 500,
+      seedUsdcBps: 500,
+      seedSlippageBps: 300,
+      maxSeedPremiumBps: 750,
+      minSeedUsd: 50,
     },
     executorTs: ARB_EXECUTOR,
   },
@@ -598,6 +974,12 @@ const BASE_STRATEGIES: Record<string, Omit<Strategy, "version">> = {
       marginPctFrontrun: 60,
       frontrunRevertThreshold: 0.4,
       slippageBps: 75,
+      enableInventorySeed: true,
+      targetWethInventoryBps: 500,
+      seedUsdcBps: 500,
+      seedSlippageBps: 300,
+      maxSeedPremiumBps: 750,
+      minSeedUsd: 50,
     },
     executorTs: ADAPTIVE_ARB_EXECUTOR,
   },
@@ -641,7 +1023,15 @@ const BASE_STRATEGIES: Record<string, Omit<Strategy, "version">> = {
       zAggressive: 2.5,
       minSizeBps: 500,
       maxSizeBps: 5000,
+      fallbackGapThreshold: 0.001,
+      fallbackSizeBps: 250,
       slippageBps: 75,
+      enableInventorySeed: true,
+      targetWethInventoryBps: 500,
+      seedUsdcBps: 500,
+      seedSlippageBps: 300,
+      maxSeedPremiumBps: 750,
+      minSeedUsd: 50,
     },
     executorTs: STATARB_EXECUTOR,
   },
@@ -715,7 +1105,7 @@ const BASE_STRATEGIES: Record<string, Omit<Strategy, "version">> = {
       "Base strategy **jitlp**: history 窓の実現ボラが閾値超のときだけ集中レンジを mint する JIT LP。revise で volThreshold / レンジ幅 / 予算を磨く。",
     params: {
       minHistory: 12,
-      volThreshold: 0.003,
+      volThreshold: 0.0025,
       rangeTicks: 4,
       mintBudgetBps: 4500,
       slippageBps: 75,
@@ -769,10 +1159,29 @@ const BASE_STRATEGIES: Record<string, Omit<Strategy, "version">> = {
   },
   flasharb: {
     notes:
-      "Base strategy **flasharb** (GitHub #3): Aave flashLoanSimple で自己資金上限を超えるサイズの uniswap↔balancer cross-venue 裁定を 1 tx で実行(資本制約を外すレバレッジ裁定)。割安 venue で買い割高で売り、返済段で利益不足なら atomic revert(gas のみ損)。revise で spreadThreshold / flashUsdc を磨く。**要 ERIS_FLASH_ARB=1**(未設定なら self-guard で noop)。uniswap+balancer 有効時のみ。",
+      "Base strategy **flasharb** (GitHub #3): Aave flashLoanSimple で自己資金上限を超えるサイズの uniswap↔balancer cross-venue 裁定を 1 tx で実行(資本制約を外すレバレッジ裁定)。割安 venue で買い割高で売り、返済段で利益不足なら atomic revert(gas のみ損)。Pool liquidity が薄い時は skip し、flashUsdc は maxFlashUsdc と観測 liquidity で cap する。revise で spreadThreshold / flashUsdc / maxFlashUsdc を磨く。**要 ERIS_FLASH_ARB=1**(未設定なら self-guard で noop)。uniswap+balancer 有効時のみ。",
     params: {
       spreadThreshold: 0.003,
       flashUsdc: 15000,
+      maxFlashUsdc: 15000,
+      minFlashLiquidityUsdc: 1000,
+      poolLiquidityReserveBps: 1000,
+      uniFeeBps: 30,
+      balancerFeeBps: 30,
+      flashPremiumBps: 5,
+      priceImpactBps: 500,
+      minProfitUsdc: 5,
+      fairGapThresholdBps: 80,
+      fairArbMaxSizeBps: 1800,
+      fairArbSizeGain: 30000,
+      fairArbMinTradeUsdc: 75,
+      fairArbSlippageBps: 35,
+      enableInventorySeed: true,
+      targetWethInventoryBps: 500,
+      seedUsdcBps: 500,
+      seedSlippageBps: 300,
+      maxSeedPremiumBps: 750,
+      minSeedUsd: 50,
     },
     executorTs: FLASH_ARB_EXECUTOR,
   },

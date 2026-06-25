@@ -8,6 +8,7 @@ import { safeStringify } from "./logger.js";
 // bot から返る 1 注文の wire 形（JSON 経由なので priorityFeeWei は文字列）。
 export type FlowOrderWire = {
   protocol: ProtocolId;
+  walletProtocol?: ProtocolId;
   kind: FlowKind;
   action: LeafAction;
   priorityFeeWei: string;

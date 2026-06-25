@@ -13,7 +13,7 @@
 //   - 同一 anvil への並行 sim は resetFork が干渉して壊れるため、必ず直列実行する。
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig } from "./config.js";
+import { resolveRunInputs } from "./runConfig.js";
 import type { AgentAcc } from "./discrimination.js";
 import { informationRatio } from "./discrimination.js";
 import {
@@ -157,7 +157,7 @@ export async function collectReplicationStats(
   if (!Number.isInteger(replications) || replications < 1) {
     throw new Error(`invalid replications: ${replications}`);
   }
-  const config = loadConfig();
+  const { config } = resolveRunInputs();
   if (config.runBlocks <= 0) {
     throw new Error(
       "ERIS_RUN_BLOCKS must be > 0: 実時間 run は runBlocks 固定で長さを揃える(ADR 0005 §1)。ERIS_RUN_SECONDS だけでは run 長が wall-clock 依存でぶれる。",
@@ -172,13 +172,13 @@ export async function collectReplicationStats(
 
   for (const regime of regimes) {
     for (let rep = 1; rep <= replications; rep++) {
-      process.env.SEED = String(regime);
       let retries = 0;
       for (;;) {
         console.error(
           `[replication] regime=${regime} rep=${rep}/${replications} running realtime simulation (${config.runBlocks} blocks)...`,
         );
-        await runRealtimeSimulation();
+        // per-regime SEED は env を mutate せず override で渡す（YAML 駆動でも regime が効く）。
+        await runRealtimeSimulation({ SEED: regime });
         const runDir = latestRunDir(config.runDirRoot, true);
         const violations = runViolations(runDir);
         if (violations.length > 0) {
