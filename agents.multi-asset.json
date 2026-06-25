@@ -1,0 +1,27 @@
+{
+  "_comment": "マルチアセット(WETH+WBTC)対応ロスター(ADR 0013)。multi-arb は base 非依存で全 active base を横断裁定する。WBTC を実際に取引させるには deployer 側で WBTC market を deploy 済みにした上で、INITIAL_WBTC_SATS(任意。USDC-only なら 0 のまま) と FLOW_MAX_WBTC_SATS(>0 で WBTC flow を有効化) を env 指定して run する。AGENT1 以降(account1+)を使う(account0=deployer と重なり残高汚染するため。agents.local と同方針)。",
+  "agents": [
+    {
+      "id": "noop",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/noop.ts"],
+      "wallet": "AGENT1_PRIVATE_KEY",
+      "baseline": true,
+      "description": "何もしない (基準ライン)"
+    },
+    {
+      "id": "venue-arb",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/venue-arb.ts"],
+      "wallet": "AGENT2_PRIVATE_KEY",
+      "description": "WETH 専用 cross-venue 裁定 (マルチアセット非対応の比較対象)"
+    },
+    {
+      "id": "multi-arb",
+      "command": "node",
+      "args": ["--import", "tsx", "examples/agents/multi-arb.ts"],
+      "wallet": "AGENT3_PRIVATE_KEY",
+      "description": "base 非依存 cross-venue 裁定 (全 active base × 全 venue を横断。WBTC 等に自動対応)"
+    }
+  ]
+}

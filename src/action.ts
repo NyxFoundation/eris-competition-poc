@@ -13,6 +13,7 @@ import {
   enabledAdapters,
   getAdapter,
 } from "./protocols/registry.js";
+import { kindOf, tokenInfo } from "./markets.js";
 
 export type ValidatedIntent = {
   action: LeafAction;
@@ -210,6 +211,10 @@ function validateLeafItems(
     wethWei: balances.wethWei,
     usdcUnits: balances.usdcUnits,
     stables: { ...(balances.stables ?? {}) },
+    // ADR 0013: base 残高（WETH/WBTC…）も bundle 横断で累積する。これが無いと adapter.validate の
+    // base 残高チェックが work.wethWei にフォールバックし、WBTC swap を WETH 残高で誤判定する。
+    // WETH-only run でも bases={WETH:wethWei} なので spendBase 経由で wethWei と同期し byte 互換。
+    ...(balances.bases ? { bases: { ...balances.bases } } : {}),
   };
   const baseLpPositions = observation.protocols.uniswap?.positions.length ?? 0;
   let newLpPositions = 0;
@@ -256,17 +261,34 @@ function validateLeafItems(
   return { ok: true, action: original, intents, rawIntents: [] };
 }
 
-// swap leg が執行される venue の価格（USDC per WETH）。bundle 内のスワップ出力見積りに使う。
+// swap leg が執行される venue の価格（USDC per base）。bundle 内のスワップ出力見積りに使う。
+// ADR 0013: base!=="WETH" のとき WETH pool 価格でなく当該 base/USDC market 価格を引く
+// （WETH 経路は従来どおり pool 価格 → byte 互換）。market 未収録なら fairPricesUsd → fair に縮退。
 function swapVenuePrice(obs: AgentObservation, item: LeafAction): number {
+  const base = (item as { base?: string }).base ?? "WETH";
+  const fallback = obs.fairPricesUsd?.[base] ?? obs.fairPriceUsdcPerWeth;
+  const pick = (
+    top: number | undefined,
+    markets: Record<string, { priceUsdcPerWeth: number }> | undefined,
+  ): number =>
+    (base === "WETH" ? top : markets?.[`${base}/USDC`]?.priceUsdcPerWeth) ??
+    fallback;
   if (item.type === "swap")
-    return (
-      obs.protocols.uniswap?.pool.priceUsdcPerWeth ?? obs.fairPriceUsdcPerWeth
+    return pick(
+      obs.protocols.uniswap?.pool.priceUsdcPerWeth,
+      obs.protocols.uniswap?.markets,
     );
   if (item.type === "balancerSwap")
-    return obs.protocols.balancer?.priceUsdcPerWeth ?? obs.fairPriceUsdcPerWeth;
+    return pick(
+      obs.protocols.balancer?.priceUsdcPerWeth,
+      obs.protocols.balancer?.markets,
+    );
   if (item.type === "curveSwap")
-    return obs.protocols.curve?.priceUsdcPerWeth ?? obs.fairPriceUsdcPerWeth;
-  return obs.fairPriceUsdcPerWeth;
+    return pick(
+      obs.protocols.curve?.priceUsdcPerWeth,
+      obs.protocols.curve?.markets,
+    );
+  return fallback;
 }
 
 // leaf が消費する WETH / stable を working 残高から差し引き、スワップは出力トークンを見積って戻す
@@ -280,8 +302,19 @@ function applyLeafSpend(
   stableToken?: Address,
 ): void {
   const stableKey = (stableToken ?? "").toLowerCase();
-  const spendWeth = (amount: bigint) => {
-    work.wethWei = work.wethWei > amount ? work.wethWei - amount : 0n;
+  // ADR 0013: base 残高を base シンボル単位で増減する。WETH は wethWei と bases["WETH"] を同時に
+  // 動かして同期を保つ（adapter.validate が bases["WETH"] を、旧経路が wethWei を見るため）。
+  const spendBase = (base: string, amount: bigint) => {
+    if (base === "WETH")
+      work.wethWei = work.wethWei > amount ? work.wethWei - amount : 0n;
+    if (work.bases && base in work.bases) {
+      const cur = work.bases[base];
+      work.bases[base] = cur > amount ? cur - amount : 0n;
+    }
+  };
+  const creditBase = (base: string, amount: bigint) => {
+    if (base === "WETH") work.wethWei += amount;
+    if (work.bases) work.bases[base] = (work.bases[base] ?? 0n) + amount;
   };
   const spendStable = (amount: bigint) => {
     work.usdcUnits = work.usdcUnits > amount ? work.usdcUnits - amount : 0n;
@@ -289,9 +322,6 @@ function applyLeafSpend(
       const cur = work.stables[stableKey];
       work.stables[stableKey] = cur > amount ? cur - amount : 0n;
     }
-  };
-  const creditWeth = (amount: bigint) => {
-    work.wethWei += amount;
   };
   const creditStable = (amount: bigint) => {
     work.usdcUnits += amount;
@@ -306,36 +336,48 @@ function applyLeafSpend(
     case "balancerSwap":
     case "curveSwap": {
       const amt = BigInt(item.amountIn);
-      const price = swapVenuePrice(observation, item);
-      if (item.tokenIn === "WETH") {
-        spendWeth(amt);
-        // WETH→stable: 出力 stable ≈ amountWeth × price
+      const base = item.base ?? "WETH";
+      const baseScale = 10 ** tokenInfo(base).decimals; // WETH=1e18 / WBTC=1e8
+      const price = swapVenuePrice(observation, item); // quote(USDC) per base
+      if (item.tokenIn === base) {
+        spendBase(base, amt);
+        // base→stable: 出力 stable ≈ amountBase × price
         if (price > 0)
-          creditStable(BigInt(Math.floor((Number(amt) / 1e18) * price * 1e6)));
+          creditStable(
+            BigInt(Math.floor((Number(amt) / baseScale) * price * 1e6)),
+          );
       } else {
         spendStable(amt);
-        // stable→WETH: 出力 WETH ≈ amountStable / price
+        // stable→base: 出力 base ≈ amountStable / price
         if (price > 0)
-          creditWeth(BigInt(Math.floor((Number(amt) / 1e6 / price) * 1e18)));
+          creditBase(
+            base,
+            BigInt(Math.floor((Number(amt) / 1e6 / price) * baseScale)),
+          );
       }
       break;
     }
     case "mintLiquidity":
-      spendWeth(BigInt(item.amountWethDesired));
-      spendStable(BigInt(item.amountUsdcDesired));
+      spendBase(
+        item.base ?? "WETH",
+        BigInt(item.amountBaseDesired ?? item.amountWethDesired),
+      );
+      spendStable(BigInt(item.amountQuoteDesired ?? item.amountUsdcDesired));
       break;
     case "aaveSupply":
-      if (item.asset === "WETH") spendWeth(BigInt(item.amount));
+      if (kindOf(item.asset) === "base")
+        spendBase(item.asset, BigInt(item.amount));
       else spendStable(BigInt(item.amount));
       break;
     case "aaveRepay": {
+      const isBase = kindOf(item.asset) === "base";
       const amt =
         item.amount === "max"
-          ? item.asset === "WETH"
-            ? work.wethWei
+          ? isBase
+            ? (work.bases?.[item.asset] ?? work.wethWei)
             : currentStable()
           : BigInt(item.amount);
-      if (item.asset === "WETH") spendWeth(amt);
+      if (isBase) spendBase(item.asset, amt);
       else spendStable(amt);
       break;
     }

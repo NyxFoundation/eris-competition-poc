@@ -40,6 +40,7 @@ import type {
   TxIntent,
   WalletRole,
 } from "./types.js";
+import { baseTokens } from "./markets.js";
 import { enabledAdapters, initProtocols } from "./protocols/registry.js";
 import type { FlowKind, FlowWallet, SimContext } from "./protocols/types.js";
 import { updateOracles } from "./protocols/oracles.js";
@@ -698,6 +699,48 @@ export async function buildFlowContext(
     }
   }
 
+  // ADR 0013 Phase 8: WETH 以外の base の AMM flow context。flow max>0 かつ価格が揃う base のみ
+  // 載せる（max=0/未設定なら省略 → buildFlowOrders が当該 base を反復せず RNG 非消費 = byte 互換）。
+  const extraBases: NonNullable<FlowContextWire["extraBases"]> = [];
+  for (const t of baseTokens()) {
+    if (t.symbol === "WETH") continue;
+    const max = ctx.config.baseFlowMax?.[t.symbol] ?? 0n;
+    if (max <= 0n) continue;
+    const basePoolPrices: NonNullable<
+      FlowContextWire["extraBases"]
+    >[number]["poolPrices"] = {};
+    for (const id of ["uniswap", "balancer", "curve"] as const) {
+      if (!enabledIds.includes(id)) continue;
+      const s = stateById.get(id) as
+        | {
+            markets?: Array<{
+              market: { base: string };
+              priceUsdcPerWeth: number;
+            }>;
+          }
+        | undefined;
+      const ms = s?.markets?.find((m) => m.market.base === t.symbol);
+      if (
+        ms &&
+        typeof ms.priceUsdcPerWeth === "number" &&
+        ms.priceUsdcPerWeth > 0
+      )
+        basePoolPrices[id] = ms.priceUsdcPerWeth;
+    }
+    const fairPriceUsd = ctx.fairPrices?.[t.symbol] ?? 0;
+    if (fairPriceUsd <= 0 || Object.keys(basePoolPrices).length === 0) continue;
+    const maxStr = max.toString();
+    extraBases.push({
+      base: t.symbol,
+      poolPrices: basePoolPrices,
+      fairPriceUsd,
+      uninformedFlowMaxBaseWei: maxStr,
+      informedFlowMaxBaseWei: maxStr,
+      balancerFlowMaxBaseWei: maxStr,
+      curveFlowMaxBaseWei: maxStr,
+    });
+  }
+
   return {
     round,
     fairPriceUsdcPerWeth: fairPrice,
@@ -706,6 +749,7 @@ export async function buildFlowContext(
     aaveReserves,
     flowBalances,
     usdcOnlyFlow: ctx.config.initialWethWei === 0n,
+    ...(extraBases.length > 0 ? { extraBases } : {}),
     limits: {
       uninformedFlowMaxWethWei: ctx.config.uninformedFlowMaxWethWei.toString(),
       informedFlowMaxWethWei: ctx.config.informedFlowMaxWethWei.toString(),

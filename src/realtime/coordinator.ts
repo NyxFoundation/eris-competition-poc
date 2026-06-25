@@ -379,6 +379,9 @@ export async function runRealtimeSimulation(): Promise<void> {
           ? config.initialWethWei + config.crossVenueSpreadFlowMaxWethWei * 500n
           : config.initialWethWei,
         isSpread ? config.initialUsdcUnits * 200n : config.initialUsdcUnits,
+        // ADR 0013: WETH 以外の base の初期在庫（INITIAL_<SYM>_<UNIT>。既定 0 = 配らない＝byte 互換）。
+        // USDC-only 評価方針では 0 のままで、agent/flow は USDC から base を買って建てる。
+        config.initialBaseAmounts,
       );
       for (const adapter of adapters) {
         if (!adapter.setupWallet) continue;

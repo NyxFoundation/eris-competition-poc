@@ -31,9 +31,13 @@ import { loadConfig } from "../../../src/config.js";
 import { GMX_MARKETS, TOKENS } from "../../../src/constants.js";
 import { observationFor } from "../../../src/coordinator.js";
 import { safeStringify } from "../../../src/logger.js";
+import { baseTokens, tokenInfo } from "../../../src/markets.js";
 import { initProtocols } from "../../../src/protocols/registry.js";
 import type { FlowWallet, SimContext } from "../../../src/protocols/types.js";
-import { readFairPrice } from "../../../src/realtime/priceFeed.js";
+import {
+  readFairPrice,
+  readFairPriceFor,
+} from "../../../src/realtime/priceFeed.js";
 import { Rng } from "../../../src/rng.js";
 import type {
   AgentObservation,
@@ -108,6 +112,11 @@ function startDirectShim(): void {
   const config = loadConfig();
   const adapters = initProtocols(config.enabledProtocols);
   const enabledIds = adapters.map((a) => a.id);
+  // ADR 0013: WETH 以外の base（WBTC 等）。fork 既定では空 = 完全に従来挙動。
+  // coordinator の extraBaseSymbols と同じ導出（registry の base から WETH を除く）。
+  const extraBaseSymbols = baseTokens()
+    .map((t) => t.symbol)
+    .filter((s) => s !== "WETH");
   // batch=true: 毎ブロック十数本の観測読取を Multicall3 / JSON-RPC batch に自動集約し、
   // anvil への往復を ~20 本 → 数本に抑える（44 体同時の読みストームで律速になるため）。
   const { chain, publicClient, walletClient } = makeClients(
@@ -461,6 +470,22 @@ function startDirectShim(): void {
         readFairPrice(publicClient, priceFeed),
         getBalances(publicClient, address),
       ]);
+      // ADR 0013: 追加 base の fair price を PriceFeed から読み ctx.fairPrices へ。これで
+      // observationFor が observation.fairPricesUsd を全 base 分埋める（agent が WBTC を観測できる）。
+      // adapter.observe は ctx.fairPrices?.[base] を見るため observationFor 前に必ず設定する。
+      // extraBaseSymbols=[]（fork 既定）なら fairPrices={WETH} で従来と byte 一致。
+      const fairPrices: Record<string, number> = { WETH: fairPrice };
+      if (extraBaseSymbols.length > 0) {
+        const extra = await Promise.all(
+          extraBaseSymbols.map((b) =>
+            readFairPriceFor(publicClient, priceFeed, tokenInfo(b).address),
+          ),
+        );
+        extraBaseSymbols.forEach((b, i) => {
+          fairPrices[b] = extra[i];
+        });
+      }
+      ctx.fairPrices = fairPrices;
       const states = await Promise.all(
         adapters.map((adapter) => adapter.readState(ctx, fairPrice)),
       );

@@ -136,6 +136,8 @@ export type SimConfig = {
   // 毎ブロック 2 venue を対称に押し開いて「2-leg 裁定(α)だけが取れる」機会を構造的に作る。
   // 方向 β を注入せず α を増やすレバー（env を α 支配へ寄せる。discrimination-needs-delta-neutral）。
   crossVenueSpreadFlowMaxWethWei: bigint;
+  // ADR 0013: WETH 以外の base の AMM flow 1 leg 上限（base units）。既定空/0 = WBTC flow off。
+  baseFlowMax: Record<string, bigint>;
   // orderflow bot（独立プロセス）の起動コマンドと決定論シード。
   flowBotCommand: string;
   flowBotArgs: string[];
@@ -297,6 +299,10 @@ export function loadConfig(env = process.env): SimConfig {
       env.CROSS_VENUE_SPREAD_FLOW_MAX_WETH_WEI,
       0n,
     ),
+    // ADR 0013: WETH 以外の base の AMM flow 1 leg 上限（base units）。env FLOW_MAX_<SYM>_<UNIT>
+    // （例 FLOW_MAX_WBTC_SATS）。既定 0 = WBTC 等の flow off → extraBases が RNG 非消費 = byte 互換。
+    // WETH flow は uninformed/balancer/curve FlowMaxWethWei を使い続ける（ここには載せない）。
+    baseFlowMax: readBaseAmounts(env, "FLOW_MAX", { WETH: 0n }),
     flowBotCommand: env.FLOW_BOT_COMMAND ?? "node",
     flowBotArgs:
       env.FLOW_BOT_ARGS && env.FLOW_BOT_ARGS.trim() !== ""
