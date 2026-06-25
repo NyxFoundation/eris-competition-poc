@@ -18,6 +18,9 @@ export type AgentVenue = {
   protocol: AgentProtocol;
   swapType: "swap" | "balancerSwap" | "curveSwap";
   price: number; // quote(USDC) per base
+  // 取引手数料（bps）。cross-venue 裁定のラウンドトリップ採算判定に使う。uniswap は pool fee
+  // （3000 pips = 30bps）を読む。balancer/curve は observation に fee が無いため既定 30bps。
+  feeBps: number;
 };
 
 export type MarketView = {
@@ -55,6 +58,22 @@ function venuePrice(
   return amm?.markets?.[`${base}/${QUOTE}`]?.priceUsdcPerWeth;
 }
 
+// venue の取引手数料（bps）。uniswap は pool fee（pips, 3000=0.3%）→ /100 で bps。
+// balancer/curve は observation に fee が無いため既定 30bps（保守的）。
+function venueFeeBps(
+  obs: AgentObservation,
+  base: string,
+  protocol: AgentProtocol,
+): number {
+  if (protocol !== "uniswap") return 30;
+  const pool =
+    base === "WETH"
+      ? obs.protocols?.uniswap?.pool
+      : obs.protocols?.uniswap?.markets?.[`${base}/${QUOTE}`];
+  const fee = pool?.fee;
+  return typeof fee === "number" && fee > 0 ? fee / 100 : 30;
+}
+
 // observation を base 非依存の market view 配列に正規化する。WETH を先頭に固定（決定論順序）。
 export function marketViews(obs: AgentObservation): MarketView[] {
   const fairByBase = obs.fairPricesUsd ?? { WETH: obs.fairPriceUsdcPerWeth };
@@ -69,7 +88,12 @@ export function marketViews(obs: AgentObservation): MarketView[] {
     for (const protocol of ["uniswap", "balancer", "curve"] as const) {
       const price = venuePrice(obs, base, protocol);
       if (typeof price === "number" && price > 0)
-        venues.push({ protocol, swapType: SWAP_TYPE[protocol], price });
+        venues.push({
+          protocol,
+          swapType: SWAP_TYPE[protocol],
+          price,
+          feeBps: venueFeeBps(obs, base, protocol),
+        });
     }
     if (venues.length === 0) continue;
     const baseBalanceWei =
