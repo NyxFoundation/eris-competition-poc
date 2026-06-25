@@ -163,9 +163,56 @@ export function parseCliFlags(
   return out;
 }
 
+// 退役した代表的な「設定 env」が残っていたら警告する（silent に既定動作へ落ちる事故を防ぐ）。
+// これらはもう読まれない。設定は YAML（eris.config.yaml / --config）へ、ツール params は CLI フラグへ。
+const RETIRED_CONFIG_ENV = [
+  "ENABLED_PROTOCOLS",
+  "AGENTS_CONFIG",
+  "SEED",
+  "ERIS_RUN_BLOCKS",
+  "ERIS_RUN_SECONDS",
+  "ERIS_ECONOMIC_GAS",
+  "REGIMES",
+  "REPLICATIONS",
+  "ROUNDS",
+  "GATE_MODE",
+  "INITIAL_WETH_WEI",
+] as const;
+let warnedRetired = false;
+function warnRetiredConfigEnv(): void {
+  if (warnedRetired) return;
+  const found = RETIRED_CONFIG_ENV.filter((k) => process.env[k] !== undefined);
+  if (found.length === 0) return;
+  warnedRetired = true;
+  process.stderr.write(
+    `[config] 警告: 設定 env は退役しました（無視されます）: ${found.join(", ")}。` +
+      ` 設定は eris.config.yaml / --config、ツール params は CLI フラグ（--regimes 等）で指定してください。\n`,
+  );
+}
+
+// 一回限りの上書き用 CLI エイリアス（env の代替）。`--seed 1 --protocols uniswap,balancer` のように使う。
+// 値は YAML と同じ設定キーへマップして overrides に積む（YAML を編集せず run ごとに変えられる）。
+const CLI_ALIAS: Record<string, string> = {
+  seed: "SEED",
+  blocks: "ERIS_RUN_BLOCKS",
+  seconds: "ERIS_RUN_SECONDS",
+  protocols: "ENABLED_PROTOCOLS",
+  agents: "AGENTS_CONFIG",
+  "economic-gas": "ERIS_ECONOMIC_GAS",
+  "local-deploy": "ERIS_LOCAL_DEPLOY",
+};
+function cliOverrides(argv: string[]): Record<string, string> {
+  const flags = parseCliFlags(argv);
+  const out: Record<string, string> = {};
+  for (const [alias, key] of Object.entries(CLI_ALIAS))
+    if (flags[alias] !== undefined) out[key] = flags[alias];
+  return out;
+}
+
 // CLI/coordinator 用の入口。設定は YAML 一本化（env config 読取は廃止）。解決順は
 // --config > ERIS_CONFIG > eris.config.yaml > eris.config.example.yaml。いずれも無ければ
-// 明示エラー（env へはフォールバックしない）。
+// 明示エラー（env へはフォールバックしない）。CLI エイリアス（--seed 等）と programmatic
+// overrides を YAML の上に重ねる（overrides が最優先）。
 export function resolveRunInputs(
   argv: string[] = process.argv,
   overrides: Record<string, string | number | boolean> = {},
@@ -174,12 +221,14 @@ export function resolveRunInputs(
   agents: AgentSpec[];
   configPath?: string;
 } {
+  warnRetiredConfigEnv();
   const path = resolveConfigPathOrUndefined(argv);
   if (!path)
     throw new Error(
       `no config file found. cp ${EXAMPLE_CONFIG_PATH} ${DEFAULT_CONFIG_PATH} ` +
         `(または --config <path> を指定)。設定は YAML 一本化済み（env からの設定読取は廃止）。`,
     );
-  const r = loadRunConfig(path, overrides);
+  const merged = { ...cliOverrides(argv), ...overrides };
+  const r = loadRunConfig(path, merged);
   return { config: r.config, agents: r.agents, configPath: r.configPath };
 }

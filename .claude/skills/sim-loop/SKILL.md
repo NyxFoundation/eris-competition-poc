@@ -43,7 +43,7 @@ ls -ld "runs/$LATEST"
 
 ベースラインが古い・無い・前回イテレーションで触ったコードを反映していない場合:
 ```bash
-AGENTS_CONFIG=agents.swarm.json npm run leaderboard 2>&1 | tail -20
+npm run leaderboard -- --agents agents.swarm.json 2>&1 | tail -20
 ```
 
 ## 2. Diagnose
@@ -96,7 +96,7 @@ AGENTS_CONFIG=agents.swarm.json npm run leaderboard 2>&1 | tail -20
 ## 5. Re-run
 
 ```bash
-AGENTS_CONFIG=agents.swarm.json npm run leaderboard 2>&1 | tail -20
+npm run leaderboard -- --agents agents.swarm.json 2>&1 | tail -20
 ```
 
 ## 6. Diff / 評価

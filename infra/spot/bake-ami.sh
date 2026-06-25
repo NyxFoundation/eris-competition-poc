@@ -121,6 +121,6 @@ echo "================================================================"
 echo " golden AMI 完成: $AMI_ID"
 echo " 以後の run はこれだけ:"
 echo "   ERIS_SPOT_AMI=$AMI_ID OLLAMA_API_KEY=... infra/spot/run-spot.sh --watch -- \\"
-echo "     'SEED=1 ERIS_RUN_BLOCKS=80 ENABLED_PROTOCOLS=uniswap,balancer,curve,aave,gmx AGENTS_CONFIG=agents.local.json npm run sim:realtime'"
+echo "     'npm run sim:realtime -- --seed 1 --blocks 80 --protocols uniswap,balancer,curve,aave,gmx --agents agents.local.json'"
 echo "================================================================"
 # trap cleanup が build インスタンスを terminate する

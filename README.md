@@ -40,16 +40,20 @@ cp eris.config.example.yaml eris.config.yaml   # run 設定 + エージェント
 
 `.env.local` には**秘密情報だけ**を入れる: `ARB_RPC_URL`（Arbitrum One の RPC エンドポイント）・秘密鍵・API キー。`FORK_BLOCK_NUMBER` は任意（既定は RPC の最新ブロック）。run の設定値（protocol / SEED / 配布 / flow / ロスター等）は `eris.config.yaml` で管理する（下記「設定ファイル（eris.config.yaml）」節を参照）。
 
-推奨のローカル既定値:
+`.env.local`（秘密情報のみ）の例:
 
 ```bash
-ANVIL_PORT=8545
-ANVIL_RPC_URL=http://127.0.0.1:8545
-CHAIN_ID=42161
-ROUNDS=1
-ENABLED_PROTOCOLS=uniswap
-AGENTS_CONFIG=agents.local.json
-REPORT_DIR=./runs
+ARB_RPC_URL=https://...        # フォーク元 RPC
+# 秘密鍵 / API キーは必要に応じて
+```
+
+run の設定値は `eris.config.yaml` に書く（雛形 `eris.config.example.yaml`）。例:
+
+```yaml
+ROUNDS: 1
+ENABLED_PROTOCOLS: [uniswap]
+REPORT_DIR: ./runs
+# agents: [...]   # ロスター（または AGENTS_CONFIG: agents.local.json）
 ```
 
 モックオラクルのコントラクトをビルドする（Aave v3 / GMX v2 を有効化する場合に必要。Foundry が要る）。`npm run sim` は `presim` フックでこれを自動実行する:
@@ -71,13 +75,12 @@ set +a
 npm run anvil
 ```
 
-ターミナル 2:
+ターミナル 2（run の設定は `eris.config.yaml`。スモークなら `ROUNDS: 1` / `ENABLED_PROTOCOLS: [uniswap]` にしておく）:
 
 ```bash
 set -a
-source .env.local
+source .env.local        # 秘密情報のみ
 set +a
-export ROUNDS=1 ENABLED_PROTOCOLS=uniswap
 npm run sim
 ```
 
@@ -103,19 +106,25 @@ npm run check:ordering -- runs/<run_id>
 
 ## フル run
 
-スモークテストが通ったら、マルチプロトコルのシミュレーションを回す。`agents.multi.json` は venue を跨ぐ agent 群（cross-venue arb / Aave レバレッジ / GMX long / Uniswap fee bidder）を含む:
+スモークテストが通ったら、マルチプロトコルのシミュレーションを回す。`eris.config.yaml` で全 venue を有効化し、agents に venue を跨ぐ戦略群（cross-venue arb / Aave レバレッジ / GMX long 等）を並べる:
+
+```yaml
+ROUNDS: 20
+ENABLED_PROTOCOLS: [uniswap, balancer, curve, aave, gmx]
+agents:
+  - { id: arb, command: node, args: [--import, tsx, examples/agents/venue-arb.ts], wallet: AGENT1_PRIVATE_KEY }
+  # ...
+```
 
 ```bash
 set -a
-source .env.local
+source .env.local        # 秘密情報のみ
 set +a
-export ROUNDS=20 ENABLED_PROTOCOLS=uniswap,balancer,curve,aave,gmx AGENTS_CONFIG=agents.multi.json
 npm run sim
+# 別ファイルを使う場合: npm run sim -- --config eris.config.full.yaml
 ```
 
 `summary.json` は agent ごとの `protocolValuesUsdc`（Uniswap LP 価値・GMX ポジション equity・Aave net collateral−debt）とベースウォレット価値を報告し、`finalValueUsdc` / `netPnlUsdc` に合算する。GMX / Aave run はラウンドあたり ~3 ブロックを使い、`check:ordering` が検証する fee 順序付きの agent / flow swap は競争ブロックにのみ載る。
-
-単一プロトコル設定の例: `agents.aave-test.json` / `agents.gmx-test.json`。
 
 ## 設定ファイル（eris.config.yaml）
 
@@ -162,33 +171,32 @@ Arbitrum を fork せず、隣接 repo `eris-app-deployer` がローカル anvil
 
    `../eris-app-deployer/deployments/deployments.json` を読んで `src/constants.local.ts` を生成する（`DEPLOYMENTS_JSON` env でパス上書き可）。deploy は決定論アドレスなので、再生成しても差分は出ないことが多い。
 
-3. **リアルタイム run を実行**（`ERIS_LOCAL_DEPLOY=1` で `127.0.0.1:8545` のローカルデプロイに接続）:
+3. **リアルタイム run を実行**（ローカルデプロイモードで `127.0.0.1:8545` に接続）。設定は
+   `eris.config.yaml`、run ノブは CLI フラグで一回指定する:
 
    ```bash
-   ERIS_LOCAL_DEPLOY=1 \
-   AGENTS_CONFIG=agents.local.json \
-   SEED=1 \
-   ERIS_RUN_BLOCKS=24 \
-   ERIS_RUN_SECONDS=70 \
-   ENABLED_PROTOCOLS=uniswap,balancer,curve \
-   INITIAL_WETH_WEI=0 \
-   npm run sim:realtime
+   npm run sim:realtime -- \
+     --local-deploy \
+     --agents agents.local.json \
+     --seed 1 --blocks 24 --seconds 70 \
+     --protocols uniswap,balancer,curve
+   # USDC-only 配布（INITIAL_WETH_WEI: 0）やマルチアセット（FLOW_MAX_WBTC_SATS）等は eris.config.yaml で
    ```
 
-### 主要な env
+### 主要な設定（CLI フラグ / eris.config.yaml）
 
-| 変数 | 説明 |
+| 指定 | 説明 |
 |---|---|
-| `ERIS_LOCAL_DEPLOY=1` | ローカルデプロイ（非fork）モードを有効化。**必須** |
-| `AGENTS_CONFIG` | エージェントロスター JSON。`agents.local.json`（noop / random / simple の 3 体）や `agents.multi-asset.json`（noop / venue-arb / multi-arb） |
-| `SEED` | 市場条件のラベル（価格パス再現用） |
-| `ERIS_RUN_BLOCKS` | run 長（ブロック数） |
-| `ERIS_RUN_SECONDS` | 実時間の上限（24 ブロック ≒ 48 秒なので 70 程度を確保） |
-| `ENABLED_PROTOCOLS` | 有効 venue（カンマ区切り。例 `uniswap,balancer,curve`） |
-| `INITIAL_WETH_WEI=0` | USDC-only 配布（初期の方向性エクスポージャを排除する） |
-| `FLOW_MAX_WBTC_SATS=50000000` | マルチアセット（WBTC）を取引させる場合に指定。WBTC の AMM flow を有効化して WBTC の価格乖離＝裁定機会を作る（既定 0 で WBTC flow off） |
+| `--local-deploy`（`ERIS_LOCAL_DEPLOY`） | ローカルデプロイ（非fork）モードを有効化。**必須** |
+| `--agents <path>`（`AGENTS_CONFIG`） | エージェントロスター。`agents.local.json`（noop / random / simple）や `agents.multi-asset.json`（noop / venue-arb / multi-arb）。YAML に inline `agents:` でも可 |
+| `--seed`（`SEED`） | 市場条件のラベル（価格パス再現用） |
+| `--blocks`（`ERIS_RUN_BLOCKS`） | run 長（ブロック数） |
+| `--seconds`（`ERIS_RUN_SECONDS`） | 実時間の上限（24 ブロック ≒ 48 秒なので 70 程度を確保） |
+| `--protocols`（`ENABLED_PROTOCOLS`） | 有効 venue（カンマ区切り。例 `uniswap,balancer,curve`） |
+| `INITIAL_WETH_WEI: 0`（YAML） | USDC-only 配布（初期の方向性エクスポージャを排除する） |
+| `FLOW_MAX_WBTC_SATS: 50000000`（YAML） | マルチアセット（WBTC）を取引させる場合に指定。WBTC の AMM flow を有効化して価格乖離＝裁定機会を作る（既定 0 で off） |
 
-> **注**: ローカルデプロイのアカウント 0（account0）は deployer のデプロイアカウントと重なり、残留残高で価値が歪む。ロスターは AGENT1 以降（account1+）を使うこと（`agents.local.json` / `agents.multi-asset.json` はそうなっている）。
+> **注**: 括弧内は対応する `eris.config.yaml` のキー。CLI フラグは YAML の値を一回限り上書きする。ローカルデプロイのアカウント 0（account0）は deployer のデプロイアカウントと重なり残留残高で価値が歪むため、ロスターは AGENT1 以降（account1+）を使う（`agents.local.json` / `agents.multi-asset.json` はそうなっている）。
 
 ### 出力
 
@@ -235,7 +243,7 @@ run ごとに `runs/<timestamp>/` が生成される:
 set -a
 source .env.local
 set +a
-AGENTS_CONFIG=agents.claude-llm.json npm run sim
+npm run sim -- --agents agents.claude-llm.json
 ```
 
 `auto` は PATH 上の `claude` バイナリを検出し Claude Agent SDK 経由でルーティングする。stderr に `[claude-llm] strategist=subscription (auto-detected Claude Code OAuth)` が出る。
@@ -244,7 +252,7 @@ AGENTS_CONFIG=agents.claude-llm.json npm run sim
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-AGENTS_CONFIG=agents.claude-llm.json ERIS_LLM_AUTH=apikey npm run sim
+ERIS_LLM_AUTH=apikey npm run sim -- --agents agents.claude-llm.json
 ```
 
 LLM 呼び出しは非同期で `requestAction` を止めないため、`AGENT_TIMEOUT_MS` は既定 5000ms で実用上問題ない。
@@ -255,10 +263,9 @@ LLM 呼び出しは非同期で `requestAction` を止めないため、`AGENT_T
 
 ```bash
 export OLLAMA_API_KEY=ollama-...
-AGENTS_CONFIG=agents.claude-llm.json \
-  ERIS_LLM_AUTH=ollama \
+ERIS_LLM_AUTH=ollama \
   ERIS_LLM_MODEL=gpt-oss:120b \
-  npm run sim
+  npm run sim -- --agents agents.claude-llm.json
 ```
 
 任意の上書き:
@@ -274,7 +281,7 @@ export ERIS_OLLAMA_MAX_RETRIES=3
 `ERIS_LLM_MOCK=1`（または `ERIS_LLM_AUTH=mock`）で LLM を完全にスキップし、固定の noop 戦略を使う。認証もトークン消費も無しでハーネスをスモークテストするのに便利:
 
 ```bash
-AGENTS_CONFIG=agents.claude-llm.json ERIS_LLM_MOCK=1 npm run sim
+ERIS_LLM_MOCK=1 npm run sim -- --agents agents.claude-llm.json
 ```
 
 ### チューニング

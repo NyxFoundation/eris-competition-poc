@@ -12,11 +12,10 @@
 # 前提: 一度だけ infra/spot/setup-once.sh（key pair + SG）を実行済み。
 #       OLLAMA_API_KEY を env で渡すこと（box に SSH で送付。AWS には置かない）。
 #
-# 使い方:
+# 使い方（設定は CLI フラグ。env は退役。設定 YAML は committed の eris.config.example.yaml が既定）:
 #   OLLAMA_API_KEY=ollama-xxxx infra/spot/run-spot.sh --watch -- \
-#     'REGIMES=base,bull REPLICATIONS=5 ERIS_RUN_BLOCKS=120 \
-#      AGENTS_CONFIG=agents.local.json npm run discrimination'
-#   infra/spot/run-spot.sh --type c7i.2xlarge --keep -- 'AGENTS_CONFIG=... npm run evaluate'
+#     'npm run discrimination -- --regimes base,bull --replications 5 --blocks 120 --agents agents.local.json'
+#   infra/spot/run-spot.sh --type c7i.2xlarge --keep -- 'npm run evaluate -- --agents <config>'
 # =============================================================================
 set -euo pipefail
 
