@@ -1,36 +1,36 @@
 # Eris Competition MVP
 
-Local multi-protocol DeFi strategy simulation on an Anvil **Arbitrum One** fork. Agents do not receive RPC access, private keys, pending transactions, or txpool data. The coordinator gives each agent only confirmed-state observations and converts accepted JSON actions into transactions.
+Anvil の **Arbitrum One** フォーク上で動く、ローカルなマルチプロトコル DeFi 戦略シミュレータ。エージェントには RPC アクセス・秘密鍵・pending トランザクション・txpool は一切渡さない。コーディネータは各エージェントに**確定済み状態の観測のみ**を与え、受理した JSON アクションをトランザクションへ変換する。
 
-Supported protocols are pluggable via a protocol adapter registry (`src/protocols/`): **Uniswap V3, Balancer v2, Curve, Aave v3, and GMX v2**. Select active protocols per run with `ENABLED_PROTOCOLS` (comma-separated, e.g. `ENABLED_PROTOCOLS=uniswap,balancer,curve,aave,gmx`). Aave v3 and GMX v2 prices are driven by controllable mock oracles that the coordinator updates each round to track an exogenous fair price.
+対応プロトコルはプロトコルアダプタレジストリ（`src/protocols/`）でプラガブル: **Uniswap V3 / Balancer v2 / Curve / Aave v3 / GMX v2**。run ごとに `ENABLED_PROTOCOLS`（カンマ区切り、例 `ENABLED_PROTOCOLS=uniswap,balancer,curve,aave,gmx`）で有効プロトコルを選ぶ。Aave v3 と GMX v2 の価格は、コーディネータが毎ラウンド外生的な fair price に追従させる制御可能なモックオラクルで駆動する。
 
-## Protocols & actions
+## プロトコルとアクション
 
-Each adapter (`src/protocols/<name>.ts`) implements parsing/validation, calldata building, observation, orderflow, and PnL. Agent JSON actions:
+各アダプタ（`src/protocols/<name>.ts`）は parse / validation・calldata 構築・観測・orderflow・PnL を実装する。エージェントの JSON アクション:
 
-| Protocol | Actions | Venue (Arbitrum) |
+| プロトコル | アクション | venue (Arbitrum) |
 |---|---|---|
-| Uniswap V3 | `swap`, `mintLiquidity`, `removeLiquidity`, `collectFees` | WETH/USDC 0.05% pool |
-| Balancer v2 | `balancerSwap` | 33/33/34 WETH/USDC/USDT weighted pool (seeded on fork) |
+| Uniswap V3 | `swap`, `mintLiquidity`, `removeLiquidity`, `collectFees` | WETH/USDC 0.05% プール |
+| Balancer v2 | `balancerSwap` | 33/33/34 WETH/USDC/USDT weighted プール（フォーク時に seed） |
 | Curve | `curveSwap` | tricrypto WETH↔USDT |
-| Aave v3 | `aaveSupply`, `aaveWithdraw`, `aaveBorrow`, `aaveRepay` | native USDC / WETH reserves |
+| Aave v3 | `aaveSupply`, `aaveWithdraw`, `aaveBorrow`, `aaveRepay` | native USDC / WETH リザーブ |
 | GMX v2 | `gmxIncrease`, `gmxDecrease` | ETH/USD perp market |
 
-Plus protocol-agnostic `noop`, `bundle` (multiple bundleable leaf actions in one tx), `rawTx`, and `rawBundle`.
+加えてプロトコル非依存の `noop` / `bundle`（複数の bundle 可能な leaf を 1 tx に）/ `rawTx` / `rawBundle` がある。
 
-### Stablecoin accounting
+### ステーブルコイン会計
 
-Deep WETH/stable liquidity on Arbitrum lives in USDC.e / USDT pools, so native USDC, USDC.e, and USDT are all treated as `$1`, 6-decimal **USDC-equivalent** in balances and PnL (`src/chain.ts` `setActiveStables`/`getBalances`). Uniswap/Aave/GMX use native USDC; Balancer uses native USDC (its pool is seeded on the fork); Curve uses USDT.
+Arbitrum の深い WETH/stable 流動性は USDC.e / USDT プールにあるため、native USDC・USDC.e・USDT はすべて `$1`・6 桁の **USDC 相当**として残高・PnL を合算する（`src/chain.ts` の `setActiveStables` / `getBalances`）。Uniswap / Aave / GMX は native USDC、Balancer は native USDC（プールをフォーク時に seed）、Curve は USDT を使う。
 
-### Oracle control (Aave v3 / GMX v2)
+### オラクル制御（Aave v3 / GMX v2）
 
-Mock oracle contracts (`contracts/MockAggregator.sol`, `contracts/MockOracleProvider.sol`) are deployed to the fork during setup. For Aave the coordinator impersonates the ACL admin to point `AaveOracle` at the mock aggregator; for GMX it impersonates `ROLE_ADMIN` to grant keeper/controller roles and registers the mock provider in the `DataStore`. Each round, `updateOracles` writes the fair price into both mocks so lending health factors and perp mark prices move.
+モックオラクル（`contracts/MockAggregator.sol` / `contracts/MockOracleProvider.sol`）を setup でフォークにデプロイする。Aave はコーディネータが ACL admin を impersonate して `AaveOracle` をモックに向け、GMX は `ROLE_ADMIN` を impersonate して keeper / controller ロールを付与し `DataStore` にモックプロバイダを登録する。毎ラウンド `updateOracles` が fair price を両モックへ書き込み、貸借のヘルスファクタと perp のマーク価格が動く。
 
-### GMX round structure
+### GMX のラウンド構造
 
-GMX is asynchronous (create order → keeper executes). Each round runs three sub-blocks: (1) an **oracle block** updating mock prices, (2) the **competitive block** where agent/flow orders compete by priority fee (`--order fees`), and (3) a **keeper block** where the coordinator reads `OrderCreated` logs from the competitive block and executes each order. GMX position changes become visible to agents one round later. GMX actions are standalone only (not bundleable).
+GMX は非同期（注文作成 → keeper 実行）。各ラウンドは 3 つのサブブロックで進む: (1) モック価格を更新する**オラクルブロック**、(2) agent / flow の注文が priority fee で競合する**競争ブロック**（`--order fees`）、(3) コーディネータが競争ブロックの `OrderCreated` ログを読んで各注文を実行する **keeper ブロック**。GMX のポジション変化はエージェントに 1 ラウンド遅れて見える。GMX アクションは単独のみ（bundle 不可）。
 
-## Setup
+## セットアップ
 
 ```bash
 npm install
@@ -38,10 +38,9 @@ cp .env.example .env.local
 cp agents.local.example.json agents.local.json
 ```
 
-Fill `ARB_RPC_URL` (an Arbitrum One RPC endpoint) in `.env.local`. `FORK_BLOCK_NUMBER` is optional (defaults to the RPC's latest block).
-Load it before running commands, or export the same variables in your shell.
+`.env.local` に `ARB_RPC_URL`（Arbitrum One の RPC エンドポイント）を設定する。`FORK_BLOCK_NUMBER` は任意（既定は RPC の最新ブロック）。コマンド実行前に読み込むか、同じ変数をシェルで export する。
 
-Recommended local defaults:
+推奨のローカル既定値:
 
 ```bash
 ANVIL_PORT=8545
@@ -53,17 +52,17 @@ AGENTS_CONFIG=agents.local.json
 REPORT_DIR=./runs
 ```
 
-Build the mock oracle contracts (required when Aave v3 / GMX v2 are enabled; needs Foundry). `npm run sim` runs this automatically via the `presim` hook:
+モックオラクルのコントラクトをビルドする（Aave v3 / GMX v2 を有効化する場合に必要。Foundry が要る）。`npm run sim` は `presim` フックでこれを自動実行する:
 
 ```bash
 npm run build:contracts
 ```
 
-Private key variables can be left empty for local Anvil runs; the coordinator falls back to Anvil's default dev keys. The coordinator also derives dedicated `admin` (deploys mocks, holds GMX `CONTROLLER` / Aave `POOL_ADMIN`) and `keeper` (GMX order keeper) accounts; override with `ADMIN_PRIVATE_KEY` / `KEEPER_PRIVATE_KEY`.
+秘密鍵の変数はローカル Anvil run では空でよい（コーディネータが Anvil の既定 dev キーにフォールバックする）。コーディネータは専用の `admin`（モックをデプロイし GMX `CONTROLLER` / Aave `POOL_ADMIN` を保持）と `keeper`（GMX 注文 keeper）アカウントも導出する。`ADMIN_PRIVATE_KEY` / `KEEPER_PRIVATE_KEY` で上書き可能。
 
-## Smoke Test
+## スモークテスト
 
-In one terminal:
+ターミナル 1:
 
 ```bash
 set -a
@@ -72,7 +71,7 @@ set +a
 npm run anvil
 ```
 
-In another terminal:
+ターミナル 2:
 
 ```bash
 set -a
@@ -82,31 +81,29 @@ export ROUNDS=1 ENABLED_PROTOCOLS=uniswap
 npm run sim
 ```
 
-Outputs are written under `runs/<run_id>/`.
+出力は `runs/<run_id>/` 下に書かれる。確認できること:
 
-Expected smoke-test coverage:
+- 全 agent と flow ウォレットのセットアップが完了する。
+- WETH deposit・トークン approve・初回の WETH → USDC swap が完了する。
+- 1 ラウンドで flow トランザクションと有効な agent トランザクションが提出される。
+- `anvil_mine` が提出済み tx の receipt を生成する。
+- run ディレクトリ下に `events.jsonl` / `blocks.csv` / `summary.json` / `history.json` が書かれる。
 
-- Wallet setup completes for all agents and flow wallets.
-- WETH deposit, token approvals, and the initial WETH -> USDC swap complete.
-- One round submits flow transactions and any valid agent transactions.
-- `anvil_mine` produces receipts for submitted transactions.
-- `events.jsonl`, `blocks.csv`, `summary.json`, and `history.json` are written under the run directory.
+## 出力チェック
 
-## Output Checks
+`summary.json` で各 agent の最終残高・net PnL・gas 使用量・revert 数・提出/included tx 数を確認する。
 
-Review `summary.json` for each agent's final balances, net PnL, gas usage, revert count, and submitted/included transaction counts.
-
-Review `blocks.csv` to confirm Anvil's fee ordering:
+`blocks.csv` で Anvil の fee 順序を確認する:
 
 ```bash
 npm run check:ordering -- runs/<run_id>
 ```
 
-Review `events.jsonl` for `tx_submit_failed`, `tx_receipt_failed`, `action_rejected`, `revert`, or `timeout` events. Transaction-level submit and receipt failures are logged and skipped so one bad transaction does not stop the full run.
+`events.jsonl` で `tx_submit_failed` / `tx_receipt_failed` / `action_rejected` / `revert` / `timeout` を確認する。tx 単位の提出・receipt 失敗はログに残してスキップするため、1 本の不正な tx が run 全体を止めない。
 
-## Full Run
+## フル run
 
-After the smoke test passes, run a multi-protocol simulation. `agents.multi.json` ships agents across venues (cross-venue arb, Aave leverage, GMX long, Uniswap fee bidder):
+スモークテストが通ったら、マルチプロトコルのシミュレーションを回す。`agents.multi.json` は venue を跨ぐ agent 群（cross-venue arb / Aave レバレッジ / GMX long / Uniswap fee bidder）を含む:
 
 ```bash
 set -a
@@ -116,17 +113,17 @@ export ROUNDS=20 ENABLED_PROTOCOLS=uniswap,balancer,curve,aave,gmx AGENTS_CONFIG
 npm run sim
 ```
 
-`summary.json` reports per-agent `protocolValuesUsdc` (Uniswap LP value, GMX position equity, Aave net collateral−debt) plus the base wallet value, summed into `finalValueUsdc` / `netPnlUsdc`. Note that GMX/Aave runs use ~3 blocks per round; only the competitive block carries the fee-ordered agent/flow swaps that `check:ordering` validates.
+`summary.json` は agent ごとの `protocolValuesUsdc`（Uniswap LP 価値・GMX ポジション equity・Aave net collateral−debt）とベースウォレット価値を報告し、`finalValueUsdc` / `netPnlUsdc` に合算する。GMX / Aave run はラウンドあたり ~3 ブロックを使い、`check:ordering` が検証する fee 順序付きの agent / flow swap は競争ブロックにのみ載る。
 
-Example single-protocol configs: `agents.aave-test.json`, `agents.gmx-test.json`.
+単一プロトコル設定の例: `agents.aave-test.json` / `agents.gmx-test.json`。
 
 ## ローカルリアルタイムシミュレーション（非fork）
 
-Arbitrum を fork せず、隣接 repo `eris-app-deployer` がローカル anvil 上に全 protocol を deploy したものに poc が接続して realtime run を回すモード。fork backend への cold state RPC 往復（fork RPC レイテンシ）を避けられ、マルチアセット（WETH/WBTC）も動く。`sim:realtime`（ADR 0005 の実時間 run）を fork 無しで実行する。
+Arbitrum を fork せず、隣接 repo `eris-app-deployer` がローカル anvil 上に全 protocol を deploy したものに poc が接続して realtime run を回すモード。fork backend への cold state RPC 往復（fork RPC レイテンシ）を避けられ、マルチアセット（WETH/WBTC）も動く。実時間 run（`sim:realtime`）を fork 無しで実行する。
 
 ### 前提
 
-- 隣接 repo `../eris-app-deployer`（branch `feat/shared-tokens-gmx-aave`）が必要。
+- 隣接 repo `../eris-app-deployer`（全 venue のローカルデプロイに対応したブランチ）が必要。
 - poc 側は anvil を起動しない（deployer が anvil を所有する）。`ERIS_LOCAL_DEPLOY=1` のとき `npm run anvil` は fail-fast する。
 
 ### 手順
@@ -172,9 +169,9 @@ Arbitrum を fork せず、隣接 repo `eris-app-deployer` がローカル anvil
 | `AGENTS_CONFIG` | エージェントロスター JSON。`agents.local.json`（noop / random / simple の 3 体）や `agents.multi-asset.json`（noop / venue-arb / multi-arb） |
 | `SEED` | 市場条件のラベル（価格パス再現用） |
 | `ERIS_RUN_BLOCKS` | run 長（ブロック数） |
-| `ERIS_RUN_SECONDS` | 実時間の上限（非stress run はこれで終了する。24 ブロック ≒ 48 秒なので 70 程度を確保） |
+| `ERIS_RUN_SECONDS` | 実時間の上限（24 ブロック ≒ 48 秒なので 70 程度を確保） |
 | `ENABLED_PROTOCOLS` | 有効 venue（カンマ区切り。例 `uniswap,balancer,curve`） |
-| `INITIAL_WETH_WEI=0` | USDC-only 配布（初期 β を消すユーザー方針） |
+| `INITIAL_WETH_WEI=0` | USDC-only 配布（初期の方向性エクスポージャを排除する） |
 | `FLOW_MAX_WBTC_SATS=50000000` | マルチアセット（WBTC）を取引させる場合に指定。WBTC の AMM flow を有効化して WBTC の価格乖離＝裁定機会を作る（既定 0 で WBTC flow off） |
 
 > **注**: ローカルデプロイのアカウント 0（account0）は deployer のデプロイアカウントと重なり、残留残高で価値が歪む。ロスターは AGENT1 以降（account1+）を使うこと（`agents.local.json` / `agents.multi-asset.json` はそうなっている）。
@@ -183,13 +180,9 @@ Arbitrum を fork せず、隣接 repo `eris-app-deployer` がローカル anvil
 
 run ごとに `runs/<timestamp>/` が生成される:
 
-- `summary.json` — agent ごとの initial/final value・netPnl・includedTxCount・revertCount、`valueSeries.failedReads`、`violations`。
+- `summary.json` — agent ごとの initial / final value・netPnl・includedTxCount・revertCount、`valueSeries.failedReads`、`violations`。
 - `agents/<id>.jsonl` — 各 agent の自己申告ログ（direct モードでは mempool 活動 `kind:"mempool"`: submitted / submit_failed / rejected。WBTC 等の market 取引は `base` フィールドで判別できる）。
 - `events.jsonl` / `blocks.csv` — イベント列とブロックごとの tx 記録。
-
-### 検証例
-
-`agents.multi-asset.json` ＋ `FLOW_MAX_WBTC_SATS=50000000` の 24 ブロック run で、base 非依存の `multi-arb` が WBTC を 20 件 on-chain 約定（revert 0）、`failedReads: 0`・`violations: []`。WETH 専用の `venue-arb` は WBTC 機会を取れず 0 取引。
 
 ### トラブルシュート
 
@@ -197,53 +190,54 @@ run ごとに `runs/<timestamp>/` が生成される:
 - **アドレス不一致 / コントラクトが無い**: deploy 後に `npm run gen:local-constants` を再実行したか確認する。
 - **run が価格窓に到達せず早期終了する**: `ERIS_RUN_SECONDS` を十分大きくする。
 
-## LLM-driven autonomous agent
+## LLM 駆動の自律エージェント
 
-`examples/agents/claude-llm.ts` is an agent whose strategy is generated and revised by an LLM at runtime. There is no hand-written trading logic — the model writes both the natural-language plan and a TypeScript executor function that runs each round in a `vm.Script` sandbox.
+`examples/agents/claude-llm.ts` は、戦略を実行時に LLM が生成・改訂するエージェント。手書きのトレードロジックは無く、モデルが自然言語のプランと、毎ラウンド `vm.Script` サンドボックスで動く TypeScript の executor 関数の両方を書く。
 
-### Architecture
-- **Slow tier (LLM API/CLI)**: called once at startup to design an initial strategy, then again every `ERIS_LLM_REVIEW_EVERY` rounds (default 10) or when realized PnL drops below `1 - ERIS_LLM_DRAWDOWN_RATIO` of starting USD (default 5%). Calls run in the background and never block the round response.
-- **Fast tier (vm.Script)**: each round, the current executor body is evaluated against the observation with a 200 ms timeout. If the strategy is not yet ready (first ~10 sec while init is in flight) or the executor throws / returns an invalid action, the agent emits `noop` for that round and continues.
-- Strategies are written to `runs/<run_id>/agent-<id>/strategy-vN.{md,params.json,executor.ts}` so you can read what Claude is thinking. Per-round decisions and API call telemetry land in `decisions.jsonl` and `claude-calls.jsonl` in the same directory.
+### アーキテクチャ
 
-### Backends
+- **遅い層（LLM API/CLI）**: 起動時に 1 度呼んで初期戦略を設計し、その後 `ERIS_LLM_REVIEW_EVERY` ラウンドごと（既定 10）、または実現 PnL が開始時 USD の `1 - ERIS_LLM_DRAWDOWN_RATIO`（既定 5%）を下回ったときに再度呼ぶ。呼び出しはバックグラウンドで走り、ラウンド応答をブロックしない。
+- **速い層（vm.Script）**: 毎ラウンド、現在の executor 本体を観測に対して 200ms タイムアウトで評価する。戦略が未準備（init 進行中の最初の ~10 秒）や executor が throw / 無効アクションを返した場合、そのラウンドは `noop` を出して継続する。
+- 戦略は `runs/<run_id>/agent-<id>/strategy-vN.{md,params.json,executor.ts}` に書き出され、モデルの判断を読める。ラウンドごとの判断と API 呼び出しのテレメトリは同ディレクトリの `decisions.jsonl` / `claude-calls.jsonl` に残る。
 
-`ERIS_LLM_AUTH` selects which transport to use. `auto` (the default) picks the best available, never crashes on missing credentials.
+### バックエンド
 
-| Mode | Auth | Use when |
+`ERIS_LLM_AUTH` で利用するトランスポートを選ぶ。`auto`（既定）は利用可能な最良を選び、認証情報が無くてもクラッシュしない。
+
+| モード | 認証 | 使う場面 |
 |---|---|---|
-| `cli` | Claude Pro/Max OAuth via `claude -p` | Local subscription runs with the most reliable Claude Code path |
-| `codex` | Codex CLI auth via `codex exec` | Parallel self-improvement on a separate API pool |
-| `ollama` | `OLLAMA_API_KEY` or `ERIS_OLLAMA_API_KEY` | Direct Ollama Cloud API calls to `https://ollama.com/api/chat` |
-| `subscription` | Claude Pro/Max OAuth (via Claude Code CLI) | You already have `claude` installed and logged in — zero per-token cost |
-| `apikey` | `ANTHROPIC_API_KEY` | CI, parallel sim runs, or when you want exact per-call billing |
-| `mock` | none | Offline smoke tests — always returns a noop strategy |
-| `auto` *(default)* | tries `cli` → `apikey` → `ollama` → `mock` | Local dev where available credentials vary |
+| `cli` | Claude Pro/Max OAuth（`claude -p`） | ローカルのサブスクリプション run |
+| `codex` | Codex CLI 認証（`codex exec`） | 別 API プールでの並列実行 |
+| `ollama` | `OLLAMA_API_KEY` または `ERIS_OLLAMA_API_KEY` | Ollama Cloud API（`https://ollama.com/api/chat`）を直接呼ぶ |
+| `subscription` | Claude Pro/Max OAuth（Claude Code CLI 経由） | `claude` をインストール済み・ログイン済み |
+| `apikey` | `ANTHROPIC_API_KEY` | CI / 並列 sim run / 課金を明示したいとき |
+| `mock` | なし | オフラインのスモークテスト（常に noop 戦略を返す） |
+| `auto` *(既定)* | `cli` → `apikey` → `ollama` → `mock` を順に試す | 利用可能な認証が状況で変わるローカル開発 |
 
-### Run it (subscription, no API key)
+### 実行（subscription、API キー不要）
 
 ```bash
-# Make sure you've logged in once: `claude auth login` (uses your Pro/Max plan)
+# 一度ログインしておくこと: `claude auth login`（Pro/Max プランを使う）
 set -a
 source .env.local
 set +a
 AGENTS_CONFIG=agents.claude-llm.json npm run sim
 ```
 
-`auto` will detect the `claude` binary on PATH and route through the Claude Agent SDK. You'll see `[claude-llm] strategist=subscription (auto-detected Claude Code OAuth)` on stderr.
+`auto` は PATH 上の `claude` バイナリを検出し Claude Agent SDK 経由でルーティングする。stderr に `[claude-llm] strategist=subscription (auto-detected Claude Code OAuth)` が出る。
 
-### Run it (API key)
+### 実行（API キー）
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 AGENTS_CONFIG=agents.claude-llm.json ERIS_LLM_AUTH=apikey npm run sim
 ```
 
-`AGENT_TIMEOUT_MS` only matters if you want headroom — the LLM call is async and never holds up `requestAction`, so the default 5000 ms is fine in practice.
+LLM 呼び出しは非同期で `requestAction` を止めないため、`AGENT_TIMEOUT_MS` は既定 5000ms で実用上問題ない。
 
-### Run it (Ollama Cloud API)
+### 実行（Ollama Cloud API）
 
-Use Ollama's direct Cloud API endpoint, not a local `localhost:11434` server. Direct Cloud API model names are the normal model ids, for example `gpt-oss:120b` rather than a local `-cloud` alias.
+ローカルの `localhost:11434` ではなく Ollama の Cloud API エンドポイントを使う。モデル名は通常の id（例 `gpt-oss:120b`、ローカルの `-cloud` エイリアスではない）。
 
 ```bash
 export OLLAMA_API_KEY=ollama-...
@@ -253,7 +247,7 @@ AGENTS_CONFIG=agents.claude-llm.json \
   npm run sim
 ```
 
-Optional overrides:
+任意の上書き:
 
 ```bash
 export ERIS_OLLAMA_BASE_URL=https://ollama.com/api
@@ -261,38 +255,27 @@ export ERIS_OLLAMA_MODEL=gpt-oss:120b
 export ERIS_OLLAMA_MAX_RETRIES=3
 ```
 
-### Offline mock
+### オフラインモック
 
-Set `ERIS_LLM_MOCK=1` (or `ERIS_LLM_AUTH=mock`) to skip Claude entirely and use a hard-coded noop strategy. Useful for smoke-testing the harness without spending tokens or having any auth:
+`ERIS_LLM_MOCK=1`（または `ERIS_LLM_AUTH=mock`）で LLM を完全にスキップし、固定の noop 戦略を使う。認証もトークン消費も無しでハーネスをスモークテストするのに便利:
 
 ```bash
 AGENTS_CONFIG=agents.claude-llm.json ERIS_LLM_MOCK=1 npm run sim
 ```
 
-### Tuning
+### チューニング
 
-Environment variables (set in the parent shell — `agentProcess.ts` forwards `ANTHROPIC_API_KEY` and any `ERIS_LLM_*` var to the child):
+環境変数（親シェルで設定する。`agentProcess.ts` が `ANTHROPIC_API_KEY` と任意の `ERIS_LLM_*` を子プロセスへ転送する）:
 
-| Variable | Default | Effect |
+| 変数 | 既定 | 効果 |
 |---|---|---|
-| `ERIS_LLM_AUTH` | `auto` | `cli` \| `codex` \| `ollama` \| `subscription` \| `apikey` \| `mock` \| `auto` — see backend table above |
-| `ERIS_LLM_MODEL` | backend-specific | Model alias or id. Ollama default is `gpt-oss:120b` |
-| `OLLAMA_API_KEY` / `ERIS_OLLAMA_API_KEY` | unset | Bearer token for `ERIS_LLM_AUTH=ollama` |
-| `ERIS_OLLAMA_BASE_URL` | `https://ollama.com/api` | Direct Ollama Cloud API base URL |
-| `ERIS_OLLAMA_MAX_RETRIES` | `3` | Retries for Ollama `429` and transient `5xx` responses |
-| `ERIS_LLM_REVIEW_EVERY` | `10` | Scheduled revision cadence in rounds |
-| `ERIS_LLM_DRAWDOWN_RATIO` | `0.05` | Fractional PnL drop that triggers an off-schedule revision |
-| `ERIS_LLM_HISTORY_CAPACITY` | `30` | How many recent rounds to keep in the revision prompt |
-| `ERIS_LLM_EXECUTOR_TIMEOUT_MS` | `200` | Hard cap on per-round executor execution |
-| `ERIS_LLM_MOCK` | unset | If `1`, force the offline mock strategy (alias for `ERIS_LLM_AUTH=mock`) |
-
-Cost / latency comparison per call:
-
-| Backend | Wall time | Per-call cost | Cache | Rate limit |
-|---|---|---|---|---|
-| `apikey` | ~1–2s | ~$0.05 per 128-round run | ephemeral on `SIM_RULES` block | API tier |
-| `subscription` | ~4–8s (CLI cold start + harness prompt) | $0 — subscription absorbs | per-process; long-lived `query` not yet wired | Max weekly / 5h caps |
-| `ollama` | model/API dependent | Ollama Cloud account billing | none | Ollama Cloud limits |
-| `mock` | <1ms | $0 | n/a | n/a |
-
-Subscription mode is best for local dev and ad-hoc runs; switch to `apikey` for unattended / parallel / CI runs that risk hitting Max weekly caps.
+| `ERIS_LLM_AUTH` | `auto` | `cli` \| `codex` \| `ollama` \| `subscription` \| `apikey` \| `mock` \| `auto`（上のバックエンド表を参照） |
+| `ERIS_LLM_MODEL` | バックエンド依存 | モデルのエイリアス / id。Ollama の既定は `gpt-oss:120b` |
+| `OLLAMA_API_KEY` / `ERIS_OLLAMA_API_KEY` | 未設定 | `ERIS_LLM_AUTH=ollama` の Bearer トークン |
+| `ERIS_OLLAMA_BASE_URL` | `https://ollama.com/api` | Ollama Cloud API のベース URL |
+| `ERIS_OLLAMA_MAX_RETRIES` | `3` | Ollama の `429` / 一時的な `5xx` に対するリトライ回数 |
+| `ERIS_LLM_REVIEW_EVERY` | `10` | 定期改訂の間隔（ラウンド数） |
+| `ERIS_LLM_DRAWDOWN_RATIO` | `0.05` | 臨時改訂をトリガーする PnL 下落率 |
+| `ERIS_LLM_HISTORY_CAPACITY` | `30` | 改訂プロンプトに含める直近ラウンド数 |
+| `ERIS_LLM_EXECUTOR_TIMEOUT_MS` | `200` | ラウンドあたり executor 実行のハードキャップ |
+| `ERIS_LLM_MOCK` | 未設定 | `1` でオフラインモック戦略を強制（`ERIS_LLM_AUTH=mock` のエイリアス） |
