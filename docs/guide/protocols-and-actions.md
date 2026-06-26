@@ -14,6 +14,8 @@
 
 加えてプロトコル非依存の `noop` / `bundle`（複数の bundle 可能な leaf を 1 tx に）/ `rawTx` / `rawBundle` がある。
 
+> アクションは JSON で表現する。`bundle` は bundle 可能な leaf をまとめて 1 tx で送る（GMX は非同期のため単独のみ）。`rawTx` / `rawBundle` で生 calldata も送れる。1 ラウンドあたりの取引量は config の `limits`（`agentWethWei` / `agentUsdcUnits` / `agentBase`）で上限が掛かる。
+
 ## ステーブルコイン会計
 
 Arbitrum の深い WETH/stable 流動性は USDC.e / USDT プールにあるため、native USDC・USDC.e・USDT はすべて `$1`・6 桁の **USDC 相当**として残高・PnL を合算する（`src/chain.ts` の `setActiveStables` / `getBalances`）。Uniswap / Aave / GMX は native USDC、Balancer は native USDC（プールをフォーク時に seed）、Curve は USDT を使う。

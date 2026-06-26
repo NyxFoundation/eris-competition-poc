@@ -72,12 +72,14 @@ direct モードでは互換シムが同じファイルに mempool 活動（`kin
 rejected）を自己申告で追記する（coordinator が submitted を数えられなくなる穴を塞ぐ。ADR 0006 §5）。
 出力先は coordinator が渡す env `ERIS_RUN_DIR` / `ERIS_AGENT_ID` で決まる。run 後の診断はこれを一次情報にする。
 
-## spot EC2 で重い run を回す（ローカル逼迫の回避。`infra/spot/`）
+## spot EC2 で重い run を回す（ローカル逼迫の回避。spot skills）
 
 ローカルの CPU/メモリが逼迫するときは、**golden AMI の spot EC2** に run を投げる。ローカルデプロイ前提（fork 不要）で
 自己完結し、外部依存は LLM(ollama) egress のみ。全 protocol を deploy 済みの anvil state を AMI に焼いてあり、
 launch 時は `anvil --load-state` で全 5 venue を ~10 秒復元 → install/deploy なしで run（起動 ~3 分・full venue + LLM が安定 green）。
-SSH 一本で結果を手元に回収（S3/IAM ロール不要）。AWS は `eris` profile（account `075096050160`）固定。詳細は `infra/spot/README.md`、設計と学びは memory `spot-ec2-runner`。
+SSH 一本で結果を手元に回収（S3/IAM ロール不要）。AWS は `eris` profile（account `075096050160`）固定。スクリプトは
+user-global の spot skills（`~/.claude/skills/spot-{run,bake,ops}/scripts/`）に同梱（repo の `infra/spot/` から移設）。
+poc repo ルートで叩く（スクリプトは `$PWD` を poc とみなす。別パスは `ERIS_POC_DIR`）。設計と学びは memory `spot-ec2-runner`。
 
 - **`/spot-run`** — golden AMI で run を回し結果を回収（日常ドライバ）。`ERIS_SPOT_AMI=latest` で最新 AMI 自動解決。
 - **`/spot-bake`** — 新しい golden AMI を焼く（poc 依存追加 / deployer・constants 変更時。agent config だけなら不要）。~35 分。

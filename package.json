@@ -6,7 +6,6 @@
   "scripts": {
     "anvil": "tsx src/cli/anvil.ts",
     "sim:realtime": "tsx src/cli/sim-realtime.ts",
-    "gen:roster": "tsx scripts/genRoster.ts",
     "gen:local-constants": "tsx scripts/genLocalConstants.ts",
     "agent:noop": "tsx examples/agents/noop.ts",
     "agent:random": "tsx examples/agents/random.ts",

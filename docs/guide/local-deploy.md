@@ -77,3 +77,9 @@ cd ..
 - **接続できない**: deployer の `npm run deploy -- --keep-fresh` が起動中か（`--exit` を付けていないか）確認する。
 - **アドレス不一致 / コントラクトが無い**: deploy 後に `npm run gen:local-constants` を再実行したか確認する。
 - **run が価格窓に到達せず早期終了する**: `--seconds`（`ERIS_RUN_SECONDS`）を十分大きくする。
+
+## Tips
+
+- **一部 venue だけ deploy（高速化）**: `npm run deploy -- --only uniswap,balancer`（GMX/Aave の重い hardhat-deploy を回避）。poc 側の `--protocols` も合わせる。
+- **マルチアセット（WBTC）**: `config/local.yaml` の `flow.baseMax: { WBTC: "50000000" }` で WBTC の AMM flow を有効化すると価格乖離＝裁定機会ができる（既定 off）。`funding.base` / `limits.agentBase` で初期在庫・per-round 上限も指定できる。
+- **逐次 run の断面**: ローカルは fork が無いので resetFork は `evm_snapshot` / `evm_revert` に分岐する。snapshot ID は `.local-snapshot` に永続化され、run 間でクリーン断面から始まる（並行 run は非対応）。

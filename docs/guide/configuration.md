@@ -37,3 +37,29 @@ agents:
 ```
 
 > ローカルデプロイのアカウント 0（account0）は deployer のデプロイアカウントと重なり残留残高で価値が歪むため、ロスターは AGENT1 以降（account1+）を使う。
+
+## CLI での一回上書き
+
+YAML を編集せず、run ごとに値を上書きできる（CLI フラグが最優先。`--key value` / `--key=value` 両対応）:
+
+| フラグ | config キー | 例 |
+|---|---|---|
+| `--config <path>` | （設定ファイル選択） | `--config config/claude-llm.yaml` |
+| `--seed` | `run.seed` | `--seed 7` |
+| `--blocks` | `run.blocks` | `--blocks 40` |
+| `--seconds` | `run.seconds` | `--seconds 120` |
+| `--protocols` | `run.protocols` | `--protocols uniswap,balancer,curve` |
+| `--agents` | `run.agentsConfig` | `--agents agents.local.json` |
+| `--local-deploy` | `run.localDeploy` | `--local-deploy` |
+| `--economic-gas` | `run.economicGas` | `--economic-gas` |
+
+## agents[] の項目
+
+| キー | 必須 | 説明 |
+|---|---|---|
+| `id` | ✓ | agent の識別子（ログ出力先 `runs/<id>/agents/<id>.jsonl` に使う） |
+| `command` / `args` | ✓ | spawn するプロセス（例 `command: node` / `args: [--import, tsx, examples/agents/venue-arb.ts]`） |
+| `wallet` | ✓ | 秘密鍵を渡す env 変数名（`AGENT1_PRIVATE_KEY` 等。`.env.local` に置く。ローカルは未設定でも Anvil dev キーにフォールバック） |
+| `baseline` | | `true` で実力ゼロの基準ライン（noop / random）として扱う |
+| `description` | | 人間用の説明 |
+| `env` | | agent プロセスへ渡す戦略パラメータ（`ERIS_LLM_*` 等）。sim 設定キーとは別物。詳細は [LLM 駆動の自律エージェント](llm-agents.md) |

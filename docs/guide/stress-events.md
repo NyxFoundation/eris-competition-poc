@@ -13,5 +13,6 @@ stress:
 
 - `stress.events` — **値でなくレンジ**を与え過学習を抑制する（`spike`/`crash` の台形 ramp→hold→decay）。要 `run.blocks>0`。
 - victim を建てるには **full re-fork 必須**（`ARB_RPC_URL` 設定 + soft-reset 不可）。割るには crash magnitude `m > (HF0−1)/HF0`（HF0=1.10 なら m>9.1% → 例の [0.12,0.16] で確実に割れる）。breach 不能な設定は `stress_calibration_warning` を emit する。
+- victim を**建てられる**条件は `victimHf0 ≳ LT/(0.97·LTV)`（実測 Arbitrum WETH の LT=0.84 / LTV=0.80 で ≈1.08。これ未満は borrow が LTV 縁に張り付き fail-fast）。`stress.victimCount`(既定 0=無効) / `stress.victimHf0`(既定 1.10) / `stress.victimWethWei`(victim 1 体の supply) で指定する。
 - stress run（events かつ `run.blocks>0`）は**時間制限を自動無効化**しブロック数で終了する（`--seconds` が先に切れて crash 窓へ到達しない事故を回避）。
 - coordinator は `stress_schedule` / `stress_victim_hf` / `stress_liquidation` を `events.jsonl` へ emit する。liquidator agent には victim アドレスを `ERIS_LIQUIDATION_VICTIMS` で配布する。清算の帰属は agent ログの `liquidationCall`(rawTx) を一次情報にする。
