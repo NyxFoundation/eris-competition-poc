@@ -31,7 +31,7 @@ SG_NAME="${ERIS_SPOT_SG_NAME:-eris-spot-ssh}"
 OLLAMA_MODEL="${ERIS_LLM_MODEL:-gpt-oss:120b}"
 DEPLOY_ONLY="${ERIS_DEPLOY_ONLY:-}"   # 空=全 venue。例: uniswap（smoke 高速化）
 AMI_OVERRIDE="${ERIS_SPOT_AMI:-}"     # set → golden AMI モード（install/deploy/転送なし。bake-ami.sh で作る）
-DEPLOYER_DIR="${ERIS_DEPLOYER_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../eris-app-deployer" 2>/dev/null && pwd || true)}"
+DEPLOYER_DIR="${ERIS_DEPLOYER_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../deployer" 2>/dev/null && pwd || true)}"
 export AWS_DEFAULT_REGION="$REGION"
 # spot 用 AWS profile。このスクリプト(子プロセス)内だけに効く＝普段のシェルや
 # デフォルト profile には影響しない。別 profile を使うなら ERIS_AWS_PROFILE で上書き。

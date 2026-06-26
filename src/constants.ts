@@ -6,7 +6,7 @@ import { LOCAL_DEPLOYMENT } from "./constants.local.js";
 // Arbitrum One。単一フォーク上で全プロトコルを動かす。
 // アドレスは anvil-oracle-fork/bot/src/config.ts および bot/src/aave/config.ts から移植。
 //
-// ERIS_LOCAL_DEPLOY=1 のときは eris-app-deployer のローカルデプロイ済アドレス
+// ERIS_LOCAL_DEPLOY=1 のときは同梱 deployer/ のローカルデプロイ済アドレス
 // (scripts/genLocalConstants.ts が生成する constants.local.ts) を overlay する。
 // それ以外 (fork) は下の Arbitrum 既定を使う。
 // ---------------------------------------------------------------------------

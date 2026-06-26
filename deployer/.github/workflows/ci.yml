@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # 型チェック・コントラクトのコンパイル・Solidity フォーマット確認 (anvil 不要・高速)
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "1.7.1"
+
+      - run: npm ci
+
+      - name: Typecheck (tsc --noEmit)
+        run: npm run typecheck
+
+      - name: Compile shared mock contracts
+        run: forge build
+
+      - name: Check Solidity formatting
+        run: forge fmt --check
+
+  # 空の anvil へ全 DeFi プロトコルをデプロイし、vitest で E2E 検証する
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: "1.7.1"
+
+      - run: npm ci
+
+      - name: Compile shared mock contracts
+        run: forge build
+
+      - name: Prepare environment
+        run: cp .env.example .env
+
+      # 外部 vendor を準備: GMX を固定 SHA で clone+patch+yarn install、Aave を npm install。
+      # yarn (classic) は GitHub-hosted runner にプリインストール済み。
+      - name: Set up vendors (GMX / Aave)
+        run: ./scripts/setup-vendors.sh
+
+      # anvil をバックグラウンド起動し、cast で起動完了を待つ。
+      # 以降の deploy / test は MANAGE_ANVIL=false でこの外部 anvil に接続する。
+      - name: Start anvil
+        run: |
+          npm run anvil &
+          until cast block-number --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1; do sleep 1; done
+
+      # 全プロトコルをデプロイ + seed。deployments.json を出力 (--exit は付けない)。
+      - name: Deploy all protocols
+        run: MANAGE_ANVIL=false npm run deploy -- --keep-fresh
+
+      # 起動済み anvil + deployments.json に対して vitest で検証 (A/B/C/E)。
+      # 失敗時はどのプロトコルのどの検証が落ちたか per-test で分かる。
+      - name: E2E verification (vitest)
+        run: MANAGE_ANVIL=false npm run test:e2e
+
+      # 失敗調査用にデプロイ結果を保存 (成功・失敗どちらでも)
+      - name: Upload deployments.json
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployments
+          path: deployments/deployments.json
+          if-no-files-found: ignore

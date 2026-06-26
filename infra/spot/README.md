@@ -27,7 +27,7 @@ spot 上で自己完結して動く。**S3 / SSM / IAM ロールは一切不要*
 ## 前提
 
 - 手元に AWS CLI 認証 ＋ `ssh` / `tar`。スクリプトは **`eris` profile を自動使用**（`ERIS_AWS_PROFILE` で上書き可）。普段のデフォルト profile には影響しない。`aws --profile eris sts get-caller-identity` が通ること（現状アカウント `075096050160` / `user/eris-simulator`）。この principal に `infra/spot/runner-policy.json` 相当の権限が要る
-- poc と deployer が sibling 配置（`../eris-app-deployer`）。違う場所なら `ERIS_DEPLOYER_DIR`
+- deployer は本 repo 同梱（`deployer/`）。別の場所を使うなら `ERIS_DEPLOYER_DIR`
 - deployer は `npm run deploy` 単体で anvil 起動＋全 protocol デプロイできる状態
 
 ## 一度だけ: key pair + security group
@@ -73,7 +73,7 @@ OLLAMA_API_KEY=ollama-xxxx infra/spot/run-spot.sh --watch -- \
 | `ERIS_LLM_MODEL` | `gpt-oss:120b` | ollama cloud モデル |
 | `ERIS_DEPLOY_ONLY` | 空=全5venue | deployer の `--only`。例 `uniswap`（aave/gmx の hardhat-deploy を回避＝高速 smoke） |
 | `ERIS_SPOT_AMI` | 空 | **golden AMI モード**。set すると install/deploy/3GB転送なしで起動（→ golden AMI 節） |
-| `ERIS_DEPLOYER_DIR` | `../eris-app-deployer` | deployer repo パス |
+| `ERIS_DEPLOYER_DIR` | `deployer/`（同梱） | deployer ディレクトリパス |
 | `ERIS_SPOT_KEY` / `ERIS_SPOT_KEY_PATH` | `eris-spot` / `~/.ssh/eris-spot` | 鍵名・パス |
 
 ## golden AMI（高速 launch・推奨）

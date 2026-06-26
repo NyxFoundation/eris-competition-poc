@@ -1,0 +1,28 @@
+{
+  "name": "eris-app-deployer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "空の anvil チェーンへ Uniswap V3 / Balancer V2 / Aave V3 / Curve / GMX V2 をゼロからデプロイするオーケストレーター",
+  "scripts": {
+    "anvil": "anvil --code-size-limit 50000 --base-fee 0 --gas-limit 3000000000 --port 8545 --accounts 10 --balance 1000000",
+    "build:contracts": "forge build",
+    "deploy": "tsx src/index.ts",
+    "test:e2e": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@balancer-labs/v2-deployments": "^3.2.0",
+    "@types/node": "^22.7.0",
+    "@uniswap/v3-core": "^1.0.1",
+    "@uniswap/v3-periphery": "^1.4.4",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.2.4"
+  }
+}
