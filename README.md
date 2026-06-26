@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://erisnet.xyz/">erisnet.xyz</a> &nbsp;·&nbsp;
-  <a href="#クイックスタートローカルデプロイモード非fork">クイックスタート</a> &nbsp;·&nbsp;
+  <a href="#クイックスタート">クイックスタート</a> &nbsp;·&nbsp;
   <a href="#ドキュメント">ドキュメント</a>
 </p>
 
@@ -45,25 +45,11 @@
 - **LLM 駆動の自律エージェント** — 戦略を実行時に LLM が生成・改訂する（手書きのトレードロジック無し）。
 - **fork 無しのローカルデプロイモード** — fork backend への cold state RPC 往復（fork RPC レイテンシ）を避け、マルチアセット（WETH/WBTC）も動く。
 
-## アーキテクチャ（環境とエージェント実行の分離）
-
-```
-環境プロセス（src/realtime/coordinator.ts = 環境デーモン + 採点者）   agent プロセス × N（完全独立）
-  ・anvil ライフサイクル（setup/interval mining）                    ・env で受領: RPC URL / 自分の秘密鍵 /
-  ・fair price 生成(Rng(seed)) → PriceFeed/oracle を毎ブロック更新       PriceFeed アドレス / runId・ログ出力先
-  ・flow bot 注文の relay 送信（市場を動かす）                        ・自分のペースでブロック購読・state 読取
-  ・GMX keeper（注文執行）                                           ・自分で署名し直接送信（nonce 自己管理）
-  ・採点: run 後に歴史ブロック読取で価値系列を一括再構成               ・runs/<id>/agents/<id>.jsonl へ自己申告ログ
-         └──────────── 同じ mempool。ブロック内順序は anvil --order fees ────────────┘
-```
-
-- **fair price はオンチェーン配布**（`contracts/PriceFeed.sol` + `src/realtime/priceFeed.ts`）。書込 tx は次ブロック着弾なので情報は全員等しく 1 ブロック遅れる（仕様）。
-- **採点は run 後再構成**（`src/realtime/reconstruct.ts`）— blockNumber 指定の Multicall3 で全 agent 同一断面の価値系列を `events.jsonl` に書き、`runs/<id>/summary.json` に集計する。
-- **ルール執行は事後検出**（`src/postRunCheck.ts`）— `blocks.csv` から fee 上限超過等を検査し違反 run を `violations` に記録する。
+アーキテクチャ（環境とエージェント実行の分離）の詳細は [アーキテクチャ](docs/guide/architecture.md) を参照。
 
 ---
 
-## クイックスタート（ローカルデプロイモード・非fork）
+## クイックスタート
 
 Arbitrum を fork せず、本 repo 同梱の [`deployer/`](deployer/) がローカル anvil 上に全 protocol を deploy したものに接続する。fork RPC レイテンシを避けられ、マルチアセット（WETH/WBTC）も動く。詳細は [ローカルリアルタイムシミュレーション](docs/guide/local-deploy.md)。
 
@@ -109,6 +95,7 @@ npm run sim:realtime -- --local-deploy --agents agents.local.json \
 
 | ドキュメント | 内容 |
 |---|---|
+| [アーキテクチャ](docs/guide/architecture.md) | 環境（市場機構＋採点者）とエージェント実行の分離・fair price 配布・採点の再構成 |
 | [プロトコルとアクション](docs/guide/protocols-and-actions.md) | 各 venue のアクション・ステーブルコイン会計・オラクル制御・GMX 非同期実行 |
 | [設定（config/local.yaml）](docs/guide/configuration.md) | YAML 単一ソースの設定・セクション・ロスターの書き方 |
 | [ローカルリアルタイムシミュレーション](docs/guide/local-deploy.md) | 非fork のローカルデプロイモードの前提・手順・主要設定・トラブルシュート |
