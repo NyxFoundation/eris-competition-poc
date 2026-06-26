@@ -19,7 +19,6 @@ examples/flow/      flow bot（market-maker）
 config/             YAML 設定（example / claude-llm / all18-mixed）
 docs/guide/         利用ガイド（本ディレクトリ）
 docs/adr/           アーキテクチャ意思決定記録（ADR 0001–0013）
-infra/spot/         spot EC2 runner（golden AMI / SSH モデル）
-scripts/            ロスター生成 / constants 生成 / 戦略静的検査
+scripts/            constants 生成（gen:local-constants）/ 戦略静的検査（check:strategy）
 runs/               run 出力（summary.json / events.jsonl / blocks.csv / agents/<id>.jsonl）
 ```
