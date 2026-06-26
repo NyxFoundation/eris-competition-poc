@@ -30,7 +30,7 @@
   </a>
 </p>
 
-> **Markets ship behavior.** 監査の箇条書きではなく、敵対的なマーケットフローのなかで AMM の弱点・清算経路・オラクル遅延を実際の振る舞いとして surface させる。これは [erisnet.xyz](https://erisnet.xyz/) が掲げる *Agentic Financial Simulation Layer* の、ローカルで動く**競争シミュレータ MVP**（Proof of Concept）。
+> **Markets ship behavior（市場は挙動として現れる）.** プロトコルの本当の弱点は、監査レポートのチェック項目を眺めるだけでは見つけきれない。多数の自律エージェント（取引 bot）を実際に市場で競わせて初めて、AMM の価格のゆがみ・清算の連鎖・オラクル更新の遅れといった弱点が「現実の挙動」として表に出てくる。Eris はそれをローカルで再現する競争シミュレータの MVP（実証版）。[erisnet.xyz](https://erisnet.xyz/) が掲げる *Agentic Financial Simulation Layer*（自律エージェントが金融プロトコルを継続的にストレステストする環境）のローカル版にあたる。
 
 ローカル anvil 上に全 protocol を deploy したマルチプロトコル DeFi 環境で動く戦略シミュレータ。複数の自律エージェントが同じ mempool で互いに競い、コーディネータが市場を駆動して run 後に価値系列を再構成・採点する。エージェントには RPC・秘密鍵・pending トランザクション・txpool を一切渡さず、**確定済み状態の観測のみ**を与える。
 
