@@ -1,0 +1,22 @@
+# config/claude-llm.yaml — LLM 駆動 agent（旧 agents.claude-llm.json を統合）
+# 使い方: OLLAMA_API_KEY=... npm run sim:realtime -- --config config/claude-llm.yaml
+# 秘密 OLLAMA_API_KEY は .env.local（親シェル）。agent の env は LLM バックエンド設定。
+run:
+  protocols: [uniswap, balancer, curve, gmx, aave]
+  blocks: 60
+  seconds: 0
+  seed: 1
+agents:
+  - id: claude-llm
+    command: node
+    args:
+      - --import
+      - tsx
+      - examples/agents/claude-llm.ts
+    wallet: AGENT0_PRIVATE_KEY
+    env:
+      ERIS_LLM_AUTH: ollama
+      ERIS_LLM_MODEL: gpt-oss:120b
+      ERIS_OLLAMA_BASE_URL: https://ollama.com/api
+      ERIS_OLLAMA_MAX_RETRIES: "3"
+    description: Ollama Cloud autonomous strategist (NL strategy + TS executor, async revisions). Backend/model are set via env above; only the secret OLLAMA_API_KEY must come from the parent shell (or .env). Set ERIS_LLM_MOCK=1 to use the offline mock.

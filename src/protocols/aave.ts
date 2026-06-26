@@ -565,7 +565,7 @@ export const aaveAdapter: ProtocolAdapter = {
       ctx.oracle.aaveAggregators[asset.toLowerCase()] = aggregators[i];
     });
 
-    // eris-app-deployer の shared WETH/USDC reserve は supply/borrow を有効化しているが、
+    // 同梱 deployer/ の shared WETH/USDC reserve は supply/borrow を有効化しているが、
     // flashloan flag は既定 false のため FlashArb が Aave error 91 で止まる。
     await enableLocalFlashLoaning(ctx);
     // local realtime setup は run ごとに snapshot へ戻るため、flashloan 用の pool liquidity

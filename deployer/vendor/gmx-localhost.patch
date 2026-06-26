@@ -1,0 +1,465 @@
+diff --git a/config/feeDistributor.ts b/config/feeDistributor.ts
+index 5044d49..19ce7db 100644
+--- a/config/feeDistributor.ts
++++ b/config/feeDistributor.ts
+@@ -7,6 +7,7 @@ export type FeeDistributorConfig = {
+ export default async function (hre: HardhatRuntimeEnvironment): Promise<FeeDistributorConfig> {
+   const config: { [network: string]: FeeDistributorConfig } = {
+     hardhat: {},
++    localhost: {},
+     arbitrum: {
+       gmx: "0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a",
+       esGmx: "0xf42Ae1D54fd613C9bb14810b0588FaAa09a426cA",
+diff --git a/config/general.ts b/config/general.ts
+index e58afec..b473bf8 100644
+--- a/config/general.ts
++++ b/config/general.ts
+@@ -3,7 +3,7 @@ import { HardhatRuntimeEnvironment } from "hardhat/types";
+ import { decimalToFloat, percentageToFloat, expandDecimals } from "../utils/math";
+ 
+ export default async function ({ network }: HardhatRuntimeEnvironment) {
+-  if (network.name === "hardhat") {
++  if ((network.name === "hardhat" || network.name === "localhost")) {
+     // Note that this is only for the hardhat config, the config for all
+     // other networks is separate from this
+     return {
+diff --git a/config/layerZero.ts b/config/layerZero.ts
+index 3d0be7c..ebefff4 100644
+--- a/config/layerZero.ts
++++ b/config/layerZero.ts
+@@ -7,6 +7,7 @@ export type LayerZeroEndpointConfig = {
+ export default async function (hre: HardhatRuntimeEnvironment): Promise<LayerZeroEndpointConfig> {
+   const config: { [network: string]: LayerZeroEndpointConfig } = {
+     hardhat: {},
++    localhost: {},
+     arbitrum: {
+       endpoint: "0x1a44076050125825900e736c501f859c50fE728c",
+     },
+diff --git a/config/markets.ts b/config/markets.ts
+index 8fad779..74f5797 100644
+--- a/config/markets.ts
++++ b/config/markets.ts
+@@ -5072,7 +5072,7 @@ function fillLongShortValues(market, key, longKey, shortKey) {
+ export default async function (hre: HardhatRuntimeEnvironment) {
+   const markets = config[hre.network.name];
+   const tokens = await hre.gmx.getTokens();
+-  const defaultMarketConfig = hre.network.name === "hardhat" ? hardhatBaseMarketConfig : baseMarketConfig;
++  const defaultMarketConfig = (hre.network.name === "hardhat" || hre.network.name === "localhost") ? hardhatBaseMarketConfig : baseMarketConfig;
+   if (markets) {
+     const seen = new Set<string>();
+     for (const market of markets) {
+diff --git a/config/oracle.ts b/config/oracle.ts
+index 9cc285f..b53b1c6 100644
+--- a/config/oracle.ts
++++ b/config/oracle.ts
+@@ -35,6 +35,7 @@ export default async function (hre: HardhatRuntimeEnvironment): Promise<OracleCo
+       maxOraclePriceAge,
+       maxAtomicOraclePriceAge,
+       maxOracleTimestampRange,
++      chainlinkPaymentToken: "0x99bbA657f2BbC93c02D617f8bA121cB8Fc104Acf",
+       maxRefPriceDeviationFactor: decimalToFloat(5, 1), // 50%
+       edgeOracleSigner: "0x1C498E2FE362e489A5Aac71690f9121914e0d55e",
+     },
+diff --git a/config/roles.ts b/config/roles.ts
+index 3d05606..e666204 100644
+--- a/config/roles.ts
++++ b/config/roles.ts
+@@ -262,7 +262,7 @@ export default async function (hre: HardhatRuntimeEnvironment): Promise<RolesCon
+   }
+ 
+   return {
+-    roles: roles[hre.network.name],
++    roles: roles[hre.network.name] || roles.hardhat,
+     requiredRolesForContracts,
+   };
+ }
+diff --git a/config/tokens.ts b/config/tokens.ts
+index ff90b31..8e06475 100644
+--- a/config/tokens.ts
++++ b/config/tokens.ts
+@@ -1788,6 +1788,11 @@ const config: {
+       transferGasLimit: 200 * 1000,
+       deploy: true,
+     },
++    ESGMX: {
++      decimals: 18,
++      transferGasLimit: 200 * 1000,
++      deploy: true,
++    },
+     WBTC: {
+       decimals: 8,
+       transferGasLimit: 200 * 1000,
+diff --git a/config/vaultV1.ts b/config/vaultV1.ts
+index 8148b20..8b341eb 100644
+--- a/config/vaultV1.ts
++++ b/config/vaultV1.ts
+@@ -7,6 +7,7 @@ export type VaultV1Config = {
+ export default async function (hre: HardhatRuntimeEnvironment): Promise<VaultV1Config> {
+   const config: { [network: string]: VaultV1Config } = {
+     hardhat: {},
++    localhost: {},
+     arbitrum: {
+       vaultV1: "0x489ee077994B6658eAfA855C308275EAd8097C4A",
+       gmx: "0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a",
+diff --git a/deploy/configureOracleTokens.ts b/deploy/configureOracleTokens.ts
+index 2454b44..7ef8e15 100644
+--- a/deploy/configureOracleTokens.ts
++++ b/deploy/configureOracleTokens.ts
+@@ -8,7 +8,7 @@ const func = async ({ gmx, deployments, network }: HardhatRuntimeEnvironment) =>
+   const tokens = await gmx.getTokens();
+   const { get } = deployments;
+ 
+-  const defaultOracleProvider: OracleProvider = network.name === "hardhat" ? "gmOracle" : "chainlinkDataStream";
++  const defaultOracleProvider: OracleProvider = (network.name === "hardhat" || network.name === "localhost") ? "gmOracle" : "chainlinkDataStream";
+   const oracleProviders = {
+     gmOracle: (await get("GmOracleProvider")).address,
+     chainlinkDataStream: (await get("ChainlinkDataStreamProvider")).address,
+diff --git a/deploy/configureRoles.ts b/deploy/configureRoles.ts
+index 2db8969..8b169cf 100644
+--- a/deploy/configureRoles.ts
++++ b/deploy/configureRoles.ts
+@@ -28,7 +28,7 @@ const func = async ({ gmx, network }) => {
+     }
+   }
+ 
+-  const _rolesToRemove = rolesToRemove[network.name];
++  const _rolesToRemove = rolesToRemove[network.name] || [];
+   for (const { member, role } of _rolesToRemove) {
+     await revokeRoleIfGranted({ address: member }, role);
+   }
+diff --git a/deploy/deployAndConfigureTestGlv.ts b/deploy/deployAndConfigureTestGlv.ts
+index 3bfe29f..9a6cf6a 100644
+--- a/deploy/deployAndConfigureTestGlv.ts
++++ b/deploy/deployAndConfigureTestGlv.ts
+@@ -88,7 +88,7 @@ const func = async ({ deployments, getNamedAccounts, gmx }: HardhatRuntimeEnviro
+ };
+ 
+ func.skip = async ({ network }) => {
+-  return network.name !== "hardhat";
++  return (network.name !== "hardhat" && network.name !== "localhost");
+ };
+ func.runAtTheEnd = true;
+ func.tags = ["Glv"];
+diff --git a/deploy/deployAutoCancelSyncer.ts b/deploy/deployAutoCancelSyncer.ts
+index 936689b..a767c36 100644
+--- a/deploy/deployAutoCancelSyncer.ts
++++ b/deploy/deployAutoCancelSyncer.ts
+@@ -16,7 +16,7 @@ const func = createDeployFunction({
+ });
+ 
+ func.skip = async ({ network }) => {
+-  return network.name !== "hardhat";
++  return (network.name !== "hardhat" && network.name !== "localhost");
+ };
+ 
+ export default func;
+diff --git a/deploy/deployChainlinkDataStreamProvider.ts b/deploy/deployChainlinkDataStreamProvider.ts
+index 4876748..9ca59f3 100644
+--- a/deploy/deployChainlinkDataStreamProvider.ts
++++ b/deploy/deployChainlinkDataStreamProvider.ts
+@@ -10,7 +10,7 @@ const func = createDeployFunction({
+   getDeployArgs: async ({ dependencyContracts, gmx, network, get }) => {
+     const oracleConfig = await gmx.getOracle();
+     let dataStreamFeedVerifierAddress = oracleConfig.dataStreamFeedVerifier;
+-    if (network.name === "hardhat") {
++    if ((network.name === "hardhat" || network.name === "localhost")) {
+       const dataStreamFeedVerifier = await get("MockDataStreamVerifier");
+       dataStreamFeedVerifierAddress = dataStreamFeedVerifier.address;
+     }
+diff --git a/deploy/deployConfigSyncer.ts b/deploy/deployConfigSyncer.ts
+index 3b87bb6..96320c3 100644
+--- a/deploy/deployConfigSyncer.ts
++++ b/deploy/deployConfigSyncer.ts
+@@ -9,7 +9,7 @@ const func = createDeployFunction({
+   getDeployArgs: async ({ dependencyContracts, gmx, network, get }) => {
+     const riskOracleConfig = await gmx.getRiskOracle();
+     let riskOracleAddress = riskOracleConfig.riskOracle;
+-    if (network.name === "hardhat") {
++    if ((network.name === "hardhat" || network.name === "localhost")) {
+       const riskOracle = await get("MockRiskOracle");
+       riskOracleAddress = riskOracle.address;
+     }
+diff --git a/deploy/deployFeeDistributor.ts b/deploy/deployFeeDistributor.ts
+index cbd7ec4..ea91be2 100644
+--- a/deploy/deployFeeDistributor.ts
++++ b/deploy/deployFeeDistributor.ts
+@@ -19,7 +19,7 @@ const func = createDeployFunction({
+     let gmxAddress = feeDistributorConfig.gmx;
+     let esGmxAddress = feeDistributorConfig.esGmx;
+     let wntAddress = feeDistributorConfig.wnt;
+-    if (network.name === "hardhat") {
++    if ((network.name === "hardhat" || network.name === "localhost")) {
+       const tokens = await hre.gmx.getTokens();
+       gmxAddress = tokens.GMX.address;
+       esGmxAddress = tokens.ESGMX.address;
+diff --git a/deploy/deployFeeHandler.ts b/deploy/deployFeeHandler.ts
+index 4fcd84d..5351f61 100644
+--- a/deploy/deployFeeHandler.ts
++++ b/deploy/deployFeeHandler.ts
+@@ -12,7 +12,7 @@ const func = createDeployFunction({
+     const vaultV1Config = await gmx.getVaultV1();
+     let vaultV1Address = vaultV1Config.vaultV1;
+     let gmxAddress = vaultV1Config.gmx;
+-    if (network.name === "hardhat") {
++    if ((network.name === "hardhat" || network.name === "localhost")) {
+       const vaultV1 = await get("MockVaultV1");
+       const tokens = await hre.gmx.getTokens();
+       vaultV1Address = vaultV1.address;
+diff --git a/deploy/deployMockDataStreamFeedVerifier.ts b/deploy/deployMockDataStreamFeedVerifier.ts
+index 894c8b9..dc88aea 100644
+--- a/deploy/deployMockDataStreamFeedVerifier.ts
++++ b/deploy/deployMockDataStreamFeedVerifier.ts
+@@ -6,7 +6,7 @@ const func = createDeployFunction({
+ });
+ 
+ func.skip = async ({ network }: HardhatRuntimeEnvironment) => {
+-  const shouldDeployForNetwork = ["hardhat"];
++  const shouldDeployForNetwork = ["hardhat", "localhost"];
+   return !shouldDeployForNetwork.includes(network.name);
+ };
+ 
+diff --git a/deploy/deployMockEndpointV2.ts b/deploy/deployMockEndpointV2.ts
+index b1bc056..ab3c91d 100644
+--- a/deploy/deployMockEndpointV2.ts
++++ b/deploy/deployMockEndpointV2.ts
+@@ -10,7 +10,7 @@ const func = createDeployFunction({
+ });
+ 
+ func.skip = async ({ network }: HardhatRuntimeEnvironment) => {
+-  const shouldDeployForNetwork = ["hardhat"];
++  const shouldDeployForNetwork = ["hardhat", "localhost"];
+   return !shouldDeployForNetwork.includes(network.name);
+ };
+ 
+diff --git a/deploy/deployMockMultichainReaderOriginator.ts b/deploy/deployMockMultichainReaderOriginator.ts
+index 1bd47d0..0a07725 100644
+--- a/deploy/deployMockMultichainReaderOriginator.ts
++++ b/deploy/deployMockMultichainReaderOriginator.ts
+@@ -16,7 +16,7 @@ const func = createDeployFunction({
+ });
+ 
+ func.skip = async ({ network }: HardhatRuntimeEnvironment) => {
+-  const shouldDeployForNetwork = ["hardhat"];
++  const shouldDeployForNetwork = ["hardhat", "localhost"];
+   return !shouldDeployForNetwork.includes(network.name);
+ };
+ 
+diff --git a/deploy/deployMockOracleProvider.ts b/deploy/deployMockOracleProvider.ts
+index 41db0d9..6b87d8a 100644
+--- a/deploy/deployMockOracleProvider.ts
++++ b/deploy/deployMockOracleProvider.ts
+@@ -6,7 +6,7 @@ const func = createDeployFunction({
+ });
+ 
+ func.skip = async ({ network }: HardhatRuntimeEnvironment) => {
+-  const shouldDeployForNetwork = ["hardhat"];
++  const shouldDeployForNetwork = ["hardhat", "localhost"];
+   return !shouldDeployForNetwork.includes(network.name);
+ };
+ 
+diff --git a/deploy/deployMockRiskOracle.ts b/deploy/deployMockRiskOracle.ts
+index 918d9a4..8fb1418 100644
+--- a/deploy/deployMockRiskOracle.ts
++++ b/deploy/deployMockRiskOracle.ts
+@@ -12,7 +12,7 @@ const func = createDeployFunction({
+ });
+ 
+ func.skip = async ({ network }: HardhatRuntimeEnvironment) => {
+-  const shouldDeployForNetwork = ["hardhat"];
++  const shouldDeployForNetwork = ["hardhat", "localhost"];
+   return !shouldDeployForNetwork.includes(network.name);
+ };
+ 
+diff --git a/deploy/deployMockStargatePoolNative.ts b/deploy/deployMockStargatePoolNative.ts
+index 4bd200c..4e4ad6e 100644
+--- a/deploy/deployMockStargatePoolNative.ts
++++ b/deploy/deployMockStargatePoolNative.ts
+@@ -12,7 +12,7 @@ const func = createDeployFunction({
+ });
+ 
+ func.skip = async ({ network }: HardhatRuntimeEnvironment) => {
+-  const shouldDeployForNetwork = ["hardhat"];
++  const shouldDeployForNetwork = ["hardhat", "localhost"];
+   return !shouldDeployForNetwork.includes(network.name);
+ };
+ 
+diff --git a/deploy/deployMockStargatePoolUsdc.ts b/deploy/deployMockStargatePoolUsdc.ts
+index 9d9306d..4970d4e 100644
+--- a/deploy/deployMockStargatePoolUsdc.ts
++++ b/deploy/deployMockStargatePoolUsdc.ts
+@@ -12,7 +12,7 @@ const func = createDeployFunction({
+ });
+ 
+ func.skip = async ({ network }: HardhatRuntimeEnvironment) => {
+-  const shouldDeployForNetwork = ["hardhat"];
++  const shouldDeployForNetwork = ["hardhat", "localhost"];
+   return !shouldDeployForNetwork.includes(network.name);
+ };
+ 
+diff --git a/deploy/deployMockTimelockV1.ts b/deploy/deployMockTimelockV1.ts
+index a911fb0..8077028 100644
+--- a/deploy/deployMockTimelockV1.ts
++++ b/deploy/deployMockTimelockV1.ts
+@@ -23,7 +23,7 @@ const func = createDeployFunction({
+ });
+ 
+ func.skip = async ({ network }: HardhatRuntimeEnvironment) => {
+-  const shouldDeployForNetwork = ["arbitrumSepolia", "hardhat"];
++  const shouldDeployForNetwork = ["arbitrumSepolia", "hardhat", "localhost"];
+   return !shouldDeployForNetwork.includes(network.name);
+ };
+ 
+diff --git a/deploy/deployMockVaultGovV1.ts b/deploy/deployMockVaultGovV1.ts
+index 9298a9f..1cfa62a 100644
+--- a/deploy/deployMockVaultGovV1.ts
++++ b/deploy/deployMockVaultGovV1.ts
+@@ -6,7 +6,7 @@ const func = createDeployFunction({
+ });
+ 
+ func.skip = async ({ network }: HardhatRuntimeEnvironment) => {
+-  const shouldDeployForNetwork = ["hardhat"];
++  const shouldDeployForNetwork = ["hardhat", "localhost"];
+   return !shouldDeployForNetwork.includes(network.name);
+ };
+ 
+diff --git a/deploy/deployMockVaultV1.ts b/deploy/deployMockVaultV1.ts
+index 6dcd7c4..bd33eb5 100644
+--- a/deploy/deployMockVaultV1.ts
++++ b/deploy/deployMockVaultV1.ts
+@@ -12,7 +12,7 @@ const func = createDeployFunction({
+ });
+ 
+ func.skip = async ({ network }: HardhatRuntimeEnvironment) => {
+-  const shouldDeployForNetwork = ["hardhat"];
++  const shouldDeployForNetwork = ["hardhat", "localhost"];
+   return !shouldDeployForNetwork.includes(network.name);
+ };
+ 
+diff --git a/deploy/deployMultichainReader.ts b/deploy/deployMultichainReader.ts
+index 57fc97b..e1e69fc 100644
+--- a/deploy/deployMultichainReader.ts
++++ b/deploy/deployMultichainReader.ts
+@@ -9,7 +9,7 @@ const func = createDeployFunction({
+   getDeployArgs: async ({ dependencyContracts, gmx, network, get }) => {
+     const layerZeroConfig = await gmx.getLayerZeroEndpoint();
+     let endpointAddress = layerZeroConfig.endpoint;
+-    if (network.name === "hardhat") {
++    if ((network.name === "hardhat" || network.name === "localhost")) {
+       const endpoint = await get("MockEndpointV2");
+       endpointAddress = endpoint.address;
+     }
+diff --git a/deploy/deployReferralStorage.ts b/deploy/deployReferralStorage.ts
+index 53a6a71..9010cb5 100644
+--- a/deploy/deployReferralStorage.ts
++++ b/deploy/deployReferralStorage.ts
+@@ -32,7 +32,7 @@ const func = createDeployFunction({
+ });
+ 
+ func.skip = async ({ network }: HardhatRuntimeEnvironment) => {
+-  const shouldDeployForNetwork = ["avalancheFuji", "arbitrumSepolia", "hardhat"];
++  const shouldDeployForNetwork = ["avalancheFuji", "arbitrumSepolia", "hardhat", "localhost"];
+   return !shouldDeployForNetwork.includes(network.name);
+ };
+ 
+diff --git a/deploy/deployTestTokens.ts b/deploy/deployTestTokens.ts
+index 58b1b3e..ee2c030 100644
+--- a/deploy/deployTestTokens.ts
++++ b/deploy/deployTestTokens.ts
+@@ -1,4 +1,4 @@
+-import { setBalance } from "@nomicfoundation/hardhat-network-helpers";
++import { setBalance } from "../utils/setBalanceCompat";
+ import { HardhatRuntimeEnvironment } from "hardhat/types";
+ import { TokenConfig } from "../config/tokens";
+ 
+diff --git a/deploy/deployTimestampInitializer.ts b/deploy/deployTimestampInitializer.ts
+index c999a55..348ba67 100644
+--- a/deploy/deployTimestampInitializer.ts
++++ b/deploy/deployTimestampInitializer.ts
+@@ -17,7 +17,7 @@ const func = createDeployFunction({
+ });
+ 
+ func.skip = async ({ network }: HardhatRuntimeEnvironment) => {
+-  return network.name !== "hardhat";
++  return (network.name !== "hardhat" && network.name !== "localhost");
+ };
+ 
+ export default func;
+diff --git a/deploy/fundAccounts.ts b/deploy/fundAccounts.ts
+index a4ac8b4..baff5d8 100644
+--- a/deploy/fundAccounts.ts
++++ b/deploy/fundAccounts.ts
+@@ -1,5 +1,5 @@
+ import { HardhatRuntimeEnvironment } from "hardhat/types";
+-import { setBalance } from "@nomicfoundation/hardhat-network-helpers";
++import { setBalance } from "../utils/setBalanceCompat";
+ import { expandDecimals } from "../utils/math";
+ 
+ const func = async ({ getNamedAccounts, deployments }: HardhatRuntimeEnvironment) => {
+diff --git a/hardhat.config.ts b/hardhat.config.ts
+index 8ca5e8c..c106955 100644
+--- a/hardhat.config.ts
++++ b/hardhat.config.ts
+@@ -200,6 +200,7 @@ const config: HardhatUserConfig = {
+       chainId: Number(process.env.FORK_ID) || 42161, // default to Arbitrum One
+     },
+     localhost: {
++      chainId: 31337, // anvil default。合成トークンアドレス計算で chainId が必須
+       saveDeployments: true,
+     },
+     arbitrum: {
+diff --git a/scripts/updateGeneralConfigUtils.ts b/scripts/updateGeneralConfigUtils.ts
+index fc0adfe..73860c1 100644
+--- a/scripts/updateGeneralConfigUtils.ts
++++ b/scripts/updateGeneralConfigUtils.ts
+@@ -357,7 +357,7 @@ const getConfigItems = async (generalConfig, oracleConfig) => {
+     label: `isRelayFeeExcluded ${layerZeroProvider.address}`,
+   });
+ 
+-  if (network.name != "hardhat") {
++  if ((network.name != "hardhat" && network.name != "localhost")) {
+     for (const [multichainProvider, enabled] of Object.entries(generalConfig.multichainProviders)) {
+       configItems.push({
+         type: "bool",
+diff --git a/scripts/updateMarketConfigUtils.ts b/scripts/updateMarketConfigUtils.ts
+index 866d493..735b65f 100644
+--- a/scripts/updateMarketConfigUtils.ts
++++ b/scripts/updateMarketConfigUtils.ts
+@@ -716,7 +716,7 @@ export async function updateMarketConfig({
+   includePositionImpact = false,
+   includeMaxOpenInterest = false,
+ }) {
+-  if (!["arbitrumGoerli", "avalancheFuji", "hardhat"].includes(hre.network.name)) {
++  if (!["arbitrumGoerli", "avalancheFuji", "hardhat", "localhost"].includes(hre.network.name)) {
+     const { errors } = await validateMarketConfigs();
+     if (errors.length !== 0) {
+       throw new Error("Invalid market configs");
+diff --git a/utils/deploy.ts b/utils/deploy.ts
+index b16bd7b..61ef57a 100644
+--- a/utils/deploy.ts
++++ b/utils/deploy.ts
+@@ -148,7 +148,7 @@ function getDeployment(contractName: string, network: string) {
+ export function skipHandlerFunction(contractName: string): (env: HardhatRuntimeEnvironment) => Promise<boolean> {
+   return async function skip(env: HardhatRuntimeEnvironment) {
+     const tags = env.deployTags?.split(",") ?? [];
+-    if (tags.includes(contractName) || hre.network.name === "hardhat") {
++    if (tags.includes(contractName) || (hre.network.name === "hardhat" || hre.network.name === "localhost")) {
+       return false;
+     }
+     const shouldSkip = process.env.SKIP_AUTO_HANDLER_REDEPLOYMENT == "true" ? true : false;
+diff --git a/utils/setBalanceCompat.ts b/utils/setBalanceCompat.ts
+new file mode 100644
+index 0000000..ec10fe7
+--- /dev/null
++++ b/utils/setBalanceCompat.ts
+@@ -0,0 +1,11 @@
++// anvil 互換の setBalance。
++// @nomicfoundation/hardhat-network-helpers の setBalance は接続先が
++// Hardhat Network でないと拒否するため、anvil でも使える生 RPC
++// (hardhat_setBalance / anvil_setBalance のエイリアス) を直接叩く。
++import { network } from "hardhat";
++import { BigNumberish } from "ethers";
++import { hexValue } from "ethers/lib/utils";
++
++export async function setBalance(address: string, value: BigNumberish) {
++  await network.provider.send("hardhat_setBalance", [address, hexValue(value)]);
++}

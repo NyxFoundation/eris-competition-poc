@@ -12,7 +12,7 @@
 # 前提: 一度だけ infra/spot/setup-once.sh（key pair + SG）を実行済み。
 #       OLLAMA_API_KEY を env で渡すこと（box に SSH で送付。AWS には置かない）。
 #
-# 使い方（設定は CLI フラグ。env は退役。設定 YAML は committed の eris.config.example.yaml が既定）:
+# 使い方（設定は CLI フラグ。env は退役。設定 YAML は committed の config/example.yaml が既定）:
 #   OLLAMA_API_KEY=ollama-xxxx infra/spot/run-spot.sh --watch -- \
 #     'npm run discrimination -- --regimes base,bull --replications 5 --blocks 120 --agents agents.local.json'
 #   infra/spot/run-spot.sh --type c7i.2xlarge --keep -- 'npm run evaluate -- --agents <config>'
@@ -31,7 +31,7 @@ SG_NAME="${ERIS_SPOT_SG_NAME:-eris-spot-ssh}"
 OLLAMA_MODEL="${ERIS_LLM_MODEL:-gpt-oss:120b}"
 DEPLOY_ONLY="${ERIS_DEPLOY_ONLY:-}"   # 空=全 venue。例: uniswap（smoke 高速化）
 AMI_OVERRIDE="${ERIS_SPOT_AMI:-}"     # set → golden AMI モード（install/deploy/転送なし。bake-ami.sh で作る）
-DEPLOYER_DIR="${ERIS_DEPLOYER_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../eris-app-deployer" 2>/dev/null && pwd || true)}"
+DEPLOYER_DIR="${ERIS_DEPLOYER_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../deployer" 2>/dev/null && pwd || true)}"
 export AWS_DEFAULT_REGION="$REGION"
 # spot 用 AWS profile。このスクリプト(子プロセス)内だけに効く＝普段のシェルや
 # デフォルト profile には影響しない。別 profile を使うなら ERIS_AWS_PROFILE で上書き。

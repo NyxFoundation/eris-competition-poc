@@ -1,0 +1,24 @@
+node_modules/
+out/
+cache/
+broadcast/
+.env
+deployments/deployments.json
+state.json
+*.log
+
+# vendor 内の hardhat 生成物
+vendor/**/artifacts/
+vendor/**/cache/
+vendor/**/deployments/localhost/
+vendor/**/node_modules/
+vendor/aave/deployments/
+vendor/aave/typechain-types/
+
+# 外部リポジトリのクローンは追跡しない (scripts/setup-vendors.sh で再現)
+#  - gmx-src: localhost 対応は vendor/gmx-localhost.patch として保持
+#  - curve-src: ビルド専用 (実行時は vendor/curve の bytecode を使用)
+#  - twocrypto-src: 同上 (lite-0.3.10 を Docker vyper 0.3.10 でビルド → vendor/curve)
+vendor/gmx-src/
+vendor/curve-src/
+vendor/twocrypto-src/

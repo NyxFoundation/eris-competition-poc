@@ -1,15 +1,15 @@
 /**
- * deployments.json (eris-app-deployer のローカルデプロイ出力) → src/constants.local.ts 生成。
+ * deployments.json (同梱 deployer/ のローカルデプロイ出力) → src/constants.local.ts 生成。
  *
  * ローカル(非fork)anvil に全 protocol をデプロイした際の決定論アドレスを poc の
  * 定数へ橋渡しする。生成された LOCAL_DEPLOYMENT を constants.ts が ERIS_LOCAL_DEPLOY=1 の
  * ときだけ overlay する (fork 時は Arbitrum 既定を使う)。
  *
  * 使い方:
- *   DEPLOYMENTS_JSON=/path/to/eris-app-deployer/deployments/deployments.json \
+ *   DEPLOYMENTS_JSON=/path/to/deployments.json \
  *     npm run gen:local-constants
  *
- * 既定の DEPLOYMENTS_JSON は隣接 repo ../eris-app-deployer/deployments/deployments.json。
+ * 既定の DEPLOYMENTS_JSON は本 repo 同梱の deployer/deployments/deployments.json。
  *
  * ADR 0013: deployments.json に WBTC（tokens.WBTC + 各 venue の wbtcUsdc* / gmx WBTC market）が
  * あれば TOKENS.WBTC と MARKET_LEGS の WBTC leg を生成する。無ければ WETH のみ（後方互換）。
@@ -52,7 +52,7 @@ type GmxMarketList = NonNullable<
 function loadDeployments(): { path: string; data: Deployments } {
   const path =
     process.env.DEPLOYMENTS_JSON ??
-    resolve(ROOT, "..", "eris-app-deployer", "deployments", "deployments.json");
+    resolve(ROOT, "deployer", "deployments", "deployments.json");
   const data = JSON.parse(readFileSync(path, "utf8")) as Deployments;
   return { path, data };
 }

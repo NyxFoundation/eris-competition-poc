@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
 
-// ローカル(非fork)デプロイモードでは poc 側で anvil を起動しない。eris-app-deployer が
+// ローカル(非fork)デプロイモードでは poc 側で anvil を起動しない。同梱の deployer/ が
 // 全 protocol をデプロイした anvil をそのまま使う（その anvil を `npm run deploy` で起動し、
 // poc は ERIS_LOCAL_DEPLOY=1 で接続する）。
 if (process.env.ERIS_LOCAL_DEPLOY === "1") {
   console.error(
     "ERIS_LOCAL_DEPLOY=1: poc 側の anvil は不要です。\n" +
-      "  eris-app-deployer で `npm run deploy`（anvil 起動＋全 protocol デプロイ）を実行し、\n" +
+      "  同梱の deployer/ で `npm run deploy`（anvil 起動＋全 protocol デプロイ）を実行し、\n" +
       "  その anvil(127.0.0.1:8545)に対して poc を ERIS_LOCAL_DEPLOY=1 で起動してください。",
   );
   process.exit(1);

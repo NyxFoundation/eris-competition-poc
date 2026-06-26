@@ -1,0 +1,22 @@
+{
+  "name": "eris-aave-v3-deployer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "@aave/deploy-v3 の prebuilt artifact/deploy スクリプトを空の anvil へ流し込む最小 hardhat プロジェクト",
+  "scripts": {
+    "deploy": "hardhat deploy --network localhost"
+  },
+  "devDependencies": {
+    "@aave/core-v3": "^1.19.3",
+    "@aave/deploy-v3": "1.56.2",
+    "@aave/periphery-v3": "^2.5.2",
+    "@nomiclabs/hardhat-ethers": "^2.2.3",
+    "bluebird": "^3.7.2",
+    "chalk": "^4.1.2",
+    "dotenv": "^16.4.5",
+    "ethers": "^5.7.2",
+    "hardhat": "^2.17.4",
+    "hardhat-deploy": "^0.11.45",
+    "jsondiffpatch": "^0.4.1"
+  }
+}

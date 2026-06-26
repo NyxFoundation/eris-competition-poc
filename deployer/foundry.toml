@@ -1,0 +1,16 @@
+[profile.default]
+src = "contracts"
+out = "out"
+libs = ["lib"]
+solc = "0.8.20"
+optimizer = true
+optimizer_runs = 200
+evm_version = "paris"
+
+# foundry はプロジェクト全体の .sol を発見してコンパイルするため、外部管理の Solidity
+# (vendor/gmx-src は hardhat+via-ir 前提、node_modules は各プロトコルの artifact) を除外する。
+# ここでコンパイルするのは contracts/ の共有 mock と MockOracleProvider のみ。
+skip = ["vendor/**", "**/node_modules/**", "node_modules/**"]
+
+# 共有 mock トークン (WETH9 / MockERC20) のコンパイルにのみ Foundry を使う。
+# 各プロトコル本体のデプロイは src/ の TypeScript + viem 側で行う。

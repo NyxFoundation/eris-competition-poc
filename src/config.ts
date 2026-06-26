@@ -228,7 +228,7 @@ export function loadConfig(env = process.env): SimConfig {
     seed: intEnv(env.SEED, 1),
     runDirRoot: env.REPORT_DIR ?? "./runs",
     agentTimeoutMs: intEnv(env.AGENT_TIMEOUT_MS, 5000),
-    agentsConfigPath: env.AGENTS_CONFIG ?? "agents.all18-mixed.json",
+    agentsConfigPath: env.AGENTS_CONFIG ?? "config/example.yaml",
     initialEthWei: bigintEnv(env.INITIAL_ETH_WEI, initialEthWeiDefault),
     // Background orderflow is environment machinery, not a competitor. Give it
     // ample gas so long runs do not silently lose market flow as wallets run dry.
@@ -534,7 +534,7 @@ function bigintEnv(value: string | undefined, fallback: bigint): bigint {
 
 // ADR 0013: base シンボルの「金額 env」の単位サフィックス（decimals 由来）。
 // WETH(18)=WEI / WBTC(8)=SATS / それ以外=UNITS。新トークンは桁数で自動的に決まる。
-function unitSuffixFor(decimals: number): string {
+export function unitSuffixFor(decimals: number): string {
   if (decimals === 18) return "WEI";
   if (decimals === 8) return "SATS";
   return "UNITS";

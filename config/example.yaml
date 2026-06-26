@@ -1,0 +1,69 @@
+# config/example.yaml
+#
+# シミュレーションのユーザー設定の単一ソース。`config/local.yaml` にコピーして使う:
+#   cp config/example.yaml config/local.yaml
+#   npm run sim:realtime                              # 既定で config/local.yaml を読む
+#   npm run sim:realtime -- --config config/stress.yaml   # 別ファイルを指定
+#
+# キーはネスト（run / funding / limits / flow / stress + agents）。値は型付きで書ける（真偽値・数値・
+# 配列・オブジェクト）。未指定キーは既定値。一回限りの上書きは CLI フラグ（--seed / --blocks / --protocols 等）。
+#
+# 秘密情報はここに書かない（このファイルはコミットされうる）。RPC URL・秘密鍵・API キーは
+# `.env.local` に置く（ARB_RPC_URL / *_PRIVATE_KEY / ANTHROPIC_API_KEY / OLLAMA_API_KEY）。
+# ローカル Anvil の dev キーは未指定でも既定で使われる。
+
+run:
+  seed: 1
+  blocks: 24
+  seconds: 70
+  blockTimeSec: 2
+  protocols: [uniswap, balancer, curve]
+  economicGas: false
+  localDeploy: false
+  reportDir: ./runs
+
+funding:
+  wethWei: "0" # USDC-only 配布（初期の方向性エクスポージャを排除）
+  usdcUnits: "25000000000"
+  # base: { WBTC: "0" }   # 追加 base の初期在庫（既定 0）
+
+limits:
+  agentWethWei: "1000000000000000000"
+  agentUsdcUnits: "5000000000"
+  # agentBase: { WBTC: "0" }   # 追加 base の per-round 上限
+
+flow:
+  uninformedMaxWethWei: "1000000000000000000"
+  informedMaxWethWei: "2000000000000000000"
+  balancerMaxWethWei: "1000000000000000000"
+  curveMaxWethWei: "1000000000000000000"
+  crossVenueSpreadMaxWethWei: "0"
+  # マルチアセット(WBTC)を取引させるなら WBTC flow を有効化（価格乖離=裁定機会を作る）:
+  # baseMax: { WBTC: "50000000" }
+
+# stress（市場ストレスイベント。既定 off）:
+# stress:
+#   events:
+#     - { type: crash, magnitudeRange: [0.12, 0.16], windowFrac: [0.3, 0.7], rampBlocks: 3, holdBlocks: 6, decayBlocks: 8 }
+#   victimCount: 0
+
+# agents（ロスター。旧 agents.*.json の置き換え。inline で書く）
+# 注: account0 は deployer と重なるため、ローカルでは AGENT1 以降を使う。各 agent の env は
+# その agent プロセスへ渡す戦略パラメータ（sim 設定とは別物）。
+agents:
+  - id: noop
+    command: node
+    args: [--import, tsx, examples/agents/noop.ts]
+    wallet: AGENT1_PRIVATE_KEY
+    baseline: true
+    description: 何もしない (基準ライン)
+  - id: venue-arb
+    command: node
+    args: [--import, tsx, examples/agents/venue-arb.ts]
+    wallet: AGENT2_PRIVATE_KEY
+    description: WETH 専用 cross-venue 裁定
+  - id: multi-arb
+    command: node
+    args: [--import, tsx, examples/agents/multi-arb.ts]
+    wallet: AGENT3_PRIVATE_KEY
+    description: base 非依存 cross-venue 裁定（全 active base × 全 venue）
